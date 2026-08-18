@@ -103,6 +103,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGOutput.set_from_config(FGOutput::XeFG);
                 else if (lstrcmpiA(FGOutputString.value().c_str(), "dlssg") == 0)
                     FGOutput.set_from_config(FGOutput::DLSSG);
+                else if (lstrcmpiA(FGOutputString.value().c_str(), "reproj") == 0)
+                    FGOutput.set_from_config(FGOutput::Reproj);
             }
 
             const bool canUseNvngxReplacement =
@@ -175,6 +177,18 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGFPTHybridSpinTime.set_from_config(readInt("FSRFG", "FPTHybridSpinTime"));
             FGFPTAllowWaitForSingleObjectOnFence.set_from_config(readBool("FSRFG", "FPTWaitForSingleObjectOnFence"));
             FSRFGEnableWatermark.set_from_config(readBool("FSRFG", "EnableWatermark"));
+        }
+
+        // Async Reprojection
+        {
+            ReprojMode.set_from_config(readInt("Reproj", "Mode"));
+            ReprojStrength.set_from_config(readFloat("Reproj", "Strength"));
+            ReprojTimeStep.set_from_config(readFloat("Reproj", "TimeStep"));
+            ReprojInvertMV.set_from_config(readBool("Reproj", "InvertMV"));
+            ReprojUseJitterCancel.set_from_config(readBool("Reproj", "UseJitterCancel"));
+            ReprojCapAtHalfRefresh.set_from_config(readBool("Reproj", "CapAtHalfRefresh"));
+            ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
+            ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
         }
 
         // OptiFG
@@ -909,6 +923,8 @@ bool Config::SaveIni()
                 FGOutputString = "XeFG";
             else if (FGOutputHeld.value() == FGOutput::DLSSG)
                 FGOutputString = "DLSSG";
+            else if (FGOutputHeld.value() == FGOutput::Reproj)
+                FGOutputString = "Reproj";
         }
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
 
@@ -988,6 +1004,21 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGFPTAllowWaitForSingleObjectOnFence.value_for_config()).c_str());
         ini.SetValue("FSRFG", "EnableWatermark",
                      GetBoolValue(Instance()->FSRFGEnableWatermark.value_for_config()).c_str());
+    }
+
+    // Async Reprojection output
+    {
+        ini.SetValue("Reproj", "Mode", GetIntValue(Instance()->ReprojMode.value_for_config()).c_str());
+        ini.SetValue("Reproj", "Strength", GetFloatValue(Instance()->ReprojStrength.value_for_config()).c_str());
+        ini.SetValue("Reproj", "TimeStep", GetFloatValue(Instance()->ReprojTimeStep.value_for_config()).c_str());
+        ini.SetValue("Reproj", "InvertMV", GetBoolValue(Instance()->ReprojInvertMV.value_for_config()).c_str());
+        ini.SetValue("Reproj", "UseJitterCancel",
+                     GetBoolValue(Instance()->ReprojUseJitterCancel.value_for_config()).c_str());
+        ini.SetValue("Reproj", "CapAtHalfRefresh",
+                     GetBoolValue(Instance()->ReprojCapAtHalfRefresh.value_for_config()).c_str());
+        ini.SetValue("Reproj", "DebugView", GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
+        ini.SetValue("Reproj", "ForceBorderless",
+                     GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());
     }
 
     // XeFG output

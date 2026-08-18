@@ -608,6 +608,16 @@ class Config
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
 
+    // Async Reprojection (ASW-style, see AsyncReprojection.md)
+    CustomOptional<int> ReprojMode { 0 };                 // 0 = MV warp, 1 = depth-aware (future)
+    CustomOptional<float> ReprojStrength { 1.0f };        // blend of the warp result with the original frame
+    CustomOptional<float> ReprojTimeStep { 0.5f };        // warp fraction (0.5 = midpoint between real frames)
+    CustomOptional<bool> ReprojInvertMV { false };        // per-game MV sign convention
+    CustomOptional<bool> ReprojUseJitterCancel { true };  // subtract jitter from the sample position
+    CustomOptional<bool> ReprojCapAtHalfRefresh { true }; // half-rate cap via existing FrameLimit behavior
+    CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
+    CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
+
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033
     CustomOptional<uint32_t> NvngxFGDispatchFlags { 0x10000000 }; // IGNORE_UI_TEXTURE

@@ -5,6 +5,7 @@
 #include <framegen/ffx/FSRFG_Dx12.h>
 #include <framegen/xefg/XeFG_Dx12.h>
 #include <framegen/dlssg/DLSSG_Dx12.h>
+#include <framegen/reproj/AReproj_Dx12.h>
 
 #include <inputs/FG/FSR3_Dx12_FG.h>
 #include <inputs/FG/FfxApi_Dx12_FG.h>
@@ -123,6 +124,10 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
         {
             State::Instance().currentFG = new DLSSG_Dx12();
         }
+        else if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        {
+            State::Instance().currentFG = new AReproj_Dx12();
+        }
     }
 
     // Create FG swapchain
@@ -233,6 +238,10 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
         else if (State::Instance().activeFgOutput == FGOutput::DLSSG)
         {
             State::Instance().currentFG = new DLSSG_Dx12();
+        }
+        else if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        {
+            State::Instance().currentFG = new AReproj_Dx12();
         }
     }
 
@@ -1104,6 +1113,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
                            const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
     _lastPresentFlags = Flags;
+    _lastPresentSyncInterval = SyncInterval;
 
     auto& state = State::Instance();
     auto config = Config::Instance();
@@ -1244,7 +1254,13 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         state.fgPresentIsCalled = true;
 
     HRESULT result;
-    if (pPresentParameters == nullptr)
+    if (willPresent && state.activeFgOutput == FGOutput::Reproj && fgFeatureActive)
+    {
+        // AReproj_Dx12::Present() already presented the real frame
+        // (and will present the reprojected frame once frame gen lands)
+        result = S_OK;
+    }
+    else if (pPresentParameters == nullptr)
         result = o_FGSCPresent(This, SyncInterval, Flags);
     else
         result = o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);

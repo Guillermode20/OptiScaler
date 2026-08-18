@@ -1,0 +1,58 @@
+#pragma once
+#include "SysUtils.h"
+#include <framegen/IFGFeature_Dx12.h>
+
+/// Async reprojection (ASW-style) FG output.
+/// See AsyncReprojection.md for the full design.
+///
+/// M0 scaffold: owns a real DXGI swapchain (>= 3 buffers + ALLOW_TEARING) and
+/// presents the real frame only. Later milestones add the reprojected frame
+/// (copy -> present real -> wait half frame -> warp -> present fake).
+class AReproj_Dx12 : public virtual IFGFeature_Dx12
+{
+  private:
+    ID3D12Resource* _lastColor[BUFFER_COUNT] = {};
+    D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
+
+    UINT _bufferCount = 0;
+
+    void PresentFrame(UINT SyncInterval, UINT Flags);
+
+  protected:
+    void ReleaseObjects() override final;
+    void CreateObjects(ID3D12Device* InDevice) override final;
+
+  public:
+    // IFGFeature
+    const char* Name() override final;
+    feature_version Version() override final;
+    HWND Hwnd() override final;
+
+    bool Present() override final;
+    void Activate() override final;
+    void Deactivate() override final;
+    void DestroyFGContext() override final;
+    bool Shutdown() override final;
+
+    bool SetInterpolatedFrameCount(UINT interpolatedFrameCount) override final;
+
+    // IFGFeature_Dx12
+    void* FrameGenerationContext() override final;
+    void* SwapchainContext() override final;
+
+    bool CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
+                         IDXGISwapChain** swapChain, bool readyToRelease) override final;
+    bool CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
+                          DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+                          IDXGISwapChain1** swapChain, bool readyToRelease) override final;
+    bool ReleaseSwapchain(HWND hwnd) override final;
+
+    void CreateContext(ID3D12Device* device, FG_Constants& fgConstants) override final;
+    void EvaluateState(ID3D12Device* device, FG_Constants& fgConstants) override final;
+
+    bool SetResource(Dx12Resource* inputResource) override final;
+    void SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) override final;
+
+    AReproj_Dx12() : IFGFeature_Dx12(), IFGFeature() {}
+    ~AReproj_Dx12() override;
+};

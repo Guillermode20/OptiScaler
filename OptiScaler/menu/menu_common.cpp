@@ -3040,6 +3040,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         { FGOutput::FSRFG, "FSR FG", "FSR3/4-FG, RDNA4 autoupgrades to FSR4-FG\n\nFSR4-FG sometimes better/worse than XeFG" },
         { FGOutput::DLSSG, "DLSSG", "DLSSG output\ncan be used in conjuction with Nukem's for example" },
         { FGOutput::XeFG, "XeFG", "XeFG - heaviest, but best universal FG\n\nXeFG 3 overall deals best with HUD\n\nEnable UI Composition if HUD ghosting" },
+        { FGOutput::Reproj, "Async Reproj", "Reprojects the previous frame at half rate (ASW-style)\n\n"
+                                            "Cheapest FG alternative, works on any DX12 GPU\n"
+                                            "Expect smearing at disocclusions\n"
+                                            "Set FramerateLimit = refresh rate, reproj halves it" },
     };
 
     // clang-format on
@@ -3074,6 +3078,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
     outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+
+    // Async Reproj output requirements
+    auto constexpr reprojOutputIndex = (uint32_t) FGOutput::Reproj;
+    outputOptions[reprojOutputIndex].set_disabled(state.swapchainApi != API::DX12, "Unsupported API");
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&

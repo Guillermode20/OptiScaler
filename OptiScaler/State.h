@@ -46,6 +46,7 @@ enum class FGOutput : uint32_t
     FSRFG,
     DLSSG,
     XeFG,
+    Reproj, // Async reprojection (ASW-style), see AsyncReprojection.md
 };
 
 enum class FGNvngxReplacement : uint32_t
