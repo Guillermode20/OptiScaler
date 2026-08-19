@@ -76,6 +76,38 @@ bool AReproj_Dx12::SubmitSCCommandList(int fIndex)
     _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
     _scCommandListResetted[fIndex] = false;
 
+    // Signal so the next reuse of this slot waits for the warp to finish before resetting its allocator
+    if (_scFence != nullptr)
+        _scFence->Signal(_scAllocatorFenceValues[fIndex]);
+
+    return true;
+}
+
+bool AReproj_Dx12::WaitForSCAllocator(int fIndex)
+{
+    if (_scFence == nullptr || _scFenceEvent == nullptr)
+        return true;
+
+    const auto fenceValue = _scAllocatorFenceValues[fIndex];
+    if (fenceValue == 0)
+        return true;
+
+    if (_scFence->GetCompletedValue() >= fenceValue)
+        return true;
+
+    if (FAILED(_scFence->SetEventOnCompletion(fenceValue, _scFenceEvent)))
+    {
+        LOG_ERROR("SC allocator fence SetEventOnCompletion failed. slot {}, fence {}", fIndex, fenceValue);
+        return false;
+    }
+
+    if (WaitForSingleObject(_scFenceEvent, 5000) != WAIT_OBJECT_0)
+    {
+        LOG_ERROR("SC allocator fence wait failed. slot {}, fence {}, completed {}", fIndex, fenceValue,
+                  _scFence->GetCompletedValue());
+        return false;
+    }
+
     return true;
 }
 
@@ -229,12 +261,22 @@ bool AReproj_Dx12::DispatchWarp(int fIndex)
         return false;
     }
 
+    // Ensure the previous warp on this slot has finished before reusing its allocator
+    if (!WaitForSCAllocator(fIndex))
+    {
+        bb->Release();
+        return false;
+    }
+
     auto cmdList = GetSCCommandList(fIndex);
     if (cmdList == nullptr)
     {
         bb->Release();
         return false;
     }
+
+    // Assign the fence value SubmitSCCommandList will signal for this slot
+    _scAllocatorFenceValues[fIndex] = ++_scFenceValue;
 
     RP_Constants cb {};
     cb.displayWidth = (uint32_t) state.currentSwapchainDesc.BufferDesc.Width;
@@ -377,8 +419,9 @@ bool AReproj_Dx12::Present()
     // 5. Present the real frame
     auto realResult = PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
 
-    // 6. If the real present failed (occluded/device removed), don't spin or fake
-    if (realResult != S_OK && realResult != DXGI_STATUS_OCCLUDED)
+    // 6. Only proceed to the fake frame if the real present actually displayed (S_OK).
+    //    Occluded/device-removed/errors all mean we should not spin or fake.
+    if (realResult != S_OK)
         return true;
 
     // 7. Pace: wait ~half a frame so the fake frame lands between real frames

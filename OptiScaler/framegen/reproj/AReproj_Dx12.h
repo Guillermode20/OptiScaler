@@ -19,12 +19,14 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool _forceBorderless = false;
 
     UINT _bufferCount = 0;
+    UINT64 _scFenceValue = 0;                       // monotonic SC fence value (fence outlives context recreate)
 
     bool CopyLastFrame(int fIndex);                 // backbuffer -> _lastColor[fIndex], submitted before present
     bool DispatchWarp(int fIndex);                  // _lastColor[fIndex] + MV (+depth) -> current backbuffer
     void WaitHalfFrame();                           // pacing (FrameLimit primitives)
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags); // skip-flag wrapped present
     bool SubmitSCCommandList(int fIndex);           // close + execute the SC command list
+    bool WaitForSCAllocator(int fIndex);            // wait for the previous warp on this slot to finish
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
     bool IsCameraAllZero(int fIndex);
 
