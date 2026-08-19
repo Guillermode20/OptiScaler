@@ -328,7 +328,7 @@ class Config
     // Menu
     CustomOptional<float, NoDefault> MenuScale;
     CustomOptional<bool> OverlayMenu { true };
-    CustomOptional<int> ShortcutKey { VK_INSERT };
+    CustomOptional<int> ShortcutKey { VK_HOME };
     CustomOptional<bool> ExtendedLimits { false };
     CustomOptional<bool> ShowFps { false };
     /// 0 Top Left, 1 Top Right, 2 Bottom Left, 3 Bottom Right
