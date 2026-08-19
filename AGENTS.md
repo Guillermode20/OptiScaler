@@ -67,7 +67,7 @@ Register new files in `OptiScaler/OptiScaler.vcxproj` and `OptiScaler/OptiScaler
 
 ## Async Reprojection (in-progress feature in this repo)
 
-- Design doc: `AsyncReprojection.md`. Milestones **M0–M4** are implemented; **M5** (true async thread + fakenvapi) is a stretch.
+- Design docs: `AsyncReprojection.md` covers the original implementation; `AsyncReprojection_Continuation_Plan.md` covers the true asynchronous timewarp roadmap. Milestones **M0–M4** are implemented; **M5** (true async thread + fakenvapi) is a stretch.
 - Code: `OptiScaler/framegen/reproj/AReproj_Dx12.{h,cpp}` and `OptiScaler/shaders/reprojection/RP_*`.
 - Enabled by `FGOutput::Reproj` (`OptiScaler/State.h`).
 
