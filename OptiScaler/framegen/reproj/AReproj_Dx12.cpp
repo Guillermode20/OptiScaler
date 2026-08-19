@@ -2,6 +2,7 @@
 #include "AReproj_Dx12.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include <State.h>
@@ -76,9 +77,19 @@ bool AReproj_Dx12::SubmitSCCommandList(int fIndex)
     _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
     _scCommandListResetted[fIndex] = false;
 
-    // Signal so the next reuse of this slot waits for the warp to finish before resetting its allocator
+    // Queue the signal after the command list. ID3D12Fence::Signal only changes the
+    // CPU-side completed value and would let us reset this allocator while the GPU is
+    // still reading it.
     if (_scFence != nullptr)
-        _scFence->Signal(_scAllocatorFenceValues[fIndex]);
+    {
+        const auto result = _gameCommandQueue->Signal(_scFence, _scAllocatorFenceValues[fIndex]);
+        if (FAILED(result))
+        {
+            LOG_ERROR("Reproj: SC fence signal failed. slot {}, fence {}, result {:X}", fIndex,
+                      _scAllocatorFenceValues[fIndex], (UINT) result);
+            return false;
+        }
+    }
 
     return true;
 }
@@ -232,7 +243,7 @@ bool AReproj_Dx12::IsCameraAllZero(int fIndex)
     return true;
 }
 
-bool AReproj_Dx12::DispatchWarp(int fIndex)
+bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
 {
     if (_warp == nullptr || !_warp->IsInit())
         return false;
@@ -283,7 +294,7 @@ bool AReproj_Dx12::DispatchWarp(int fIndex)
     cb.displayHeight = (uint32_t) state.currentSwapchainDesc.BufferDesc.Height;
     cb.mvWidth = (uint32_t) velocity->width;
     cb.mvHeight = (uint32_t) velocity->height;
-    cb.timeStep = config->ReprojTimeStep.value_or_default();
+    cb.timeStep = timeStep;
     cb.strength = config->ReprojStrength.value_or_default();
     cb.mvScaleX = _mvScaleX[fIndex];
     cb.mvScaleY = _mvScaleY[fIndex];
@@ -313,10 +324,12 @@ bool AReproj_Dx12::DispatchWarp(int fIndex)
     std::memcpy(cb.prevCameraForward, _cameraForward[prevIndex], 3 * sizeof(float));
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
-    bool hasDepth = depth ? true : false;
-    bool hasCamera = _cameraVFov[fIndex] > 0.0f && _cameraAspectRatio[fIndex] > 0.0f &&
-                     !IsCameraAllZero(fIndex) && !IsCameraAllZero(prevIndex);
+    bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
+    bool hasCamera = _cameraVFov[fIndex] > 0.0f && _cameraAspectRatio[fIndex] > 0.0f && !IsCameraAllZero(fIndex) &&
+                     !IsCameraAllZero(prevIndex);
     cb.mode = (hasDepth && hasCamera) ? cb.mode : 0;
+    if (config->ReprojRotationOnly.value_or_default() && cb.mode != 0)
+        cb.mode = 2;
 
     bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], velocity->GetResource(),
                               velocity->state, hasDepth ? depth->GetResource() : nullptr,
@@ -349,16 +362,128 @@ bool AReproj_Dx12::DispatchWarp(int fIndex)
     return true;
 }
 
-void AReproj_Dx12::WaitHalfFrame()
+double AReproj_Dx12::TargetRefreshHz()
 {
-    double target = State::Instance().lastFGFrameTime * Config::Instance()->ReprojTimeStep.value_or_default();
-    target = std::clamp(target, 0.0, 20.0); // ms
+    auto config = Config::Instance();
+    auto target = static_cast<double>(config->ReprojTargetRefresh.value_or_default());
+    if (target <= 1.0)
+        target = static_cast<double>(config->FramerateLimit.value_or_default());
+    if (target > 1.0)
+        return std::clamp(target, 0.0, 1000.0);
 
-    if (target <= 0.1)
+    const auto now = Util::MillisecondsNow();
+    if ((now - _lastRefreshQueryMs) >= 1000.0 || _cachedRefreshHz <= 1.0)
+    {
+        _cachedRefreshHz = _hwnd != NULL ? static_cast<double>(Util::GetActiveRefreshRate(_hwnd)) : 0.0;
+        _lastRefreshQueryMs = now;
+    }
+
+    return std::clamp(_cachedRefreshHz, 0.0, 1000.0);
+}
+
+uint32_t AReproj_Dx12::WarpCountForFrame(double refreshHz) const
+{
+    if (refreshHz <= 1.0)
+        return 1;
+
+    const auto realFrameMs = State::Instance().lastFGFrameTime;
+    const auto refreshMs = 1000.0 / refreshHz;
+    const auto requested = realFrameMs > refreshMs ? static_cast<int>(std::ceil(realFrameMs / refreshMs)) - 1 : 0;
+    const auto maximum = std::clamp(Config::Instance()->ReprojMaxWarpFrames.value_or_default(), 1, 8);
+    return static_cast<uint32_t>(std::clamp(requested, 0, maximum));
+}
+
+void AReproj_Dx12::WaitUntil(double deadlineMs) const
+{
+    const auto remaining = deadlineMs - Util::MillisecondsNow();
+    if (remaining > 0.1)
+        FrameLimit::sleepForMs(remaining);
+}
+
+bool AReproj_Dx12::DrainGpuWork()
+{
+    for (int i = 0; i < BUFFER_COUNT; ++i)
+    {
+        if (_uiCommandListResetted[i] && !SubmitUICommandList(i))
+            return false;
+        if (_scCommandListResetted[i] && !SubmitSCCommandList(i))
+            return false;
+    }
+
+    const auto waitForFence = [](ID3D12Fence* fence, HANDLE event, UINT64 value, const char* name, int slot)
+    {
+        if (fence == nullptr || event == nullptr || value == 0 || fence->GetCompletedValue() >= value)
+            return true;
+
+        if (FAILED(fence->SetEventOnCompletion(value, event)) || WaitForSingleObject(event, 5000) != WAIT_OBJECT_0)
+        {
+            LOG_ERROR("Reproj: timed out draining {} fence. slot {}, fence {}, completed {}", name, slot, value,
+                      fence->GetCompletedValue());
+            return false;
+        }
+        return true;
+    };
+
+    for (int i = 0; i < BUFFER_COUNT; ++i)
+    {
+        if (!waitForFence(_uiFence, _uiFenceEvent, _uiAllocatorFenceValues[i], "UI", i) ||
+            !waitForFence(_scFence, _scFenceEvent, _scAllocatorFenceValues[i], "SC", i))
+            return false;
+    }
+
+    return true;
+}
+
+void AReproj_Dx12::RecordRealFrame()
+{
+    ++_metricsRealFrames;
+    LogMetricsIfDue();
+}
+
+void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs)
+{
+    _metricsWarpFrames += warpPresented;
+    _metricsDroppedWarps += dropped;
+    if (warpPresented)
+    {
+        _metricsPoseAgeTotalMs += poseAgeMs;
+        ++_metricsPoseSamples;
+    }
+
+    LogMetricsIfDue();
+}
+
+void AReproj_Dx12::LogMetricsIfDue()
+{
+    const auto now = Util::MillisecondsNow();
+    if (_metricsTimestamp == 0.0)
+    {
+        _metricsTimestamp = now;
+        return;
+    }
+
+    const auto elapsed = now - _metricsTimestamp;
+    if (elapsed < 1000.0)
         return;
 
-    // busy-wait then timer-sleep, exactly the combined_sleep pattern in FrameLimit.cpp
-    FrameLimit::sleepForMs(target);
+    const auto scale = 1000.0 / elapsed;
+    const auto poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
+    _runtimeMetrics.realFps = static_cast<float>(_metricsRealFrames * scale);
+    _runtimeMetrics.warpFps = static_cast<float>(_metricsWarpFrames * scale);
+    _runtimeMetrics.poseAgeMs = static_cast<float>(poseAge);
+    _runtimeMetrics.targetRefreshHz = static_cast<float>(TargetRefreshHz());
+    _runtimeMetrics.warpsPerReal = _metricsMaxWarpsPerReal;
+    _runtimeMetrics.droppedWarps = _metricsDroppedWarps;
+    LOG_INFO(
+        "Reproj: real={:.1f} FPS, warp={:.1f} FPS, dropped={}, maxWarps={}, poseAge={:.1f} ms, queue=0 (safe sync)",
+        _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsDroppedWarps, _metricsMaxWarpsPerReal, poseAge);
+    _metricsTimestamp = now;
+    _metricsRealFrames = 0;
+    _metricsWarpFrames = 0;
+    _metricsDroppedWarps = 0;
+    _metricsMaxWarpsPerReal = 0;
+    _metricsPoseAgeTotalMs = 0.0;
+    _metricsPoseSamples = 0;
 }
 
 bool AReproj_Dx12::Present()
@@ -372,7 +497,12 @@ bool AReproj_Dx12::Present()
         return true;
     }
 
-    auto fIndex = GetIndex();
+    // Match the input paths that publish resources ahead of the game present
+    // (Streamline/FSR3/FFX API) as well as the current upscaler slot.
+    auto fIndex = GetIndexWillBeDispatched();
+    RecordRealFrame();
+    _runtimeMetrics.depthReady = Config::Instance()->ReprojUseDepth.value_or_default() &&
+                                 _resourceReady[fIndex].contains(FG_ResourceType::Depth);
 
     // 1. Flush any pending deferred command lists (resource copies from SetResource etc.)
     if (_uiCommandListResetted[fIndex] && !SubmitUICommandList((UINT) fIndex))
@@ -388,6 +518,7 @@ bool AReproj_Dx12::Present()
         Deactivate();
         _waitingNewFrameData = true;
         PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        RecordWarpFrame(false, true, 0.0f);
         return false;
     }
 
@@ -398,6 +529,7 @@ bool AReproj_Dx12::Present()
     {
         LOG_DEBUG("Reproj: reset frame {}, skipping fake frame", _frameCount);
         PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        RecordWarpFrame(false, true, 0.0f);
         return true;
     }
 
@@ -405,6 +537,7 @@ bool AReproj_Dx12::Present()
     {
         LOG_WARN("Reproj: no motion vectors for frame {}, skipping fake frame", _frameCount);
         PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        RecordWarpFrame(false, true, 0.0f);
         return true;
     }
 
@@ -413,6 +546,7 @@ bool AReproj_Dx12::Present()
     {
         LOG_WARN("Reproj: failed to copy last frame, skipping fake frame");
         PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        RecordWarpFrame(false, true, 0.0f);
         return true;
     }
 
@@ -422,29 +556,52 @@ bool AReproj_Dx12::Present()
     // 6. Only proceed to the fake frame if the real present actually displayed (S_OK).
     //    Occluded/device-removed/errors all mean we should not spin or fake.
     if (realResult != S_OK)
-        return true;
-
-    // 7. Pace: wait ~half a frame so the fake frame lands between real frames
-    WaitHalfFrame();
-
-    // 8. Warp the last real frame into the current backbuffer
-    if (!DispatchWarp(fIndex))
     {
-        LOG_WARN("Reproj: failed to dispatch warp, skipping fake frame");
+        RecordWarpFrame(false, true, 0.0f);
         return true;
     }
 
-    // 9. Present the fake frame (tear; fall back to vsync when tearing is unavailable)
-    UINT fakeFlags = DXGI_PRESENT_ALLOW_TEARING;
-    UINT fakeInterval = 0;
+    // 7. This is deliberately synchronous. DXGI gives the next buffer back to the
+    // game immediately after the real present, so a worker cannot own it safely.
+    // Multiple warps are therefore bounded and emitted before returning to the game.
+    const auto refreshHz = TargetRefreshHz();
+    const auto warpCount = WarpCountForFrame(refreshHz);
+    _metricsMaxWarpsPerReal = std::max(_metricsMaxWarpsPerReal, warpCount);
+    const auto sourceTimestamp = Util::MillisecondsNow();
+    const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : State::Instance().lastFGFrameTime * 0.5;
+    const auto realPeriodMs = std::max(State::Instance().lastFGFrameTime, refreshPeriodMs * 2.0);
 
-    if (!State::Instance().SCAllowTearing || State::Instance().realExclusiveFullscreen)
+    for (uint32_t warp = 1; warp <= warpCount; ++warp)
     {
-        fakeFlags = 0;
-        fakeInterval = 1;
-    }
+        WaitUntil(sourceTimestamp + refreshPeriodMs * warp);
 
-    PresentFrame(fakeInterval, fakeFlags);
+        // A warp is placed at its display deadline relative to the real frame. This
+        // gives 1/3 and 2/3 exposure for a 40 -> 120 FPS cadence instead of repeatedly
+        // using the old fixed midpoint.
+        const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
+        const auto timeStep =
+            std::clamp(static_cast<float>((refreshPeriodMs * warp) / realPeriodMs) * configuredStep * 2.0f, 0.0f, 1.0f);
+        if (!DispatchWarp(fIndex, timeStep))
+        {
+            LOG_WARN("Reproj: failed to dispatch warp {}/{}, dropping it", warp, warpCount);
+            RecordWarpFrame(false, true, 0.0f);
+            continue;
+        }
+
+        UINT fakeFlags = DXGI_PRESENT_ALLOW_TEARING;
+        UINT fakeInterval = 0;
+        if (!State::Instance().SCAllowTearing || State::Instance().realExclusiveFullscreen)
+        {
+            fakeFlags = 0;
+            fakeInterval = 1;
+        }
+
+        const auto fakeResult = PresentFrame(fakeInterval, fakeFlags);
+        const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - sourceTimestamp));
+        RecordWarpFrame(fakeResult == S_OK, fakeResult != S_OK, poseAge);
+        if (fakeResult != S_OK)
+            break;
+    }
 
     return true;
 }
@@ -456,6 +613,16 @@ void AReproj_Dx12::Activate()
 
     _isActive = true;
     _lastDispatchedFrame = 0;
+    _metricsTimestamp = 0.0;
+    _metricsRealFrames = 0;
+    _metricsWarpFrames = 0;
+    _metricsDroppedWarps = 0;
+    _metricsMaxWarpsPerReal = 0;
+    _metricsPoseAgeTotalMs = 0.0;
+    _metricsPoseSamples = 0;
+    _runtimeMetrics = {};
+    _cachedRefreshHz = 0.0;
+    _lastRefreshQueryMs = 0.0;
     LOG_INFO("Reproj: activated");
 }
 
@@ -927,6 +1094,12 @@ bool AReproj_Dx12::SetResource(Dx12Resource* inputResource)
 
 void AReproj_Dx12::ReleaseObjects()
 {
+    // A resize, scene reset, or shutdown may arrive immediately after a warp
+    // submission. Command allocators, copied color, and descriptor-backed output
+    // resources remain in use until their queue fence completes.
+    if (!DrainGpuWork())
+        LOG_WARN("Reproj: releasing objects after an incomplete GPU drain");
+
     _warp.reset();
 
     for (size_t i = 0; i < BUFFER_COUNT; i++)
@@ -948,6 +1121,22 @@ void AReproj_Dx12::ReleaseObjects()
         _uiCommandListResetted[i] = false;
         _uiAllocatorFenceValues[i] = 0;
     }
+
+    SAFE_RELEASE(_uiFence);
+    SAFE_RELEASE(_scFence);
+    if (_uiFenceEvent != nullptr)
+    {
+        CloseHandle(_uiFenceEvent);
+        _uiFenceEvent = nullptr;
+    }
+    if (_scFenceEvent != nullptr)
+    {
+        CloseHandle(_scFenceEvent);
+        _scFenceEvent = nullptr;
+    }
+
+    _uiFenceValue = 0;
+    _scFenceValue = 0;
 }
 
 void AReproj_Dx12::CreateObjects(ID3D12Device* InDevice)

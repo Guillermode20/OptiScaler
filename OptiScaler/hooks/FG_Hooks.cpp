@@ -1222,6 +1222,26 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         }
     }
 
+    // Reprojection presents inside fg->Present(), so apply the requested mode before
+    // handing it the game's present arguments rather than only before the trailing present.
+    if (willPresent && config->ForceVsync.has_value())
+    {
+        if (!config->ForceVsync.value())
+        {
+            SyncInterval = 0;
+            if (state.SCAllowTearing && !state.realExclusiveFullscreen)
+                Flags |= DXGI_PRESENT_ALLOW_TEARING;
+        }
+        else
+        {
+            SyncInterval = std::max(1u, config->VsyncInterval.value_or_default());
+            Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
+        }
+
+        _lastPresentFlags = Flags;
+        _lastPresentSyncInterval = SyncInterval;
+    }
+
     if (willPresent && fgFeatureActive)
     {
         if (state.activeFgInput == FGInput::FSRFG)
@@ -1240,36 +1260,6 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     {
         ResTrack_Dx12::ClearPossibleHudless();
         Hudfix_Dx12::PresentStart();
-    }
-
-    if (willPresent && config->ForceVsync.has_value())
-    {
-        LOG_DEBUG("ForceVsync: {}, VsyncInterval: {}, SCAllowTearing: {}, realExclusiveFullscreen: {}",
-                  config->ForceVsync.value(), config->VsyncInterval.value_or_default(), state.SCAllowTearing,
-                  state.realExclusiveFullscreen);
-
-        if (!config->ForceVsync.value())
-        {
-            SyncInterval = 0;
-
-            if (state.SCAllowTearing && !state.realExclusiveFullscreen)
-            {
-                LOG_DEBUG("Adding DXGI_PRESENT_ALLOW_TEARING");
-                Flags |= DXGI_PRESENT_ALLOW_TEARING;
-            }
-        }
-        else
-        {
-            SyncInterval = config->VsyncInterval.value_or_default();
-
-            if (SyncInterval < 1)
-                SyncInterval = 1;
-
-            LOG_DEBUG("Removing DXGI_PRESENT_ALLOW_TEARING");
-            Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
-        }
-
-        LOG_DEBUG("Final SyncInterval: {}", SyncInterval);
     }
 
     // Used at wrapped_swapchain LocalPresent to determine is frame is interpolated or not
@@ -1317,7 +1307,8 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     // emitted by AReproj_Dx12::Present().
     if (willPresent && state.activeFgOutput == FGOutput::Reproj)
     {
-        FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
+        const bool reprojActive = fg != nullptr && fg->IsActive() && !fg->IsPaused();
+        FrameLimit::sleep(reprojActive && config->ReprojCapAtHalfRefresh.value_or_default());
     }
     else if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
              !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())

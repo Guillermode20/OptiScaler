@@ -13,6 +13,7 @@
 #include <framegen/nvngx/Nvngx_FG.h>
 
 #include <nvapi/fakenvapi.h>
+#include <framegen/reproj/AReproj_Dx12.h>
 #include <hooks/Reflex_Hooks.h>
 
 #include <version_check.h>
@@ -3794,12 +3795,13 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Enable async reprojection\n"
                        "Game runs at half the set FramerateLimit, so set it to your refresh rate");
 
-        static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware" };
+        static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware", "Camera-only timewarp" };
         int reprojMode = config->ReprojMode.value_or_default();
         if (ImGui::Combo("Mode##reproj", &reprojMode, reprojModes, _countof(reprojModes)))
             config->ReprojMode = reprojMode;
         ShowHelpMarker("MV warp: cheapest, HUD-safe\n"
                        "Depth-aware: better parallax, needs depth + camera data\n"
+                       "Camera-only: rotation-first depth warp; object motion is not used\n"
                        "Falls back to MV warp when depth or camera data is missing");
 
         ImGui::PushItemWidth(135.0f * menuResScale);
@@ -3812,13 +3814,33 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::SliderFloat("Time step##reproj", &reprojTimeStep, 0.0f, 1.0f, "%.2f"))
             config->ReprojTimeStep = reprojTimeStep;
         ShowHelpMarker("Warp fraction (0.5 = midpoint between real frames)\n"
-                       "Also paces the fake frame: 0.5 lands it halfway between real frames");
+                       "Scales the adaptive display-deadline warp positions");
+
+        int maxWarpFrames = config->ReprojMaxWarpFrames.value_or_default();
+        if (ImGui::SliderInt("Max warp frames##reproj", &maxWarpFrames, 1, 8))
+            config->ReprojMaxWarpFrames = maxWarpFrames;
+        ShowHelpMarker("Bounded number of extra warp presents per real frame. They are synchronous until a compositor "
+                       "backend exists, so higher values can reduce game-thread throughput.");
+
+        float targetRefresh = config->ReprojTargetRefresh.value_or_default();
+        if (ImGui::InputFloat("Target refresh##reproj", &targetRefresh, 1.0f, 10.0f, "%.0f Hz"))
+            config->ReprojTargetRefresh = std::max(0.0f, targetRefresh);
+        ShowHelpMarker("0 = FramerateLimit, then the active monitor refresh rate");
         ImGui::PopItemWidth();
 
         bool reprojInvertMV = config->ReprojInvertMV.value_or_default();
         if (ImGui::Checkbox("Invert motion vectors##reproj", &reprojInvertMV))
             config->ReprojInvertMV = reprojInvertMV;
         ShowHelpMarker("Flip the MV sign convention\nPer-game setting, enable if the warp smears the wrong way");
+
+        bool reprojUseDepth = config->ReprojUseDepth.value_or_default();
+        if (ImGui::Checkbox("Use depth reprojection##reproj", &reprojUseDepth))
+            config->ReprojUseDepth = reprojUseDepth;
+
+        bool reprojRotationOnly = config->ReprojRotationOnly.value_or_default();
+        if (ImGui::Checkbox("Rotation-only##reproj", &reprojRotationOnly))
+            config->ReprojRotationOnly = reprojRotationOnly;
+        ShowHelpMarker("Keep camera position fixed in depth-aware modes to avoid translation disocclusions");
 
         bool reprojDebugView = config->ReprojDebugView.value_or_default();
         if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))
@@ -3830,6 +3852,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojForceBorderless = reprojForceBorderless;
         ShowHelpMarker("Force borderless windowed mode so the fake frame can tear\n"
                        "Needed for exclusive-fullscreen games");
+
+        if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
+        {
+            const auto metrics = reproj->GetRuntimeMetrics();
+            ImGui::TextDisabled("Real %.1f FPS | warp %.1f FPS | target %.0f Hz | warps %u | dropped %u",
+                                metrics.realFps, metrics.warpFps, metrics.targetRefreshHz, metrics.warpsPerReal,
+                                metrics.droppedWarps);
+            ImGui::TextDisabled("Pose age %.1f ms | queue 0 (safe synchronous presenter)%s", metrics.poseAgeMs,
+                                metrics.depthReady ? " | depth ready" : "");
+        }
     }
 
     // XeFG controls

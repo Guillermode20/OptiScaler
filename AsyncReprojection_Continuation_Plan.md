@@ -6,10 +6,25 @@ This document defines the next stages of OptiScaler's DX12 async reprojection wo
 It starts from the current working implementation and describes the path toward
 late-latched, asynchronous camera reprojection similar to the ComradeStinger demo.
 
-The current implementation is a synchronous one-fake-frame-per-real-frame system.
+The current implementation is a synchronous, bounded warp-per-real-frame system.
 The target implementation separates expensive scene rendering from presentation so
 that the latest completed frame can be warped and presented multiple times per
 real render frame.
+
+## Implementation status
+
+M0–M4 are implemented. The safe synchronous presenter now has GPU-queue fence
+retirement on allocator reuse and teardown, rate-limited real/warp/drop/pose-age
+metrics, bounded adaptive warp scheduling, and fakenvapi FG reporting. The
+depth-aware shader also has conservative depth-edge, motion-disagreement, and
+screen-edge confidence tests, plus a rotation-only camera mode.
+
+M5 is intentionally not implemented in this swapchain backend. After a real DXGI
+present, the next backbuffer becomes the game's render target; a worker cannot
+safely write and present it without explicit reservation. A true async worker
+therefore requires a compositor or another backbuffer-ownership mechanism, not a
+fence/timer thread. The live UI labels queue depth as `0 (safe synchronous
+presenter)` so it never misrepresents this limitation.
 
 ## Current baseline
 
@@ -20,9 +35,8 @@ Game renders frame N
     -> game calls Present
     -> OptiScaler copies the backbuffer
     -> OptiScaler presents the real frame
-    -> waits for a fraction of the frame interval
-    -> dispatches the reprojection shader
-    -> presents one warped frame
+    -> waits until each bounded display deadline
+    -> dispatches and presents zero or more warped frames
 ```
 
 The current implementation:
@@ -33,7 +47,8 @@ The current implementation:
 - Uses the active upscaler's motion vectors and depth.
 - Works with the DLSS/XeSS input path replaced by the FSR2 backend.
 - Owns a replacement swapchain with at least three buffers.
-- Uses one real frame plus one warped frame per game present.
+- Uses one real frame plus zero to `ReprojMaxWarpFrames` warped frames per game
+  present; default is one.
 - Uses a synchronous wait in the present path.
 - Uses motion-vector warp as the reliable baseline.
 - Has an experimental depth-aware mode.
@@ -181,10 +196,10 @@ Test each source separately:
 4. FSR3/FFX input path.
 5. Streamline resources, if explicitly supported.
 
-The current known limitation is that `AReproj_Dx12::Present()` uses the regular
-`GetIndex()` path while some other input paths use
-`GetIndexWillBeDispatched()`. These paths must be verified before being treated as
-supported.
+`AReproj_Dx12::Present()` selects `GetIndexWillBeDispatched()`, matching the
+Streamline/FSR3/FFX input paths while still selecting the current slot for the
+upscaler path. These paths still need end-to-end validation before being treated
+as supported.
 
 ### 1.5 Improve diagnostic logging
 
@@ -202,11 +217,13 @@ rate-limited events for:
 
 Avoid logging every successful dispatch at error or info level.
 
-Suggested diagnostic summary once per second:
+Implemented diagnostic summary once per second:
 
 ```text
-Reproj: real=59.8 FPS, warp=119.6 FPS, dropped=0, poseAge=0.4 ms, queue=1
+Reproj: real=59.8 FPS, warp=59.8 FPS, dropped=0
 ```
+
+Pose age and queue depth require the published-frame worker.
 
 ## Phase 2: Improve warp quality
 
@@ -589,12 +606,10 @@ Suggested options:
 ReprojMode=0
 ReprojTimeStep=0.5
 ReprojStrength=1.0
-ReprojMaxWarpFrames=3
-ReprojLateCamera=true
+ReprojMaxWarpFrames=1
 ReprojRotationOnly=false
 ReprojUseDepth=true
-ReprojUseHudless=true
-ReprojTargetRefresh=auto
+ReprojTargetRefresh=0
 ReprojDebugView=false
 ```
 
@@ -606,7 +621,7 @@ UI should expose:
 - Number of warps per real frame.
 - Dropped warp count.
 - Pose age.
-- Pose source.
+- Pose age (source-pose age in the safe synchronous presenter).
 - Resource readiness.
 - Whether late camera data is available.
 
@@ -618,7 +633,9 @@ as synthesized camera reprojections and show their actual cadence.
 Once the asynchronous path is stable:
 
 1. Mark real frames separately from warp presentations.
-2. Report the correct frame type to fakenvapi.
+2. Report the correct frame type to fakenvapi. Reproj is included in
+   `reportFGPresent`; each internal fake present is identified through the normal
+   present counter. Worker-side reporting belongs to the future compositor path.
 3. Avoid reporting every warp as a new game-rendered frame.
 4. Associate latency markers with the real render frame.
 5. Ensure Reflex sleeps do not stall the presentation thread.

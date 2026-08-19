@@ -187,6 +187,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojInvertMV.set_from_config(readBool("Reproj", "InvertMV"));
             ReprojUseJitterCancel.set_from_config(readBool("Reproj", "UseJitterCancel"));
             ReprojCapAtHalfRefresh.set_from_config(readBool("Reproj", "CapAtHalfRefresh"));
+            ReprojMaxWarpFrames.set_from_config(readInt("Reproj", "MaxWarpFrames"));
+            ReprojTargetRefresh.set_from_config(readFloat("Reproj", "TargetRefresh"));
+            ReprojUseDepth.set_from_config(readBool("Reproj", "UseDepth"));
+            ReprojRotationOnly.set_from_config(readBool("Reproj", "RotationOnly"));
             ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
         }
@@ -1016,6 +1020,12 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojUseJitterCancel.value_for_config()).c_str());
         ini.SetValue("Reproj", "CapAtHalfRefresh",
                      GetBoolValue(Instance()->ReprojCapAtHalfRefresh.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MaxWarpFrames",
+                     GetIntValue(Instance()->ReprojMaxWarpFrames.value_for_config()).c_str());
+        ini.SetValue("Reproj", "TargetRefresh",
+                     GetFloatValue(Instance()->ReprojTargetRefresh.value_for_config()).c_str());
+        ini.SetValue("Reproj", "UseDepth", GetBoolValue(Instance()->ReprojUseDepth.value_for_config()).c_str());
+        ini.SetValue("Reproj", "RotationOnly", GetBoolValue(Instance()->ReprojRotationOnly.value_for_config()).c_str());
         ini.SetValue("Reproj", "DebugView", GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
         ini.SetValue("Reproj", "ForceBorderless",
                      GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());

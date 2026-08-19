@@ -73,12 +73,13 @@ Register new files in `OptiScaler/OptiScaler.vcxproj` and `OptiScaler/OptiScaler
 
 Known issues / limitations:
 
-- `AReproj_Dx12::Present()` reads resources via `GetIndex()`, which matches the `FGInput=upscaler` path. Streamline/FSR3/FfxApi inputs route through `GetIndexWillBeDispatched()`; they converge in steady state but have not been explicitly validated end-to-end.
-- `ForceVsync` is not applied to the real present — the feature presents internally before `FGPresent`'s vsync block runs.
+- `AReproj_Dx12::Present()` uses `GetIndexWillBeDispatched()`, matching Streamline/FSR3/FfxApi's ahead-of-present resource slot and still resolving to the current upscaler slot when it has resources. The non-upscaler paths still need end-to-end validation.
+- `ForceVsync` is applied before `AReproj_Dx12::Present()`, so the internally presented real frame receives the configured interval and tearing flags.
 - The v2 depth-aware warp is sketch-quality; disocclusion confidence and the HUD epsilon need real-footage tuning.
-- `ReprojCapAtHalfRefresh` is parsed/saved but intentionally unused (the half-rate cap rides on `FrameLimit::sleep(true)`). Reprojection now bypasses Reflex/XeLL limiter gating so that cap is applied even when those limiters are inactive.
+- `ReprojCapAtHalfRefresh` controls whether the existing `FrameLimit` half-rate behavior is used for reprojection. Reprojection bypasses Reflex/XeLL limiter gating so that the selected cap is applied even when those limiters are inactive.
 - Reproj emits one fake frame per real frame; it cannot sustain a fixed refresh target when the real rate falls below half-refresh without multi-frame extrapolation and increased artifacts.
-- fakenvapi/Reflex `reportFGPresent` is not wired for `Reproj` yet.
+- Do not move the fake present to a worker with only a fence/timer: after the real DXGI present, the next swapchain buffer becomes the game's render target and has no reservation API. True async needs a compositor or explicit backbuffer-ownership mechanism.
+- Reproj is included in fakenvapi `reportFGPresent`; Reflex markers/sleeps remain intentionally limited to DLSSG.
 
 ## D3D12 base-class gotchas
 
