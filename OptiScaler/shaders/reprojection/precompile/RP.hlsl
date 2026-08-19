@@ -37,10 +37,8 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 {
     float2 uv = (dtid.xy + 0.5f) / float2(DisplaySize);
 
-    // The MV texture may be render-res while the output is display-res
+    // The MV texture covers the full frame (possibly at render resolution), so its UV maps 1:1
     float2 mvUV = uv;
-    if (MVSize.x != DisplaySize.x || MVSize.y != DisplaySize.y)
-        mvUV = uv * float2(DisplaySize.xy) / float2(MVSize.xy);
     float2 mv = Velocity.SampleLevel(Bilinear, mvUV, 0).xy;
 
     // Apply scale (in pixels), jitter cancellation and the per-game sign convention
@@ -50,8 +48,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     if (InvertMV)
         delta = -delta;
 
-    // Move BACKWARD along the flow to fetch the source texel
-    float2 srcUV = clamp(uv - delta * TimeStep, 0.0f, 1.0f);
+    // Texel displacement -> normalized UV offset, then move BACKWARD along the flow
+    float2 deltaUV = delta / float2(MVSize);
+    float2 srcUV = clamp(uv - deltaUV * TimeStep, 0.0f, 1.0f);
 
     float4 warped = LastColor.SampleLevel(Bilinear, srcUV, 0);
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
