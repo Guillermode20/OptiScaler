@@ -3776,6 +3776,62 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
     }
 
+    // Async reprojection controls
+    if (state.activeFgOutput == FGOutput::Reproj && state.activeFgInput != FGInput::NoFG &&
+        state.currentFGSwapchain != nullptr)
+    {
+        ImGui::SeparatorText("Frame Generation (Async Reproj)");
+
+        bool fgActive = config->FGEnabled.value_or_default();
+        if (ImGui::Checkbox("Active##reproj", &fgActive))
+        {
+            config->FGEnabled = fgActive;
+            LOG_DEBUG("FGEnabled set FGEnabled: {}", fgActive);
+
+            if (config->FGEnabled.value_or_default())
+                state.fgChanged = true;
+        }
+        ShowHelpMarker("Enable async reprojection\n"
+                       "Game runs at half the set FramerateLimit, so set it to your refresh rate");
+
+        static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware" };
+        int reprojMode = config->ReprojMode.value_or_default();
+        if (ImGui::Combo("Mode##reproj", &reprojMode, reprojModes, _countof(reprojModes)))
+            config->ReprojMode = reprojMode;
+        ShowHelpMarker("MV warp: cheapest, HUD-safe\n"
+                       "Depth-aware: better parallax, needs depth + camera data\n"
+                       "Falls back to MV warp when depth or camera data is missing");
+
+        ImGui::PushItemWidth(135.0f * menuResScale);
+        float reprojStrength = config->ReprojStrength.value_or_default();
+        if (ImGui::SliderFloat("Strength##reproj", &reprojStrength, 0.0f, 1.0f, "%.2f"))
+            config->ReprojStrength = reprojStrength;
+        ShowHelpMarker("Blend of the warped result with the original frame");
+
+        float reprojTimeStep = config->ReprojTimeStep.value_or_default();
+        if (ImGui::SliderFloat("Time step##reproj", &reprojTimeStep, 0.0f, 1.0f, "%.2f"))
+            config->ReprojTimeStep = reprojTimeStep;
+        ShowHelpMarker("Warp fraction (0.5 = midpoint between real frames)\n"
+                       "Also paces the fake frame: 0.5 lands it halfway between real frames");
+        ImGui::PopItemWidth();
+
+        bool reprojInvertMV = config->ReprojInvertMV.value_or_default();
+        if (ImGui::Checkbox("Invert motion vectors##reproj", &reprojInvertMV))
+            config->ReprojInvertMV = reprojInvertMV;
+        ShowHelpMarker("Flip the MV sign convention\nPer-game setting, enable if the warp smears the wrong way");
+
+        bool reprojDebugView = config->ReprojDebugView.value_or_default();
+        if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))
+            config->ReprojDebugView = reprojDebugView;
+        ShowHelpMarker("False-color the warped pixels (red = moved, green = depth confidence)");
+
+        bool reprojForceBorderless = config->ReprojForceBorderless.value_or_default();
+        if (ImGui::Checkbox("Force borderless##reproj", &reprojForceBorderless))
+            config->ReprojForceBorderless = reprojForceBorderless;
+        ShowHelpMarker("Force borderless windowed mode so the fake frame can tear\n"
+                       "Needed for exclusive-fullscreen games");
+    }
+
     // XeFG controls
     if (state.activeFgOutput == FGOutput::XeFG && state.activeFgInput != FGInput::NoFG &&
         state.activeFgInput != FGInput::ForceXeLL && state.currentFGSwapchain != nullptr && XeFGProxy::InitXeFG())

@@ -1,10 +1,15 @@
 #include "pch.h"
 #include "AReproj_Dx12.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include <State.h>
 #include <Config.h>
+#include <Util.h>
 #include <hooks/FG_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+#include <misc/FrameLimit.h>
 
 #include <magic_enum.hpp>
 
@@ -26,10 +31,10 @@ bool AReproj_Dx12::SetInterpolatedFrameCount(UINT interpolatedFrameCount)
 
 void AReproj_Dx12::SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) { _gameCommandQueue = queue; }
 
-void AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags)
+HRESULT AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags)
 {
     if (_swapChain == nullptr)
-        return;
+        return E_FAIL;
 
     // Route through the hooked vtable with the skip flag set, so hkFGPresent passes
     // straight through to the original present (no recursion, no double handling).
@@ -41,6 +46,277 @@ void AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags)
         LOG_DEBUG("Presented frame, SyncInterval: {}, Flags: {:X}", SyncInterval, Flags);
     else
         LOG_DEBUG("Present result: {:X}", (UINT) result);
+
+    if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)
+        Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
+
+    return result;
+}
+
+bool AReproj_Dx12::SubmitSCCommandList(int fIndex)
+{
+    if (fIndex < 0 || fIndex >= BUFFER_COUNT || !_scCommandListResetted[fIndex])
+        return true;
+
+    if (_gameCommandQueue == nullptr)
+    {
+        LOG_ERROR("Can't submit SC command list, queue is nullptr");
+        return false;
+    }
+
+    LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
+    auto closeResult = _scCommandList[fIndex]->Close();
+
+    if (closeResult != S_OK)
+    {
+        LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
+        return false;
+    }
+
+    _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
+    _scCommandListResetted[fIndex] = false;
+
+    return true;
+}
+
+bool AReproj_Dx12::CopyLastFrame(int fIndex)
+{
+    IDXGISwapChain3* sc = (IDXGISwapChain3*) _swapChain;
+    auto bbIndex = sc->GetCurrentBackBufferIndex();
+
+    ID3D12Resource* bb = nullptr;
+    if (FAILED(sc->GetBuffer(bbIndex, IID_PPV_ARGS(&bb))))
+        return false;
+
+    // CreateBufferResource reuses _lastColor when format/size match (leaving it in the
+    // state the previous warp put it in), but a (re)created resource starts in COPY_DEST.
+    ID3D12Resource* oldLastColor = _lastColor[fIndex];
+
+    if (!CreateBufferResource(_device, bb, D3D12_RESOURCE_STATE_COPY_DEST, &_lastColor[fIndex], false, false))
+    {
+        bb->Release();
+        return false;
+    }
+
+    if (_lastColor[fIndex] != oldLastColor)
+        _lastColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+
+    auto cmdList = GetUICommandList(fIndex);
+    if (cmdList == nullptr)
+    {
+        bb->Release();
+        return false;
+    }
+
+    // The backbuffer is expected to be in PRESENT state at present time (RUI_Dx12 does the same)
+    ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+
+    // _lastColor may be left in NON_PIXEL_SHADER_RESOURCE by the previous warp
+    ResourceBarrier(cmdList, _lastColor[fIndex], _lastColorState[fIndex], D3D12_RESOURCE_STATE_COPY_DEST);
+
+    cmdList->CopyResource(_lastColor[fIndex], bb);
+
+    ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+    _lastColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+
+    bb->Release();
+
+    // Submit now: the copy must be queued before the real present so the warp (submitted
+    // after the present) runs on the same queue after it.
+    if (!SubmitUICommandList((UINT) fIndex))
+    {
+        LOG_ERROR("Reproj: failed to submit last-frame copy");
+        return false;
+    }
+
+    return true;
+}
+
+bool AReproj_Dx12::CreateWarpOutput(int fIndex, ID3D12Resource* source)
+{
+    auto inDesc = source->GetDesc();
+
+    // sRGB formats can't be used as UAVs; use the typeless parent instead. Typeless and
+    // sRGB are in the same DXGI type group, so CopyResource into the backbuffer still works.
+    switch (inDesc.Format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        inDesc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        break;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        inDesc.Format = DXGI_FORMAT_B8G8R8A8_TYPELESS;
+        break;
+    default:
+        break;
+    }
+
+    if (_warpOutput[fIndex] != nullptr)
+    {
+        auto bufDesc = _warpOutput[fIndex]->GetDesc();
+
+        if (bufDesc.Width == inDesc.Width && bufDesc.Height == inDesc.Height && bufDesc.Format == inDesc.Format)
+            return true;
+
+        SAFE_RELEASE(_warpOutput[fIndex]);
+    }
+
+    D3D12_HEAP_PROPERTIES heapProperties;
+    D3D12_HEAP_FLAGS heapFlags;
+    HRESULT hr = source->GetHeapProperties(&heapProperties, &heapFlags);
+
+    if (hr != S_OK)
+    {
+        LOG_ERROR("GetHeapProperties result: {:X}", (UINT64) hr);
+        return false;
+    }
+
+    inDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    hr = _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, D3D12_RESOURCE_STATE_COMMON,
+                                          nullptr, IID_PPV_ARGS(&_warpOutput[fIndex]));
+
+    if (hr != S_OK)
+    {
+        LOG_ERROR("CreateWarpOutput result: {:X}", (UINT64) hr);
+        return false;
+    }
+
+    _warpOutput[fIndex]->SetName(L"Reproj_WarpOutput");
+
+    return true;
+}
+
+bool AReproj_Dx12::IsCameraAllZero(int fIndex)
+{
+    for (int i = 0; i < 3; i++)
+    {
+        if (_cameraPosition[fIndex][i] != 0.0f || _cameraUp[fIndex][i] != 0.0f ||
+            _cameraRight[fIndex][i] != 0.0f || _cameraForward[fIndex][i] != 0.0f)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool AReproj_Dx12::DispatchWarp(int fIndex)
+{
+    if (_warp == nullptr || !_warp->IsInit())
+        return false;
+
+    auto& state = State::Instance();
+    auto config = Config::Instance();
+
+    auto depth = GetResource(FG_ResourceType::Depth, fIndex);
+    auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
+    if (!velocity)
+    {
+        LOG_WARN("Reproj: no motion vectors for frame {}, skipping fake frame", _frameCount);
+        return false;
+    }
+
+    IDXGISwapChain3* sc = (IDXGISwapChain3*) _swapChain;
+    auto bbIndex = sc->GetCurrentBackBufferIndex();
+    ID3D12Resource* bb = nullptr;
+    if (FAILED(sc->GetBuffer(bbIndex, IID_PPV_ARGS(&bb))))
+        return false;
+
+    // Warp into a private UAV buffer (backbuffers don't expose UAV), then copy it into the backbuffer
+    if (!CreateWarpOutput(fIndex, bb))
+    {
+        bb->Release();
+        return false;
+    }
+
+    auto cmdList = GetSCCommandList(fIndex);
+    if (cmdList == nullptr)
+    {
+        bb->Release();
+        return false;
+    }
+
+    RP_Constants cb {};
+    cb.displayWidth = (uint32_t) state.currentSwapchainDesc.BufferDesc.Width;
+    cb.displayHeight = (uint32_t) state.currentSwapchainDesc.BufferDesc.Height;
+    cb.mvWidth = (uint32_t) velocity->width;
+    cb.mvHeight = (uint32_t) velocity->height;
+    cb.timeStep = config->ReprojTimeStep.value_or_default();
+    cb.strength = config->ReprojStrength.value_or_default();
+    cb.mvScaleX = _mvScaleX[fIndex];
+    cb.mvScaleY = _mvScaleY[fIndex];
+    cb.jitterX = _jitterX[fIndex];
+    cb.jitterY = _jitterY[fIndex];
+    cb.invertMV = config->ReprojInvertMV.value_or_default() ? 1 : 0;
+    cb.jitterCancelled = (config->ReprojUseJitterCancel.value_or_default() && IsJitteredMVs()) ? 1 : 0;
+    cb.invertedDepth = IsInvertedDepth() ? 1 : 0;
+    cb.mode = config->ReprojMode.value_or_default();
+    cb.debugView = config->ReprojDebugView.value_or_default() ? 1 : 0;
+
+    cb.cameraNear = _cameraNear[fIndex];
+    cb.cameraFar = _cameraFar[fIndex];
+    cb.cameraVFov = _cameraVFov[fIndex];
+    cb.cameraAspect = _cameraAspectRatio[fIndex];
+
+    std::memcpy(cb.cameraPosition, _cameraPosition[fIndex], 3 * sizeof(float));
+    std::memcpy(cb.cameraUp, _cameraUp[fIndex], 3 * sizeof(float));
+    std::memcpy(cb.cameraRight, _cameraRight[fIndex], 3 * sizeof(float));
+    std::memcpy(cb.cameraForward, _cameraForward[fIndex], 3 * sizeof(float));
+
+    // Previous-frame camera pose, used to extrapolate the camera to the fake-frame time
+    auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    std::memcpy(cb.prevCameraPosition, _cameraPosition[prevIndex], 3 * sizeof(float));
+    std::memcpy(cb.prevCameraUp, _cameraUp[prevIndex], 3 * sizeof(float));
+    std::memcpy(cb.prevCameraRight, _cameraRight[prevIndex], 3 * sizeof(float));
+    std::memcpy(cb.prevCameraForward, _cameraForward[prevIndex], 3 * sizeof(float));
+
+    // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
+    bool hasDepth = depth ? true : false;
+    bool hasCamera = _cameraVFov[fIndex] > 0.0f && _cameraAspectRatio[fIndex] > 0.0f &&
+                     !IsCameraAllZero(fIndex) && !IsCameraAllZero(prevIndex);
+    cb.mode = (hasDepth && hasCamera) ? cb.mode : 0;
+
+    bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], velocity->GetResource(),
+                              velocity->state, hasDepth ? depth->GetResource() : nullptr,
+                              hasDepth ? depth->state : D3D12_RESOURCE_STATE_COMMON, _warpOutput[fIndex], cb);
+
+    if (!ok)
+    {
+        bb->Release();
+        return false;
+    }
+
+    _lastColorState[fIndex] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+    // Copy the warp result into the current backbuffer, then submit everything now
+    ResourceBarrier(cmdList, _warpOutput[fIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->CopyResource(bb, _warpOutput[fIndex]);
+    ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+    ResourceBarrier(cmdList, _warpOutput[fIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+
+    bb->Release();
+
+    if (!SubmitSCCommandList(fIndex))
+    {
+        LOG_ERROR("Reproj: failed to submit warp command list");
+        return false;
+    }
+
+    return true;
+}
+
+void AReproj_Dx12::WaitHalfFrame()
+{
+    double target = State::Instance().lastFGFrameTime * Config::Instance()->ReprojTimeStep.value_or_default();
+    target = std::clamp(target, 0.0, 20.0); // ms
+
+    if (target <= 0.1)
+        return;
+
+    // busy-wait then timer-sleep, exactly the combined_sleep pattern in FrameLimit.cpp
+    FrameLimit::sleepForMs(target);
 }
 
 bool AReproj_Dx12::Present()
@@ -48,30 +324,84 @@ bool AReproj_Dx12::Present()
     LOG_FUNC();
 
     if (!IsActive() || IsPaused() || _swapChain == nullptr)
+    {
+        // FGPresent skips its own present for Reproj, so make sure the real frame still lands
+        PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
         return true;
+    }
 
     auto fIndex = GetIndex();
 
-    // Flush any pending deferred command lists (resource copies etc.)
+    // 1. Flush any pending deferred command lists (resource copies from SetResource etc.)
     if (_uiCommandListResetted[fIndex] && !SubmitUICommandList((UINT) fIndex))
         LOG_ERROR("Failed to submit pending UI command list for slot {}", fIndex);
 
     if (_scCommandListResetted[fIndex])
+        SubmitSCCommandList(fIndex);
+
+    // 2. Stall guard: no new frame data for a while, pause instead of presenting garbage
+    if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)
     {
-        LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
-        auto closeResult = _scCommandList[fIndex]->Close();
-
-        if (closeResult == S_OK)
-            _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
-        else
-            LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
-
-        _scCommandListResetted[fIndex] = false;
+        LOG_DEBUG("Pausing reproj (no new frame data)");
+        Deactivate();
+        _waitingNewFrameData = true;
+        PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        return false;
     }
 
-    // M0: present the real frame only.
-    // M1: copy backbuffer -> present real -> wait half frame -> warp -> present reprojected.
-    PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+    _fgFramePresentId++;
+
+    // 3. Reset/scene cut or missing motion vectors -> present the real frame only
+    if (_reset[fIndex])
+    {
+        LOG_DEBUG("Reproj: reset frame {}, skipping fake frame", _frameCount);
+        PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        return true;
+    }
+
+    if (!_resourceReady[fIndex].contains(FG_ResourceType::Velocity))
+    {
+        LOG_WARN("Reproj: no motion vectors for frame {}, skipping fake frame", _frameCount);
+        PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        return true;
+    }
+
+    // 4. Copy the real frame BEFORE presenting it
+    if (!CopyLastFrame(fIndex))
+    {
+        LOG_WARN("Reproj: failed to copy last frame, skipping fake frame");
+        PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        return true;
+    }
+
+    // 5. Present the real frame
+    auto realResult = PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+
+    // 6. If the real present failed (occluded/device removed), don't spin or fake
+    if (realResult != S_OK && realResult != DXGI_STATUS_OCCLUDED)
+        return true;
+
+    // 7. Pace: wait ~half a frame so the fake frame lands between real frames
+    WaitHalfFrame();
+
+    // 8. Warp the last real frame into the current backbuffer
+    if (!DispatchWarp(fIndex))
+    {
+        LOG_WARN("Reproj: failed to dispatch warp, skipping fake frame");
+        return true;
+    }
+
+    // 9. Present the fake frame (tear; fall back to vsync when tearing is unavailable)
+    UINT fakeFlags = DXGI_PRESENT_ALLOW_TEARING;
+    UINT fakeInterval = 0;
+
+    if (!State::Instance().SCAllowTearing || State::Instance().realExclusiveFullscreen)
+    {
+        fakeFlags = 0;
+        fakeInterval = 1;
+    }
+
+    PresentFrame(fakeInterval, fakeFlags);
 
     return true;
 }
@@ -205,6 +535,9 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         _hwnd = desc->OutputWindow;
         _bufferCount = desc->BufferCount;
 
+        // We force ALLOW_TEARING on our swapchain, so tearing fake presents are always allowed
+        State::Instance().SCAllowTearing = true;
+
         LOG_INFO("Reproj swapchain created: {} buffers, {}x{}", _bufferCount, desc->BufferDesc.Width,
                  desc->BufferDesc.Height);
         return true;
@@ -298,6 +631,9 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
         _hwnd = hwnd;
         _bufferCount = desc->BufferCount;
 
+        // We force ALLOW_TEARING on our swapchain, so tearing fake presents are always allowed
+        State::Instance().SCAllowTearing = true;
+
         LOG_INFO("Reproj swapchain created: {} buffers, {}x{}", _bufferCount, desc->Width, desc->Height);
         return true;
     }
@@ -354,6 +690,9 @@ void AReproj_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants
 
     CreateObjects(device);
 
+    if (_warp == nullptr)
+        _warp = std::make_unique<RP_Dx12>("ReprojWarp", device);
+
     _constants = fgConstants;
 }
 
@@ -399,8 +738,8 @@ void AReproj_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants
 
     if (Config::Instance()->FGEnabled.value_or_default())
     {
-        if (_uiCommandAllocator[0] == nullptr)
-            CreateObjects(device);
+        if (_uiCommandAllocator[0] == nullptr || _warp == nullptr)
+            CreateContext(device, fgConstants);
 
         if (State::Instance().fgChanged)
         {
@@ -545,6 +884,8 @@ bool AReproj_Dx12::SetResource(Dx12Resource* inputResource)
 
 void AReproj_Dx12::ReleaseObjects()
 {
+    _warp.reset();
+
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_uiCommandAllocator[i]);
@@ -553,6 +894,7 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_scCommandList[i]);
 
         SAFE_RELEASE(_lastColor[i]);
+        SAFE_RELEASE(_warpOutput[i]);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
 

@@ -1,22 +1,32 @@
 #pragma once
 #include "SysUtils.h"
 #include <framegen/IFGFeature_Dx12.h>
+#include <shaders/reprojection/RP_Dx12.h>
 
 /// Async reprojection (ASW-style) FG output.
 /// See AsyncReprojection.md for the full design.
 ///
-/// M0 scaffold: owns a real DXGI swapchain (>= 3 buffers + ALLOW_TEARING) and
-/// presents the real frame only. Later milestones add the reprojected frame
-/// (copy -> present real -> wait half frame -> warp -> present fake).
+/// Owns a real DXGI swapchain (>= 3 buffers + ALLOW_TEARING). Per game present:
+/// copy the backbuffer -> present the real frame -> wait half a frame -> warp the
+/// previous frame forward -> present the fake frame (tearing present).
 class AReproj_Dx12 : public virtual IFGFeature_Dx12
 {
   private:
-    ID3D12Resource* _lastColor[BUFFER_COUNT] = {};
+    std::unique_ptr<RP_Dx12> _warp;                 // the reprojection pass (v1/v2 PSOs)
+    ID3D12Resource* _lastColor[BUFFER_COUNT] = {};  // copy of the last presented real frame
     D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
+    ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
+    bool _forceBorderless = false;
 
     UINT _bufferCount = 0;
 
-    void PresentFrame(UINT SyncInterval, UINT Flags);
+    bool CopyLastFrame(int fIndex);                 // backbuffer -> _lastColor[fIndex], submitted before present
+    bool DispatchWarp(int fIndex);                  // _lastColor[fIndex] + MV (+depth) -> current backbuffer
+    void WaitHalfFrame();                           // pacing (FrameLimit primitives)
+    HRESULT PresentFrame(UINT SyncInterval, UINT Flags); // skip-flag wrapped present
+    bool SubmitSCCommandList(int fIndex);           // close + execute the SC command list
+    bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
+    bool IsCameraAllZero(int fIndex);
 
   protected:
     void ReleaseObjects() override final;

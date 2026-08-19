@@ -596,6 +596,18 @@
     <ClInclude Include="shaders\format_transfer\precompile\FT_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="shaders\reprojection\precompile\RP_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\reprojection\precompile\RPD_Shader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\reprojection\RP_Common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="shaders\reprojection\RP_Dx12.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="inputs\FSR2_Dx11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1074,6 +1086,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="shaders\format_transfer\FT_Dx12.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="shaders\reprojection\RP_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="shaders\output_scaling\OS_Dx11.cpp">

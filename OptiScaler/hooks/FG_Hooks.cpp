@@ -461,9 +461,14 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
         fg->Deactivate();
     }
 
+    // XeFG and async reprojection both prefer borderless so their internal presents can tear
+    const bool forceBorderless = Config::Instance()->FGXeFGForceBorderless.value_or_default() ||
+                                 (State::Instance().activeFgOutput == FGOutput::Reproj &&
+                                  Config::Instance()->ReprojForceBorderless.value_or_default());
+
     bool modeChanged = false;
     bool orgFS = Fullscreen;
-    if (Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (forceBorderless)
     {
         if (Fullscreen)
         {
@@ -494,7 +499,7 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
     auto result = S_OK;
 
-    if (!Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (!forceBorderless)
     {
         result = o_FGSCSetFullscreenState(This, Fullscreen, pTarget);
         LOG_DEBUG("Fullscreen: {}, pTarget: {:X}, Result: {:X}", Fullscreen, (size_t) pTarget, (UINT) result);
@@ -640,6 +645,15 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
                 SwapChainFlags = State::Instance().SCLastFlags;
             }
         }
+    }
+
+    // Async reprojection needs >= 3 buffers (a free slot for the fake frame) and tearing
+    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    {
+        if (BufferCount > 0 && BufferCount < 3)
+            BufferCount = 3;
+
+        SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     }
 
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}", BufferCount, Width, Height,
@@ -878,6 +892,15 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
                 SwapChainFlags = State::Instance().SCLastFlags;
             }
         }
+    }
+
+    // Async reprojection needs >= 3 buffers (a free slot for the fake frame) and tearing
+    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    {
+        if (BufferCount > 0 && BufferCount < 3)
+            BufferCount = 3;
+
+        SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     }
 
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}, Caller: {}", BufferCount,
