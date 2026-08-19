@@ -76,7 +76,8 @@ Known issues / limitations:
 - `AReproj_Dx12::Present()` reads resources via `GetIndex()`, which matches the `FGInput=upscaler` path. Streamline/FSR3/FfxApi inputs route through `GetIndexWillBeDispatched()`; they converge in steady state but have not been explicitly validated end-to-end.
 - `ForceVsync` is not applied to the real present — the feature presents internally before `FGPresent`'s vsync block runs.
 - The v2 depth-aware warp is sketch-quality; disocclusion confidence and the HUD epsilon need real-footage tuning.
-- `ReprojCapAtHalfRefresh` is parsed/saved but intentionally unused (the half-rate cap rides on the existing `FrameLimit::sleep(true)`).
+- `ReprojCapAtHalfRefresh` is parsed/saved but intentionally unused (the half-rate cap rides on `FrameLimit::sleep(true)`). Reprojection now bypasses Reflex/XeLL limiter gating so that cap is applied even when those limiters are inactive.
+- Reproj emits one fake frame per real frame; it cannot sustain a fixed refresh target when the real rate falls below half-refresh without multi-frame extrapolation and increased artifacts.
 - fakenvapi/Reflex `reportFGPresent` is not wired for `Reproj` yet.
 
 ## D3D12 base-class gotchas

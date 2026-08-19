@@ -1312,8 +1312,15 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (state.swapchainInteropApi == SwapchainInteropApi::None)
         Hudfix_Dx12::PresentEnd();
 
-    if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
-        !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+    // Reprojection owns pacing and must not be suppressed by Reflex/XeLL's limiter
+    // selection. Its limiter applies to the real-frame cadence; the fake present is
+    // emitted by AReproj_Dx12::Present().
+    if (willPresent && state.activeFgOutput == FGOutput::Reproj)
+    {
+        FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
+    }
+    else if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
+             !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
     {
         FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
     }
