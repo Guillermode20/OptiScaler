@@ -111,7 +111,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     IDCompositionDevice* _compositionDevice = nullptr;
     IDCompositionTarget* _compositionTarget = nullptr;
     IDCompositionVisual* _compositionVisual = nullptr;
+    HWND _presentHwnd = nullptr; // Proton fallback: worker-owned child HWND swapchain
     bool _compositionAttached = false;
+    bool _presenterUsesComposition = false;
 
     UINT _bufferCount = 0;
     UINT64 _scFenceValue = 0; // monotonic SC fence value (fence outlives context recreate)

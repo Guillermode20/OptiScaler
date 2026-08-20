@@ -203,7 +203,19 @@ BOOL WINAPI hkGetCursorPos(LPPOINT point)
         }
     }
 
-    return o_GetCursorPos(point);
+    const auto result = o_GetCursorPos(point);
+    if (result)
+    {
+        std::unique_lock lock(_state.Mutex);
+        if (_state.Initialized && _state.Focused && !_state.MenuVisible && _state.CursorPollCenterValid)
+        {
+            const POINT offset { point->x - _state.CursorPollCenter.x, point->y - _state.CursorPollCenter.y };
+            AccumulateRelativeMouseMotionLocked(offset.x - _state.CursorPollLastOffset.x,
+                                                offset.y - _state.CursorPollLastOffset.y);
+            _state.CursorPollLastOffset = offset;
+        }
+    }
+    return result;
 }
 
 BOOL WINAPI hkSetCursorPos(int x, int y)
@@ -218,7 +230,18 @@ BOOL WINAPI hkSetCursorPos(int x, int y)
         }
     }
 
-    return o_SetCursorPos(x, y);
+    const auto result = o_SetCursorPos(x, y);
+    if (result)
+    {
+        std::unique_lock lock(_state.Mutex);
+        if (_state.Initialized && _state.Focused && !_state.MenuVisible)
+        {
+            _state.CursorPollCenter = { x, y };
+            _state.CursorPollLastOffset = {};
+            _state.CursorPollCenterValid = true;
+        }
+    }
+    return result;
 }
 
 BOOL WINAPI hkGetPhysicalCursorPos(LPPOINT point)

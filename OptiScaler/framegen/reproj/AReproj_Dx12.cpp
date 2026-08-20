@@ -20,6 +20,18 @@
 
 #include <magic_enum.hpp>
 
+namespace
+{
+constexpr wchar_t ReprojPresenterWindowClass[] = L"OptiScalerReprojPresenter";
+
+LRESULT CALLBACK ReprojPresenterWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_NCHITTEST)
+        return HTTRANSPARENT;
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+} // namespace
+
 const char* AReproj_Dx12::Name() { return "Async Reproj"; }
 
 feature_version AReproj_Dx12::Version() { return feature_version { 1, 0, 0 }; }
@@ -831,36 +843,78 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 
     IDXGISwapChain1* swapChain1 = nullptr;
     result = factory->CreateSwapChainForComposition(_presentQueue, &desc, nullptr, &swapChain1);
+    if (SUCCEEDED(result))
+    {
+        result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
+        swapChain1->Release();
+        if (FAILED(result))
+        {
+            factory->Release();
+            LOG_WARN("Reproj: composition swapchain query failed: {:X}", (UINT) result);
+            return false;
+        }
+
+        result = DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&_compositionDevice));
+        if (SUCCEEDED(result))
+            result = _compositionDevice->CreateTargetForHwnd(_hwnd, TRUE, &_compositionTarget);
+        if (SUCCEEDED(result))
+            result = _compositionDevice->CreateVisual(&_compositionVisual);
+        if (SUCCEEDED(result))
+            result = _compositionVisual->SetContent(_presentSwapChain);
+        if (FAILED(result))
+        {
+            factory->Release();
+            LOG_WARN("Reproj: DirectComposition setup failed: {:X}", (UINT) result);
+            return false;
+        }
+        _presenterUsesComposition = true;
+        LOG_INFO("Reproj: DirectComposition async presenter created ({} buffers, {}x{})", desc.BufferCount,
+                 desc.Width, desc.Height);
+    }
+    else
+    {
+        // Wine/Proton currently returns E_NOTIMPL for CreateSwapChainForComposition.
+        // A child HWND gives the worker an independently owned swapchain without touching game backbuffers.
+        LOG_INFO("Reproj: composition swapchain unavailable ({:X}); trying child-window presenter", (UINT) result);
+        WNDCLASSW windowClass {};
+        windowClass.lpfnWndProc = ReprojPresenterWindowProc;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = ReprojPresenterWindowClass;
+        if (RegisterClassW(&windowClass) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        {
+            factory->Release();
+            return false;
+        }
+
+        RECT client {};
+        GetClientRect(_hwnd, &client);
+        _presentHwnd = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, ReprojPresenterWindowClass, L"",
+                                       WS_CHILD, 0, 0, client.right, client.bottom, _hwnd, nullptr,
+                                       GetModuleHandleW(nullptr), nullptr);
+        if (_presentHwnd == nullptr)
+        {
+            factory->Release();
+            LOG_WARN("Reproj: child presenter window creation failed: {}", GetLastError());
+            return false;
+        }
+
+        desc.Width = static_cast<UINT>(client.right);
+        desc.Height = static_cast<UINT>(client.bottom);
+        result = factory->CreateSwapChainForHwnd(_presentQueue, _presentHwnd, &desc, nullptr, nullptr, &swapChain1);
+        if (SUCCEEDED(result))
+            result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
+        SAFE_RELEASE(swapChain1);
+        if (FAILED(result))
+        {
+            factory->Release();
+            LOG_WARN("Reproj: child-window swapchain creation failed: {:X}", (UINT) result);
+            return false;
+        }
+        _presenterUsesComposition = false;
+        LOG_INFO("Reproj: Proton child-window async presenter created ({} buffers, {}x{})", desc.BufferCount,
+                 desc.Width, desc.Height);
+    }
     factory->Release();
-    if (FAILED(result))
-    {
-        LOG_WARN("Reproj: composition swapchain creation failed: {:X}", (UINT) result);
-        return false;
-    }
-
-    result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
-    swapChain1->Release();
-    if (FAILED(result))
-    {
-        LOG_WARN("Reproj: composition swapchain query failed: {:X}", (UINT) result);
-        return false;
-    }
-
-    result = DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&_compositionDevice));
-    if (SUCCEEDED(result))
-        result = _compositionDevice->CreateTargetForHwnd(_hwnd, TRUE, &_compositionTarget);
-    if (SUCCEEDED(result))
-        result = _compositionDevice->CreateVisual(&_compositionVisual);
-    if (SUCCEEDED(result))
-        result = _compositionVisual->SetContent(_presentSwapChain);
-    if (FAILED(result))
-    {
-        LOG_WARN("Reproj: DirectComposition setup failed: {:X}", (UINT) result);
-        return false;
-    }
-
-    LOG_INFO("Reproj: DirectComposition async presenter created ({} buffers, {}x{})", desc.BufferCount, desc.Width,
-             desc.Height);
     return true;
 }
 
@@ -868,6 +922,14 @@ bool AReproj_Dx12::AttachCompositionVisual()
 {
     if (_compositionAttached)
         return true;
+    if (!_presenterUsesComposition)
+    {
+        if (_presentHwnd == nullptr)
+            return false;
+        ShowWindow(_presentHwnd, SW_SHOWNOACTIVATE);
+        _compositionAttached = true;
+        return true;
+    }
     if (_compositionTarget == nullptr || _compositionVisual == nullptr || _compositionDevice == nullptr)
         return false;
 
@@ -886,6 +948,12 @@ void AReproj_Dx12::DestroyAsyncPresenter()
         _compositionDevice->Commit();
     }
     _compositionAttached = false;
+    if (_presentHwnd != nullptr)
+    {
+        DestroyWindow(_presentHwnd);
+        _presentHwnd = nullptr;
+    }
+    _presenterUsesComposition = false;
 
     SAFE_RELEASE(_compositionVisual);
     SAFE_RELEASE(_compositionTarget);
@@ -1135,10 +1203,17 @@ void AReproj_Dx12::LogMetricsIfDue()
         _runtimeMetrics.depthReady && Config::Instance()->ReprojLateLatch.value_or_default();
     _runtimeMetrics.mouseCalibrationConfidence = _calibrationConfidence;
     _runtimeMetrics.mouseCalibrationLagMs = _calibrationLagMs;
-    LOG_INFO("Reproj: real={:.1f} FPS, warp={:.1f} FPS, dropped={}, maxWarps={}, poseAge={:.1f} ms, queue={} ({}), mouseCal={:.0f}%/{}ms",
+    const auto mouse = OptiInput::GetRawMouseMotion();
+    uint32_t calibrationSamples = 0;
+    for (const auto& bin : _calibration)
+        calibrationSamples = std::max(calibrationSamples, bin.samples);
+    const char* presenter = _runtimeMetrics.asyncPresenter
+                                ? (_presenterUsesComposition ? "async DComp" : "async HWND")
+                                : "safe sync";
+    LOG_INFO("Reproj: real={:.1f} FPS, warp={:.1f} FPS, dropped={}, maxWarps={}, poseAge={:.1f} ms, queue={} ({}), mouseCal={:.0f}%/{}ms samples={} input=({}, {})",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsDroppedWarps, _metricsMaxWarpsPerReal,
-             poseAge, _runtimeMetrics.queueDepth, _runtimeMetrics.asyncPresenter ? "async DComp" : "safe sync",
-             _calibrationConfidence * 100.0f, _calibrationLagMs);
+             poseAge, _runtimeMetrics.queueDepth, presenter, _calibrationConfidence * 100.0f, _calibrationLagMs,
+             calibrationSamples, mouse.TotalX, mouse.TotalY);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;

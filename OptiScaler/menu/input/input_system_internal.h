@@ -338,6 +338,9 @@ struct InputState
     POINT MouseClientPos {};
     POINT MouseScreenPos {};
     POINT LastMouseClientPos {};
+    POINT CursorPollCenter {};
+    POINT CursorPollLastOffset {};
+    bool CursorPollCenterValid = false;
 
     // Cursor position returned to the game while the menu owns cursor input.
     // MouseScreenPos may still move because the menu uses the real cursor.
