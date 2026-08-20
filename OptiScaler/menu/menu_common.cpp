@@ -13,6 +13,7 @@
 #include <framegen/nvngx/Nvngx_FG.h>
 
 #include <nvapi/fakenvapi.h>
+#include <framegen/reproj/AReproj_Dx12.h>
 #include <hooks/Reflex_Hooks.h>
 
 #include <version_check.h>
@@ -3040,6 +3041,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         { FGOutput::FSRFG, "FSR FG", "FSR3/4-FG, RDNA4 autoupgrades to FSR4-FG\n\nFSR4-FG sometimes better/worse than XeFG" },
         { FGOutput::DLSSG, "DLSSG", "DLSSG output\ncan be used in conjuction with Nukem's for example" },
         { FGOutput::XeFG, "XeFG", "XeFG - heaviest, but best universal FG\n\nXeFG 3 overall deals best with HUD\n\nEnable UI Composition if HUD ghosting" },
+        { FGOutput::Reproj, "Async Reproj", "Reprojects the previous frame at half rate (ASW-style)\n\n"
+                                            "Cheapest FG alternative, works on any DX12 GPU\n"
+                                            "Expect smearing at disocclusions\n"
+                                            "Set FramerateLimit = refresh rate, reproj halves it" },
     };
 
     // clang-format on
@@ -3074,6 +3079,10 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
     outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+
+    // Async Reproj output requirements
+    auto constexpr reprojOutputIndex = (uint32_t) FGOutput::Reproj;
+    outputOptions[reprojOutputIndex].set_disabled(state.swapchainApi != API::DX12, "Unsupported API");
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&
@@ -3765,6 +3774,126 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ImGui::Spacing();
                 ImGui::Spacing();
             }
+        }
+    }
+
+    // Async reprojection controls
+    if (state.activeFgOutput == FGOutput::Reproj && state.activeFgInput != FGInput::NoFG &&
+        state.currentFGSwapchain != nullptr)
+    {
+        ImGui::SeparatorText("Frame Generation (Async Reproj)");
+
+        bool fgActive = config->FGEnabled.value_or_default();
+        if (ImGui::Checkbox("Active##reproj", &fgActive))
+        {
+            config->FGEnabled = fgActive;
+            LOG_DEBUG("FGEnabled set FGEnabled: {}", fgActive);
+
+            if (config->FGEnabled.value_or_default())
+                state.fgChanged = true;
+        }
+        ShowHelpMarker("Enable reprojection\n"
+                       "Game runs at half the set FramerateLimit, so set it to your refresh rate");
+
+        bool reprojAsync = config->ReprojAsync.value_or_default();
+        if (ImGui::Checkbox("Async DirectComposition presenter##reproj", &reprojAsync))
+        {
+            config->ReprojAsync = reprojAsync;
+            state.fgChanged = true;
+        }
+        ShowHelpMarker("Presents from a worker-owned composition swapchain without blocking the game thread.\n"
+                       "Falls back to the safe synchronous presenter when DirectComposition is unavailable.");
+
+        static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware", "Camera-only timewarp" };
+        int reprojMode = config->ReprojMode.value_or_default();
+        if (ImGui::Combo("Mode##reproj", &reprojMode, reprojModes, _countof(reprojModes)))
+            config->ReprojMode = reprojMode;
+        ShowHelpMarker("MV warp: cheapest, HUD-safe\n"
+                       "Depth-aware: better parallax, needs depth + camera data\n"
+                       "Camera-only: rotation-first depth warp; object motion is not used\n"
+                       "Falls back to MV warp when depth or camera data is missing");
+
+        ImGui::PushItemWidth(135.0f * menuResScale);
+        float reprojStrength = config->ReprojStrength.value_or_default();
+        if (ImGui::SliderFloat("Strength##reproj", &reprojStrength, 0.0f, 1.0f, "%.2f"))
+            config->ReprojStrength = reprojStrength;
+        ShowHelpMarker("Blend of the warped result with the original frame");
+
+        float reprojTimeStep = config->ReprojTimeStep.value_or_default();
+        if (ImGui::SliderFloat("Time step##reproj", &reprojTimeStep, 0.0f, 1.0f, "%.2f"))
+            config->ReprojTimeStep = reprojTimeStep;
+        ShowHelpMarker("Warp fraction (0.5 = midpoint between real frames)\n"
+                       "Scales the adaptive display-deadline warp positions");
+
+        int maxWarpFrames = config->ReprojMaxWarpFrames.value_or_default();
+        if (ImGui::SliderInt("Max warp frames##reproj", &maxWarpFrames, 1, 8))
+            config->ReprojMaxWarpFrames = maxWarpFrames;
+        ShowHelpMarker("Bounded number of extra warp presents per real frame. Higher values block the game thread only "
+                       "when the synchronous fallback is active.");
+
+        float targetRefresh = config->ReprojTargetRefresh.value_or_default();
+        if (ImGui::InputFloat("Target refresh##reproj", &targetRefresh, 1.0f, 10.0f, "%.0f Hz"))
+            config->ReprojTargetRefresh = std::max(0.0f, targetRefresh);
+        ShowHelpMarker("0 = FramerateLimit, then the active monitor refresh rate");
+        ImGui::PopItemWidth();
+
+        bool drawReprojUi = config->FGDrawUIOverFG.value_or_default();
+        if (ImGui::Checkbox("Composite supplied UI##reproj", &drawReprojUi))
+        {
+            config->FGDrawUIOverFG = drawReprojUi;
+            state.fgChanged = true;
+        }
+        ShowHelpMarker("In async mode, warp the supplied HUDless world image, then composite the game's UI in screen "
+                       "space.\nFalls back to warping the full backbuffer when either resource is missing.");
+
+        bool reprojInvertMV = config->ReprojInvertMV.value_or_default();
+        if (ImGui::Checkbox("Invert motion vectors##reproj", &reprojInvertMV))
+            config->ReprojInvertMV = reprojInvertMV;
+        ShowHelpMarker("Flip the MV sign convention\nPer-game setting, enable if the warp smears the wrong way");
+
+        bool reprojUseDepth = config->ReprojUseDepth.value_or_default();
+        if (ImGui::Checkbox("Use depth reprojection##reproj", &reprojUseDepth))
+            config->ReprojUseDepth = reprojUseDepth;
+
+        bool reprojRotationOnly = config->ReprojRotationOnly.value_or_default();
+        if (ImGui::Checkbox("Rotation-only##reproj", &reprojRotationOnly))
+            config->ReprojRotationOnly = reprojRotationOnly;
+        ShowHelpMarker("Keep camera position fixed in depth-aware modes to avoid translation disocclusions");
+
+        bool reprojLateLatch = config->ReprojLateLatch.value_or_default();
+        if (ImGui::Checkbox("Late-latch mouse camera##reproj", &reprojLateLatch))
+            config->ReprojLateLatch = reprojLateLatch;
+        ShowHelpMarker("Apply mouse movement received after the real camera pose immediately before each camera warp");
+
+        bool reprojAutoCalibrate = config->ReprojAutoCalibrate.value_or_default();
+        if (ImGui::Checkbox("Auto-calibrate camera input##reproj", &reprojAutoCalibrate))
+            config->ReprojAutoCalibrate = reprojAutoCalibrate;
+        ShowHelpMarker("Automatically learn sensitivity, axes, inversion, and input delay from real camera movement");
+
+        bool reprojDebugView = config->ReprojDebugView.value_or_default();
+        if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))
+            config->ReprojDebugView = reprojDebugView;
+        ShowHelpMarker("False-color the warped pixels (red = moved, green = depth confidence)");
+
+        bool reprojForceBorderless = config->ReprojForceBorderless.value_or_default();
+        if (ImGui::Checkbox("Force borderless##reproj", &reprojForceBorderless))
+            config->ReprojForceBorderless = reprojForceBorderless;
+        ShowHelpMarker("Force borderless windowed mode so the fake frame can tear\n"
+                       "Needed for exclusive-fullscreen games");
+
+        if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
+        {
+            const auto metrics = reproj->GetRuntimeMetrics();
+            ImGui::TextDisabled("Real %.1f FPS | warp %.1f FPS | target %.0f Hz | warps %u | dropped %u",
+                                metrics.realFps, metrics.warpFps, metrics.targetRefreshHz, metrics.warpsPerReal,
+                                metrics.droppedWarps);
+            ImGui::TextDisabled("Pose age %.1f ms | queue %u (%s)%s%s", metrics.poseAgeMs, metrics.queueDepth,
+                                metrics.asyncPresenter ? "async DComp" : "safe synchronous",
+                                metrics.depthReady ? " | depth ready" : "",
+                                metrics.latePoseEstimated ? " | pose extrapolated" : "");
+            if (reprojLateLatch && reprojAutoCalibrate)
+                ImGui::TextDisabled("Mouse calibration %.0f%% | learned delay %d ms",
+                                    metrics.mouseCalibrationConfidence * 100.0f, metrics.mouseCalibrationLagMs);
         }
     }
 

@@ -10,4 +10,5 @@ class FrameLimit
 
   public:
     static void sleep(bool fgActive);
+    static void sleepForMs(double ms);
 };

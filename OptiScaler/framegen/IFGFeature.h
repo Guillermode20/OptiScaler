@@ -59,6 +59,7 @@ class IFGFeature
     float _cameraUp[BUFFER_COUNT][3] {};       ///< The camera up normalized vector in world space.
     float _cameraRight[BUFFER_COUNT][3] {};    ///< The camera right normalized vector in world space.
     float _cameraForward[BUFFER_COUNT][3] {};  ///< The camera forward normalized vector in world space.
+    double _cameraTimestamp[BUFFER_COUNT] = {};
     float _meterFactor[BUFFER_COUNT] = {};
     double _ftDelta[BUFFER_COUNT] = {};
     UINT64 _interpolationWidth[BUFFER_COUNT] = {};

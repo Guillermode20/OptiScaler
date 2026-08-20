@@ -199,6 +199,8 @@ struct InputState
 
     std::array<RawInputSanitizeDecision, MaxRawInputSanitizeCacheEntries> RawInputSanitizeCache {};
     std::size_t RawInputSanitizeCacheWriteIndex = 0;
+    std::array<HRAWINPUT, MaxRawInputSanitizeCacheEntries> RecordedRawMotionHandles {};
+    std::size_t RecordedRawMotionWriteIndex = 0;
 
     std::array<WindowsHookSlot, MaxTrackedWindowsHooks> WindowsHookSlots {};
     std::array<bool, 256> WindowsHookKeyboardBlockedDown {};
@@ -336,6 +338,9 @@ struct InputState
     POINT MouseClientPos {};
     POINT MouseScreenPos {};
     POINT LastMouseClientPos {};
+    POINT CursorPollCenter {};
+    POINT CursorPollLastOffset {};
+    bool CursorPollCenterValid = false;
 
     // Cursor position returned to the game while the menu owns cursor input.
     // MouseScreenPos may still move because the menu uses the real cursor.
@@ -352,6 +357,11 @@ struct InputState
     DWORD ExternalRawInputSinkThreadId = 0;
 
     float MouseWheel = 0.0f;
+
+    RawMouseMotion RawMouseMotionState {};
+    // ponytail: 256 packets cover ~32 ms even at 8 kHz; use time-bucketed history only if longer gaps matter.
+    std::array<RawMouseMotion, 256> RawMouseHistory {};
+    std::size_t RawMouseHistoryWriteIndex = 0;
 
     RECT SavedClipRect {};
     bool HasSavedClipRect = false;
@@ -579,6 +589,7 @@ void SanitizeRawMouseKeepAllowedButtonUpsLocked(RAWINPUT& input, USHORT allowedB
 void SanitizeRawKeyboardLocked(RAWINPUT& input);
 int NormalizeRawKeyboardVirtualKey(const RAWKEYBOARD& keyboard);
 void HandleRawInputLocked(HRAWINPUT rawInputHandle);
+void AccumulateRelativeMouseMotionLocked(LONG x, LONG y);
 
 // Win32 hook tracking
 bool IsTrackedWindowsHookType(int hookType);

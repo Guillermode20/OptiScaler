@@ -34,6 +34,37 @@ For selecting upscalers from in-game menus `Upscalers` section could be used.
 
 ![upscalers](images/Upscalers.png)
 
+### Async Reprojection (DX12)
+
+`FGOutput=reproj` warps the last real frame using the selected upscaler's motion
+vectors and, when available, depth/camera data. It does not create unseen geometry.
+Use `FGInput=upscaler` with `Dx12Upscaler=fsr22` for the supported generic path.
+
+```ini
+[FrameGen]
+Enabled=true
+FGInput=upscaler
+FGOutput=reproj
+
+[Reproj]
+; Experimental worker-owned DirectComposition output; false keeps the synchronous fallback
+Async=false
+; 0 = motion vectors, 1 = depth-aware, 2 = rotation-only camera timewarp
+Mode=0
+; 0 uses FramerateLimit, then the active monitor refresh
+TargetRefresh=0
+; Safe default: one extra warp per real frame
+MaxWarpFrames=1
+UseDepth=true
+RotationOnly=false
+```
+
+`Async=true` uses a worker-owned DirectComposition swapchain, keeping warp writes
+away from the game's backbuffers. If composition setup fails, OptiScaler falls back
+to the synchronous presenter. Higher `MaxWarpFrames` values may reduce game-thread
+throughput only in that fallback. The menu reports real/warp FPS, queue depth, and
+the active presenter.
+
 ### Pseudo SuperSampling
 With OptiScaler 0.4 there are new options for pseudo-supersampling under `[Upscalers]`
 
@@ -422,5 +453,3 @@ Scale=auto
 These can be changed from the in-game menu with real-time results.
 
 ![menu scale](images/ui_scale.png)
-
-

@@ -152,7 +152,10 @@ void* __cdecl fakenvapi::queryInterface(NvU32 id)
 // Inform AntiLag 2 when present of interpolated frames starts
 void fakenvapi::reportFGPresent(IDXGISwapChain* pSwapChain, bool fg_state, bool frame_interpolated)
 {
-    if (!isUsingAsMainNvapi() || State::Instance().activeFgOutput != FGOutput::FSRFG)
+    static std::mutex presentMutex;
+    std::scoped_lock lock(presentMutex);
+    const auto output = State::Instance().activeFgOutput;
+    if (!isUsingAsMainNvapi() || (output != FGOutput::FSRFG && output != FGOutput::Reproj))
         return;
 
     auto lowLatencyCtx = LowLatencyCtx::get();
@@ -162,6 +165,14 @@ void fakenvapi::reportFGPresent(IDXGISwapChain* pSwapChain, bool fg_state, bool 
         lowLatencyCtx->set_forced_fg(fg_state);
     else
         LOG_ERROR("Couldn't get low latency context");
+
+    // Reprojection owns its presenter and has no FFX AntiLag context to register.
+    if (output == FGOutput::Reproj)
+    {
+        if (lowLatencyCtx && fg_state)
+            lowLatencyCtx->set_fg_type(frame_interpolated, 0);
+        return;
+    }
 
     if (fg_state)
     {

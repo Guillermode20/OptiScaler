@@ -51,7 +51,6 @@ class IFGFeature_Dx12 : public virtual IFGFeature
     bool InitCopyCmdList();
     void DestroyCopyCmdList();
     bool WaitForUIAllocator(UINT index);
-    bool SubmitUICommandList(UINT index);
 
   protected:
     ID3D12Device* _device = nullptr;
@@ -95,6 +94,7 @@ class IFGFeature_Dx12 : public virtual IFGFeature
                          D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);
     bool CopyResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source, ID3D12Resource** target,
                       D3D12_RESOURCE_STATES sourceState);
+    bool SubmitUICommandList(UINT index);
 
     void NewFrame() override final;
     void FlipResource(Dx12Resource* resource);

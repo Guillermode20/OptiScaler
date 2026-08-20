@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "IFGFeature.h"
 #include <Config.h>
+#include <Util.h>
 #include <low_latency/input/input_common.h>
 
 int IFGFeature::GetIndex() { return (_frameCount % BUFFER_COUNT); }
@@ -237,6 +238,7 @@ void IFGFeature::SetCameraData(float cameraPosition[3], float cameraUp[3], float
     std::memcpy(_cameraUp[index], cameraUp, 3 * sizeof(float));
     std::memcpy(_cameraRight[index], cameraRight, 3 * sizeof(float));
     std::memcpy(_cameraForward[index], cameraForward, 3 * sizeof(float));
+    _cameraTimestamp[index] = Util::MillisecondsNow();
 }
 
 void IFGFeature::SetFrameTimeDelta(double delta, int index)

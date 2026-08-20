@@ -81,3 +81,13 @@ void FrameLimit::sleep(bool fgActive)
         previous_frame_time = get_timestamp();
     }
 }
+
+void FrameLimit::sleepForMs(double ms)
+{
+    if (ms <= 0.0)
+        return;
+
+    // combined_sleep takes nanoseconds
+    if (auto res = combined_sleep((int64_t) (ms * 1'000'000.0)); res)
+        LOG_ERROR("Sleep command failed: {}", res);
+}

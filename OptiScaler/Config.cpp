@@ -103,6 +103,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGOutput.set_from_config(FGOutput::XeFG);
                 else if (lstrcmpiA(FGOutputString.value().c_str(), "dlssg") == 0)
                     FGOutput.set_from_config(FGOutput::DLSSG);
+                else if (lstrcmpiA(FGOutputString.value().c_str(), "reproj") == 0)
+                    FGOutput.set_from_config(FGOutput::Reproj);
             }
 
             const bool canUseNvngxReplacement =
@@ -175,6 +177,29 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGFPTHybridSpinTime.set_from_config(readInt("FSRFG", "FPTHybridSpinTime"));
             FGFPTAllowWaitForSingleObjectOnFence.set_from_config(readBool("FSRFG", "FPTWaitForSingleObjectOnFence"));
             FSRFGEnableWatermark.set_from_config(readBool("FSRFG", "EnableWatermark"));
+        }
+
+        // Async Reprojection
+        {
+            ReprojAsync.set_from_config(readBool("Reproj", "Async"));
+            ReprojMode.set_from_config(readInt("Reproj", "Mode"));
+            ReprojStrength.set_from_config(readFloat("Reproj", "Strength"));
+            ReprojTimeStep.set_from_config(readFloat("Reproj", "TimeStep"));
+            ReprojInvertMV.set_from_config(readBool("Reproj", "InvertMV"));
+            ReprojUseJitterCancel.set_from_config(readBool("Reproj", "UseJitterCancel"));
+            ReprojCapAtHalfRefresh.set_from_config(readBool("Reproj", "CapAtHalfRefresh"));
+            ReprojMaxWarpFrames.set_from_config(readInt("Reproj", "MaxWarpFrames"));
+            ReprojTargetRefresh.set_from_config(readFloat("Reproj", "TargetRefresh"));
+            ReprojUseDepth.set_from_config(readBool("Reproj", "UseDepth"));
+            ReprojRotationOnly.set_from_config(readBool("Reproj", "RotationOnly"));
+            ReprojLateLatch.set_from_config(readBool("Reproj", "LateLatch"));
+            ReprojAutoCalibrate.set_from_config(readBool("Reproj", "AutoCalibrate"));
+            ReprojMouseDegreesX.set_from_config(readFloat("Reproj", "MouseDegreesX"));
+            ReprojMouseDegreesY.set_from_config(readFloat("Reproj", "MouseDegreesY"));
+            ReprojPredictionMs.set_from_config(readFloat("Reproj", "PredictionMs"));
+            ReprojMaxRotation.set_from_config(readFloat("Reproj", "MaxRotation"));
+            ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
+            ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
         }
 
         // OptiFG
@@ -909,6 +934,8 @@ bool Config::SaveIni()
                 FGOutputString = "XeFG";
             else if (FGOutputHeld.value() == FGOutput::DLSSG)
                 FGOutputString = "DLSSG";
+            else if (FGOutputHeld.value() == FGOutput::Reproj)
+                FGOutputString = "Reproj";
         }
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
 
@@ -988,6 +1015,39 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FGFPTAllowWaitForSingleObjectOnFence.value_for_config()).c_str());
         ini.SetValue("FSRFG", "EnableWatermark",
                      GetBoolValue(Instance()->FSRFGEnableWatermark.value_for_config()).c_str());
+    }
+
+    // Async Reprojection output
+    {
+        ini.SetValue("Reproj", "Async", GetBoolValue(Instance()->ReprojAsync.value_for_config()).c_str());
+        ini.SetValue("Reproj", "Mode", GetIntValue(Instance()->ReprojMode.value_for_config()).c_str());
+        ini.SetValue("Reproj", "Strength", GetFloatValue(Instance()->ReprojStrength.value_for_config()).c_str());
+        ini.SetValue("Reproj", "TimeStep", GetFloatValue(Instance()->ReprojTimeStep.value_for_config()).c_str());
+        ini.SetValue("Reproj", "InvertMV", GetBoolValue(Instance()->ReprojInvertMV.value_for_config()).c_str());
+        ini.SetValue("Reproj", "UseJitterCancel",
+                     GetBoolValue(Instance()->ReprojUseJitterCancel.value_for_config()).c_str());
+        ini.SetValue("Reproj", "CapAtHalfRefresh",
+                     GetBoolValue(Instance()->ReprojCapAtHalfRefresh.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MaxWarpFrames",
+                     GetIntValue(Instance()->ReprojMaxWarpFrames.value_for_config()).c_str());
+        ini.SetValue("Reproj", "TargetRefresh",
+                     GetFloatValue(Instance()->ReprojTargetRefresh.value_for_config()).c_str());
+        ini.SetValue("Reproj", "UseDepth", GetBoolValue(Instance()->ReprojUseDepth.value_for_config()).c_str());
+        ini.SetValue("Reproj", "RotationOnly", GetBoolValue(Instance()->ReprojRotationOnly.value_for_config()).c_str());
+        ini.SetValue("Reproj", "LateLatch", GetBoolValue(Instance()->ReprojLateLatch.value_for_config()).c_str());
+        ini.SetValue("Reproj", "AutoCalibrate",
+                     GetBoolValue(Instance()->ReprojAutoCalibrate.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MouseDegreesX",
+                     GetFloatValue(Instance()->ReprojMouseDegreesX.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MouseDegreesY",
+                     GetFloatValue(Instance()->ReprojMouseDegreesY.value_for_config()).c_str());
+        ini.SetValue("Reproj", "PredictionMs",
+                     GetFloatValue(Instance()->ReprojPredictionMs.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MaxRotation",
+                     GetFloatValue(Instance()->ReprojMaxRotation.value_for_config()).c_str());
+        ini.SetValue("Reproj", "DebugView", GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
+        ini.SetValue("Reproj", "ForceBorderless",
+                     GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());
     }
 
     // XeFG output

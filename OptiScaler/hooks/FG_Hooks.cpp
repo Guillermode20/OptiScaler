@@ -5,6 +5,7 @@
 #include <framegen/ffx/FSRFG_Dx12.h>
 #include <framegen/xefg/XeFG_Dx12.h>
 #include <framegen/dlssg/DLSSG_Dx12.h>
+#include <framegen/reproj/AReproj_Dx12.h>
 
 #include <inputs/FG/FSR3_Dx12_FG.h>
 #include <inputs/FG/FfxApi_Dx12_FG.h>
@@ -123,6 +124,10 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
         {
             State::Instance().currentFG = new DLSSG_Dx12();
         }
+        else if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        {
+            State::Instance().currentFG = new AReproj_Dx12();
+        }
     }
 
     // Create FG swapchain
@@ -233,6 +238,10 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
         else if (State::Instance().activeFgOutput == FGOutput::DLSSG)
         {
             State::Instance().currentFG = new DLSSG_Dx12();
+        }
+        else if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        {
+            State::Instance().currentFG = new AReproj_Dx12();
         }
     }
 
@@ -452,9 +461,14 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
         fg->Deactivate();
     }
 
+    // XeFG and async reprojection both prefer borderless so their internal presents can tear
+    const bool forceBorderless = Config::Instance()->FGXeFGForceBorderless.value_or_default() ||
+                                 (State::Instance().activeFgOutput == FGOutput::Reproj &&
+                                  Config::Instance()->ReprojForceBorderless.value_or_default());
+
     bool modeChanged = false;
     bool orgFS = Fullscreen;
-    if (Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (forceBorderless)
     {
         if (Fullscreen)
         {
@@ -485,7 +499,7 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
     auto result = S_OK;
 
-    if (!Config::Instance()->FGXeFGForceBorderless.value_or_default())
+    if (!forceBorderless)
     {
         result = o_FGSCSetFullscreenState(This, Fullscreen, pTarget);
         LOG_DEBUG("Fullscreen: {}, pTarget: {:X}, Result: {:X}", Fullscreen, (size_t) pTarget, (UINT) result);
@@ -631,6 +645,15 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
                 SwapChainFlags = State::Instance().SCLastFlags;
             }
         }
+    }
+
+    // Async reprojection needs >= 3 buffers (a free slot for the fake frame) and tearing
+    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    {
+        if (BufferCount > 0 && BufferCount < 3)
+            BufferCount = 3;
+
+        SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     }
 
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}", BufferCount, Width, Height,
@@ -871,6 +894,15 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
         }
     }
 
+    // Async reprojection needs >= 3 buffers (a free slot for the fake frame) and tearing
+    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    {
+        if (BufferCount > 0 && BufferCount < 3)
+            BufferCount = 3;
+
+        SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    }
+
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}, Caller: {}", BufferCount,
               Width, Height, (UINT) Format, SwapChainFlags, Util::WhoIsTheCaller(_ReturnAddress()));
 
@@ -1104,6 +1136,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
                            const DXGI_PRESENT_PARAMETERS* pPresentParameters)
 {
     _lastPresentFlags = Flags;
+    _lastPresentSyncInterval = SyncInterval;
 
     auto& state = State::Instance();
     auto config = Config::Instance();
@@ -1189,6 +1222,26 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         }
     }
 
+    // Reprojection presents inside fg->Present(), so apply the requested mode before
+    // handing it the game's present arguments rather than only before the trailing present.
+    if (willPresent && config->ForceVsync.has_value())
+    {
+        if (!config->ForceVsync.value())
+        {
+            SyncInterval = 0;
+            if (state.SCAllowTearing && !state.realExclusiveFullscreen)
+                Flags |= DXGI_PRESENT_ALLOW_TEARING;
+        }
+        else
+        {
+            SyncInterval = std::max(1u, config->VsyncInterval.value_or_default());
+            Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
+        }
+
+        _lastPresentFlags = Flags;
+        _lastPresentSyncInterval = SyncInterval;
+    }
+
     if (willPresent && fgFeatureActive)
     {
         if (state.activeFgInput == FGInput::FSRFG)
@@ -1209,42 +1262,18 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         Hudfix_Dx12::PresentStart();
     }
 
-    if (willPresent && config->ForceVsync.has_value())
-    {
-        LOG_DEBUG("ForceVsync: {}, VsyncInterval: {}, SCAllowTearing: {}, realExclusiveFullscreen: {}",
-                  config->ForceVsync.value(), config->VsyncInterval.value_or_default(), state.SCAllowTearing,
-                  state.realExclusiveFullscreen);
-
-        if (!config->ForceVsync.value())
-        {
-            SyncInterval = 0;
-
-            if (state.SCAllowTearing && !state.realExclusiveFullscreen)
-            {
-                LOG_DEBUG("Adding DXGI_PRESENT_ALLOW_TEARING");
-                Flags |= DXGI_PRESENT_ALLOW_TEARING;
-            }
-        }
-        else
-        {
-            SyncInterval = config->VsyncInterval.value_or_default();
-
-            if (SyncInterval < 1)
-                SyncInterval = 1;
-
-            LOG_DEBUG("Removing DXGI_PRESENT_ALLOW_TEARING");
-            Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
-        }
-
-        LOG_DEBUG("Final SyncInterval: {}", SyncInterval);
-    }
-
     // Used at wrapped_swapchain LocalPresent to determine is frame is interpolated or not
     if (willPresent)
         state.fgPresentIsCalled = true;
 
     HRESULT result;
-    if (pPresentParameters == nullptr)
+    if (willPresent && state.activeFgOutput == FGOutput::Reproj && fgFeatureActive)
+    {
+        // AReproj_Dx12::Present() already presented the real frame
+        // (and will present the reprojected frame once frame gen lands)
+        result = S_OK;
+    }
+    else if (pPresentParameters == nullptr)
         result = o_FGSCPresent(This, SyncInterval, Flags);
     else
         result = o_FGSCPresent1((IDXGISwapChain1*) This, SyncInterval, Flags, pPresentParameters);
@@ -1273,8 +1302,16 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (state.swapchainInteropApi == SwapchainInteropApi::None)
         Hudfix_Dx12::PresentEnd();
 
-    if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
-        !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+    // Reprojection owns pacing and must not be suppressed by Reflex/XeLL's limiter
+    // selection. Its limiter applies to the real-frame cadence; the fake present is
+    // emitted by AReproj_Dx12::Present().
+    if (willPresent && state.activeFgOutput == FGOutput::Reproj)
+    {
+        const bool reprojActive = fg != nullptr && fg->IsActive() && !fg->IsPaused();
+        FrameLimit::sleep(reprojActive && config->ReprojCapAtHalfRefresh.value_or_default());
+    }
+    else if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
+             !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
     {
         FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
     }

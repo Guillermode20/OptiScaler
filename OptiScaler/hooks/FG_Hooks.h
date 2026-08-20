@@ -24,6 +24,16 @@ class FGHooks
     static void ClearDx12InteropPresentSC(IUnknown* pSwapChain);
     static bool IsDx12InteropPresentSC(IUnknown* pSwapChain);
 
+    // Used by FG features that own the present (e.g. AReproj_Dx12) to present through the
+    // hooked vtable without re-entering FGPresent (hkFGPresent passes straight through).
+    static void SkipPresent(bool skip) { _skipPresent = skip; }
+    static void SkipPresent1(bool skip) { _skipPresent1 = skip; }
+
+    // Last SyncInterval/Flags seen by FGPresent, so a feature that presents itself
+    // can reproduce the game's present behavior.
+    static UINT LastPresentSyncInterval() { return _lastPresentSyncInterval; }
+    static UINT LastPresentFlags() { return _lastPresentFlags; }
+
   private:
     using PFN_Present = rewrite_signature<decltype(&IDXGISwapChain::Present)>::type;
     using PFN_Present1 = rewrite_signature<decltype(&IDXGISwapChain1::Present1)>::type;
@@ -52,9 +62,10 @@ class FGHooks
     inline static HWND _dx12InteropPresentHwnd = nullptr;
     inline static bool _skipResize = false;
     inline static bool _skipResize1 = false;
-    inline static bool _skipPresent = false;
-    inline static bool _skipPresent1 = false;
+    inline static thread_local bool _skipPresent = false;
+    inline static thread_local bool _skipPresent1 = false;
     inline static UINT _lastPresentFlags = 0;
+    inline static UINT _lastPresentSyncInterval = 0;
     inline static double _lastFGFrameTime = -1.0;
 
     static void HookFGSwapchain(IDXGISwapChain* pSwapChain);
