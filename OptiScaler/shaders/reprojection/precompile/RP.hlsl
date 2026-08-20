@@ -52,7 +52,16 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
     // Texel displacement -> normalized UV offset, then move BACKWARD along the flow
     float2 deltaUV = delta / float2(MVSize);
-    float2 srcUV = clamp(uv - deltaUV * TimeStep, 0.0f, 1.0f);
+
+    // Post-render late latch: convert the raw-mouse camera rotation into a small
+    // screen-space offset so the MV-only path also benefits from the latest pose.
+    float lateTanHalfV = tan(CameraVFov * 0.5f);
+    float lateTanHalfH = lateTanHalfV * CameraAspect;
+    float2 lateUV = (lateTanHalfH > 1e-5f && lateTanHalfV > 1e-5f)
+                        ? float2(LateYaw / (2.0f * lateTanHalfH), LatePitch / (2.0f * lateTanHalfV))
+                        : float2(0.0f, 0.0f);
+
+    float2 srcUV = clamp(uv - deltaUV * TimeStep + lateUV, 0.0f, 1.0f);
 
     float4 warped = LastColor.SampleLevel(Bilinear, srcUV, 0);
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);

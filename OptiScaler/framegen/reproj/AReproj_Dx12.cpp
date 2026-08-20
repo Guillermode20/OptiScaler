@@ -388,7 +388,11 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse) const
 {
     auto config = Config::Instance();
-    if (!config->ReprojLateLatch.value_or_default() || constants.mode == 0 || !OptiInput::IsFocused())
+    if (!config->ReprojLateLatch.value_or_default() || !OptiInput::IsFocused())
+        return;
+    // The MV-only path approximates the late rotation as a screen-space offset, so
+    // it needs a valid FOV/aspect; the depth path always has one when mode != 0.
+    if (constants.cameraVFov <= 0.0f || constants.cameraAspect <= 0.0f)
         return;
 
     const auto current = OptiInput::GetRawMouseMotion();
@@ -903,6 +907,11 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 
         desc.Width = static_cast<UINT>(client.right);
         desc.Height = static_cast<UINT>(client.bottom);
+        // Present with DXGI_PRESENT_ALLOW_TEARING so the worker's Present can never
+        // block on scanout. Without it, a child window that the compositor never
+        // scans out (common on Wine/Proton) fills its flip-model queue and stalls the
+        // presenter forever once the buffers are exhausted.
+        desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
         result = realFactory->CreateSwapChainForHwnd(_presentQueue, _presentHwnd, &desc, nullptr, nullptr, &swapChain1);
         if (SUCCEEDED(result))
             result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
@@ -1026,13 +1035,25 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     if (_presentSwapChain == nullptr)
         return E_FAIL;
 
+    // The HWND fallback swapchain is tearing-enabled; presenting with the tearing
+    // flag maps to an immediate (non-blocking) Vulkan present on vkd3d-proton.
+    UINT presentFlags = flags;
+    if (!_presenterUsesComposition)
+        presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
+
     FGHooks::SkipPresent(true);
-    const auto result = _presentSwapChain->Present(syncInterval, flags);
+    const auto result = _presentSwapChain->Present(syncInterval, presentFlags);
     FGHooks::SkipPresent(false);
     if (result == S_OK && interpolated)
         fakenvapi::reportFGPresent(_presentSwapChain, true, true);
     else if (result == DXGI_ERROR_DEVICE_REMOVED && _device != nullptr)
         Util::GetDeviceRemovedReason(_device);
+
+    // An occluded window is a transient success state (minimize/alt-tab), not a
+    // presenter failure. Treat it as an invisible-but-successful present.
+    if (result == DXGI_STATUS_OCCLUDED)
+        return S_OK;
+
     return result;
 }
 
@@ -1074,9 +1095,34 @@ void AReproj_Dx12::PresenterMain()
 
         auto& packet = _packets[packetIndex];
         consumedFrame = packet.frameId;
-        if (FAILED(_presentQueue->Wait(_uiFence, packet.captureFenceValue)) || !DisplayPacket(packetIndex, true) ||
-            !AttachCompositionVisual() || PresentCompositorFrame(0, 0, false) != S_OK)
+
+        // Fail in stages so a stalled presenter leaves an actionable message instead
+        // of a silent queue buildup.
+        if (FAILED(_presentQueue->Wait(_uiFence, packet.captureFenceValue)))
         {
+            LOG_ERROR("Reproj: presenter failed to wait on capture fence for frame {}", packet.frameId);
+            packet.state.store(PacketState::Retired);
+            _presenterState.store(PresenterState::Failed);
+            break;
+        }
+        if (!DisplayPacket(packetIndex, true))
+        {
+            LOG_ERROR("Reproj: presenter failed to display frame {}", packet.frameId);
+            packet.state.store(PacketState::Retired);
+            _presenterState.store(PresenterState::Failed);
+            break;
+        }
+        if (!AttachCompositionVisual())
+        {
+            LOG_ERROR("Reproj: presenter failed to attach composition visual");
+            packet.state.store(PacketState::Retired);
+            _presenterState.store(PresenterState::Failed);
+            break;
+        }
+        const auto realPresentResult = PresentCompositorFrame(0, 0, false);
+        if (realPresentResult != S_OK)
+        {
+            LOG_ERROR("Reproj: presenter real-frame present failed: {:X}", (UINT) realPresentResult);
             packet.state.store(PacketState::Retired);
             _presenterState.store(PresenterState::Failed);
             break;
