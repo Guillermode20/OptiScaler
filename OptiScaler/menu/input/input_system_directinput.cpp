@@ -702,9 +702,10 @@ HRESULT WINAPI hkDirectInputCreateDeviceW(void* directInput, REFGUID guid, void*
 
 HRESULT WINAPI hkDirectInputGetDeviceState(void* device, DWORD dataSize, LPVOID data)
 {
+    DirectInputDeviceKind kind;
     {
         std::unique_lock lock(_state.Mutex);
-        const DirectInputDeviceKind kind = GetDirectInputDeviceKindLocked(device);
+        kind = GetDirectInputDeviceKindLocked(device);
         _state.DirectInputGetDeviceStateCallCount++;
 
         if (ShouldBlockDirectInputDeviceLocked(kind))
@@ -724,16 +725,27 @@ HRESULT WINAPI hkDirectInputGetDeviceState(void* device, DWORD dataSize, LPVOID 
     if (o_DirectInputDeviceGetDeviceState == nullptr)
         return DIERR_GENERIC;
 
-    ScopedHookBypass bypass;
-    return o_DirectInputDeviceGetDeviceState(device, dataSize, data);
+    HRESULT result;
+    {
+        ScopedHookBypass bypass;
+        result = o_DirectInputDeviceGetDeviceState(device, dataSize, data);
+    }
+    if (SUCCEEDED(result) && kind == DirectInputDeviceKind::Mouse && data != nullptr && dataSize >= sizeof(DIMOUSESTATE))
+    {
+        const auto* mouse = static_cast<const DIMOUSESTATE*>(data);
+        std::unique_lock lock(_state.Mutex);
+        AccumulateRelativeMouseMotionLocked(mouse->lX, mouse->lY);
+    }
+    return result;
 }
 
 HRESULT WINAPI hkDirectInputGetDeviceData(void* device, DWORD objectDataSize, LPDIDEVICEOBJECTDATA data, LPDWORD inOut,
                                           DWORD flags)
 {
+    DirectInputDeviceKind kind;
     {
         std::unique_lock lock(_state.Mutex);
-        const DirectInputDeviceKind kind = GetDirectInputDeviceKindLocked(device);
+        kind = GetDirectInputDeviceKindLocked(device);
         _state.DirectInputGetDeviceDataCallCount++;
 
         if (ShouldBlockDirectInputDeviceLocked(kind))
@@ -753,8 +765,28 @@ HRESULT WINAPI hkDirectInputGetDeviceData(void* device, DWORD objectDataSize, LP
     if (o_DirectInputDeviceGetDeviceData == nullptr)
         return DIERR_GENERIC;
 
-    ScopedHookBypass bypass;
-    return o_DirectInputDeviceGetDeviceData(device, objectDataSize, data, inOut, flags);
+    HRESULT result;
+    {
+        ScopedHookBypass bypass;
+        result = o_DirectInputDeviceGetDeviceData(device, objectDataSize, data, inOut, flags);
+    }
+    if (SUCCEEDED(result) && kind == DirectInputDeviceKind::Mouse && data != nullptr && inOut != nullptr &&
+        objectDataSize >= sizeof(DIDEVICEOBJECTDATA) && (flags & DIGDD_PEEK) == 0)
+    {
+        LONG x = 0, y = 0;
+        for (DWORD i = 0; i < *inOut; ++i)
+        {
+            const auto* event = reinterpret_cast<const DIDEVICEOBJECTDATA*>(reinterpret_cast<const BYTE*>(data) +
+                                                                            i * objectDataSize);
+            if (event->dwOfs == DIMOFS_X)
+                x += static_cast<LONG>(event->dwData);
+            else if (event->dwOfs == DIMOFS_Y)
+                y += static_cast<LONG>(event->dwData);
+        }
+        std::unique_lock lock(_state.Mutex);
+        AccumulateRelativeMouseMotionLocked(x, y);
+    }
+    return result;
 }
 
 ULONG WINAPI hkDirectInputDeviceRelease(void* device)

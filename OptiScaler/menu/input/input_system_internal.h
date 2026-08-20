@@ -199,6 +199,8 @@ struct InputState
 
     std::array<RawInputSanitizeDecision, MaxRawInputSanitizeCacheEntries> RawInputSanitizeCache {};
     std::size_t RawInputSanitizeCacheWriteIndex = 0;
+    std::array<HRAWINPUT, MaxRawInputSanitizeCacheEntries> RecordedRawMotionHandles {};
+    std::size_t RecordedRawMotionWriteIndex = 0;
 
     std::array<WindowsHookSlot, MaxTrackedWindowsHooks> WindowsHookSlots {};
     std::array<bool, 256> WindowsHookKeyboardBlockedDown {};
@@ -584,6 +586,7 @@ void SanitizeRawMouseKeepAllowedButtonUpsLocked(RAWINPUT& input, USHORT allowedB
 void SanitizeRawKeyboardLocked(RAWINPUT& input);
 int NormalizeRawKeyboardVirtualKey(const RAWKEYBOARD& keyboard);
 void HandleRawInputLocked(HRAWINPUT rawInputHandle);
+void AccumulateRelativeMouseMotionLocked(LONG x, LONG y);
 
 // Win32 hook tracking
 bool IsTrackedWindowsHookType(int hookType);

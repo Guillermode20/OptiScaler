@@ -252,6 +252,8 @@ void ResetRawInputSanitizeCacheLocked()
 {
     _state.RawInputSanitizeCache = {};
     _state.RawInputSanitizeCacheWriteIndex = 0;
+    _state.RecordedRawMotionHandles = {};
+    _state.RecordedRawMotionWriteIndex = 0;
 }
 
 RawSanitizeAction GetRawKeyboardSanitizeActionLocked(const RAWKEYBOARD& keyboard)
@@ -534,30 +536,49 @@ void TrackRawInputDeviceRegistrationLocked(const RAWINPUTDEVICE& device)
     }
 }
 
-void UpdateStateFromRawMouseLocked(const RAWMOUSE& mouse)
+void AccumulateRelativeMouseMotionLocked(LONG x, LONG y)
 {
-    AccumulateExternalRawMouseDeltaLocked(mouse);
+    if (x == 0 && y == 0)
+        return;
 
+    _state.ReceivedAnyInputThisFrame = true;
     LARGE_INTEGER counter {};
     LARGE_INTEGER frequency {};
     QueryPerformanceCounter(&counter);
     QueryPerformanceFrequency(&frequency);
     const auto now = 1000.0 * static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
-    if ((mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 && (mouse.lLastX != 0 || mouse.lLastY != 0))
+    auto& motion = _state.RawMouseMotionState;
+    if (motion.TimestampMs > 0.0 && now > motion.TimestampMs)
     {
-        auto& motion = _state.RawMouseMotionState;
-        if (motion.TimestampMs > 0.0 && now > motion.TimestampMs)
-        {
-            const auto dt = now - motion.TimestampMs;
-            motion.VelocityX = motion.VelocityX * 0.5 + static_cast<double>(mouse.lLastX) / dt * 0.5;
-            motion.VelocityY = motion.VelocityY * 0.5 + static_cast<double>(mouse.lLastY) / dt * 0.5;
-        }
-        motion.TotalX += mouse.lLastX;
-        motion.TotalY += mouse.lLastY;
-        motion.TimestampMs = now;
-        _state.RawMouseHistory[_state.RawMouseHistoryWriteIndex] = motion;
-        _state.RawMouseHistoryWriteIndex = (_state.RawMouseHistoryWriteIndex + 1) % _state.RawMouseHistory.size();
+        const auto dt = now - motion.TimestampMs;
+        motion.VelocityX = motion.VelocityX * 0.5 + static_cast<double>(x) / dt * 0.5;
+        motion.VelocityY = motion.VelocityY * 0.5 + static_cast<double>(y) / dt * 0.5;
     }
+    motion.TotalX += x;
+    motion.TotalY += y;
+    motion.TimestampMs = now;
+    _state.RawMouseHistory[_state.RawMouseHistoryWriteIndex] = motion;
+    _state.RawMouseHistoryWriteIndex = (_state.RawMouseHistoryWriteIndex + 1) % _state.RawMouseHistory.size();
+}
+
+bool ShouldRecordRawMotionHandleLocked(HRAWINPUT handle)
+{
+    if (handle == nullptr)
+        return true;
+    for (const auto recorded : _state.RecordedRawMotionHandles)
+        if (recorded == handle)
+            return false;
+    _state.RecordedRawMotionHandles[_state.RecordedRawMotionWriteIndex] = handle;
+    _state.RecordedRawMotionWriteIndex =
+        (_state.RecordedRawMotionWriteIndex + 1) % _state.RecordedRawMotionHandles.size();
+    return true;
+}
+
+void UpdateStateFromRawMouseLocked(const RAWMOUSE& mouse, HRAWINPUT handle)
+{
+    AccumulateExternalRawMouseDeltaLocked(mouse);
+    if ((mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 && ShouldRecordRawMotionHandleLocked(handle))
+        AccumulateRelativeMouseMotionLocked(mouse.lLastX, mouse.lLastY);
 
     const DWORD time = GetTickCount();
 
@@ -647,7 +668,7 @@ void UpdateStateFromRawKeyboardLocked(const RAWKEYBOARD& keyboard)
         SetKeyDown(vk, GetTickCount(), _state.BlockKeyboard);
 }
 
-void UpdateStateFromRawInputLocked(const RAWINPUT& input)
+void UpdateStateFromRawInputLocked(const RAWINPUT& input, HRAWINPUT handle)
 {
     _state.ReceivedRawInputThisFrame = true;
     _state.ReceivedAnyInputThisFrame = true;
@@ -656,7 +677,7 @@ void UpdateStateFromRawInputLocked(const RAWINPUT& input)
     {
     case RIM_TYPEMOUSE:
     {
-        UpdateStateFromRawMouseLocked(input.data.mouse);
+        UpdateStateFromRawMouseLocked(input.data.mouse, handle);
         break;
     }
 
@@ -711,7 +732,7 @@ void HandleRawInputLocked(HRAWINPUT rawInputHandle)
 
     const RAWINPUT* input = reinterpret_cast<const RAWINPUT*>(buffer.data());
 
-    UpdateStateFromRawInputLocked(*input);
+    UpdateStateFromRawInputLocked(*input, rawInputHandle);
 }
 
 void ApplyRawInputSanitizeActionLocked(RAWINPUT& input, RawSanitizeAction action, USHORT allowedMouseButtonUpFlags)
@@ -829,6 +850,13 @@ UINT WINAPI hkGetRawInputData(HRAWINPUT rawInput, UINT command, LPVOID data, PUI
 
         if (bypassHookDepth == 0)
         {
+            if (input->header.dwType == RIM_TYPEMOUSE &&
+                (input->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 &&
+                ShouldRecordRawMotionHandleLocked(rawInput))
+            {
+                AccumulateRelativeMouseMotionLocked(input->data.mouse.lLastX, input->data.mouse.lLastY);
+            }
+
             // A game may query the same HRAWINPUT more than once. Reuse the
             // first decision so key/button release passthrough stays stable.
             const RawInputSanitizeDecision decision = GetRawInputSanitizeDecisionLocked(rawInput, *input);
@@ -884,6 +912,11 @@ UINT WINAPI hkGetRawInputBuffer(PRAWINPUT data, PUINT size, UINT headerSize)
                 break;
 
             const DWORD packetSize = current->header.dwSize;
+            if (current->header.dwType == RIM_TYPEMOUSE &&
+                (current->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0)
+            {
+                AccumulateRelativeMouseMotionLocked(current->data.mouse.lLastX, current->data.mouse.lLastY);
+            }
             USHORT allowedMouseButtonUpFlags = 0;
             const RawSanitizeAction action = GetRawInputSanitizeActionLocked(*current, &allowedMouseButtonUpFlags);
 

@@ -802,8 +802,12 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 
     D3D12_COMMAND_QUEUE_DESC queueDesc {};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    if (FAILED(_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_presentQueue))))
+    auto result = _device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_presentQueue));
+    if (FAILED(result))
+    {
+        LOG_WARN("Reproj: async present queue creation failed: {:X}", (UINT) result);
         return false;
+    }
     _presentQueue->SetName(L"Reproj_PresentQueue");
 
     DXGI_SWAP_CHAIN_DESC mainDesc {};
@@ -826,15 +830,21 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
     IDXGISwapChain1* swapChain1 = nullptr;
-    auto result = factory->CreateSwapChainForComposition(_presentQueue, &desc, nullptr, &swapChain1);
+    result = factory->CreateSwapChainForComposition(_presentQueue, &desc, nullptr, &swapChain1);
     factory->Release();
     if (FAILED(result))
+    {
+        LOG_WARN("Reproj: composition swapchain creation failed: {:X}", (UINT) result);
         return false;
+    }
 
     result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
     swapChain1->Release();
     if (FAILED(result))
+    {
+        LOG_WARN("Reproj: composition swapchain query failed: {:X}", (UINT) result);
         return false;
+    }
 
     result = DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&_compositionDevice));
     if (SUCCEEDED(result))
@@ -844,7 +854,10 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     if (SUCCEEDED(result))
         result = _compositionVisual->SetContent(_presentSwapChain);
     if (FAILED(result))
+    {
+        LOG_WARN("Reproj: DirectComposition setup failed: {:X}", (UINT) result);
         return false;
+    }
 
     LOG_INFO("Reproj: DirectComposition async presenter created ({} buffers, {}x{})", desc.BufferCount, desc.Width,
              desc.Height);
@@ -893,7 +906,7 @@ bool AReproj_Dx12::StartAsyncPresenter()
     {
         LOG_WARN("Reproj: async presenter unavailable; using safe synchronous presenter");
         DestroyAsyncPresenter();
-        _presenterState.store(PresenterState::Failed);
+        _presenterState.store(PresenterState::Stopped);
         return false;
     }
 
@@ -1157,12 +1170,14 @@ bool AReproj_Dx12::Present()
         StopAsyncPresenter();
         DrainGpuWork();
         DestroyAsyncPresenter();
+        _presenterState.store(PresenterState::Stopped);
         LOG_WARN("Reproj: async presenter failed; continuing with synchronous fallback");
     }
 
     // Match the input paths that publish resources ahead of the game present
     // (Streamline/FSR3/FFX API) as well as the current upscaler slot.
     auto fIndex = GetIndexWillBeDispatched();
+    _lastDispatchedFrame = _frameCount;
     RecordRealFrame();
     {
         std::scoped_lock lock(_metricsMutex);
