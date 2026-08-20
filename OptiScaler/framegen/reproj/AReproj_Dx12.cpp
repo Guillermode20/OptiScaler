@@ -1511,7 +1511,9 @@ void AReproj_Dx12::DestroyFGContext()
 {
     LOG_DEBUG("");
 
+    ResetCounters();
     _frameCount = 1;
+    _lastDispatchedFrame = 0;
 
     Deactivate();
 
@@ -1805,9 +1807,11 @@ void AReproj_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants
     if (Config::Instance()->FGEnabled.value_or_default())
     {
         if (_uiCommandAllocator[0] == nullptr || _warp == nullptr)
+        {
             CreateContext(device, fgConstants);
-
-        if (State::Instance().fgChanged)
+            UpdateTarget();
+        }
+        else if (State::Instance().fgChanged)
         {
             Deactivate();
 
@@ -1818,7 +1822,7 @@ void AReproj_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants
                 DestroyFGContext();
         }
 
-        if (!IsPaused() && !IsActive())
+        if (_warp != nullptr && !IsPaused() && !IsActive())
             Activate();
     }
     else if (IsActive())
