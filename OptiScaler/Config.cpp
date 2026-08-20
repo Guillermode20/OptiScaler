@@ -181,6 +181,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // Async Reprojection
         {
+            ReprojAsync.set_from_config(readBool("Reproj", "Async"));
             ReprojMode.set_from_config(readInt("Reproj", "Mode"));
             ReprojStrength.set_from_config(readFloat("Reproj", "Strength"));
             ReprojTimeStep.set_from_config(readFloat("Reproj", "TimeStep"));
@@ -1012,6 +1013,7 @@ bool Config::SaveIni()
 
     // Async Reprojection output
     {
+        ini.SetValue("Reproj", "Async", GetBoolValue(Instance()->ReprojAsync.value_for_config()).c_str());
         ini.SetValue("Reproj", "Mode", GetIntValue(Instance()->ReprojMode.value_for_config()).c_str());
         ini.SetValue("Reproj", "Strength", GetFloatValue(Instance()->ReprojStrength.value_for_config()).c_str());
         ini.SetValue("Reproj", "TimeStep", GetFloatValue(Instance()->ReprojTimeStep.value_for_config()).c_str());

@@ -47,21 +47,23 @@ FGInput=upscaler
 FGOutput=reproj
 
 [Reproj]
+; Experimental worker-owned DirectComposition output; false keeps the synchronous fallback
+Async=false
 ; 0 = motion vectors, 1 = depth-aware, 2 = rotation-only camera timewarp
 Mode=0
 ; 0 uses FramerateLimit, then the active monitor refresh
 TargetRefresh=0
-; Safe default: one extra warp, emitted synchronously
+; Safe default: one extra warp per real frame
 MaxWarpFrames=1
 UseDepth=true
 RotationOnly=false
 ```
 
-The current presenter deliberately remains synchronous: DXGI returns the next
-backbuffer to the game as soon as the real frame is presented, so a worker thread
-cannot safely write/present it without a compositor or an explicit reservation API.
-Higher `MaxWarpFrames` values may therefore reduce game-thread throughput. The menu
-reports real and warp FPS separately and labels this queue depth as safe synchronous.
+`Async=true` uses a worker-owned DirectComposition swapchain, keeping warp writes
+away from the game's backbuffers. If composition setup fails, OptiScaler falls back
+to the synchronous presenter. Higher `MaxWarpFrames` values may reduce game-thread
+throughput only in that fallback. The menu reports real/warp FPS, queue depth, and
+the active presenter.
 
 ### Pseudo SuperSampling
 With OptiScaler 0.4 there are new options for pseudo-supersampling under `[Upscalers]`

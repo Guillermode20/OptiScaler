@@ -3,13 +3,21 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
+struct IDCompositionDevice;
+struct IDCompositionTarget;
+struct IDCompositionVisual;
+
 /// Async reprojection (ASW-style) FG output.
 /// See AsyncReprojection.md for the full design.
 ///
-/// Owns a real DXGI swapchain (>= 3 buffers + ALLOW_TEARING). Per game present:
-/// copy the backbuffer -> present the real frame -> emit bounded, paced warps while
-/// the game thread still owns the swapchain. A worker requires a compositor/backbuffer
-/// reservation layer and must not be added here without one.
+/// Owns the game's real DXGI swapchain plus, when enabled, a worker-only
+/// DirectComposition swapchain. The synchronous fallback emits bounded warps before
+/// returning; the async path publishes owned packets and never writes game backbuffers.
 class AReproj_Dx12 : public virtual IFGFeature_Dx12
 {
   public:
@@ -21,23 +29,103 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         float targetRefreshHz = 0.0f;
         uint32_t warpsPerReal = 0;
         uint32_t droppedWarps = 0;
+        uint32_t queueDepth = 0;
         bool depthReady = false;
+        bool asyncPresenter = false;
+        bool latePoseEstimated = false;
     };
 
   private:
+    enum class PacketState : uint8_t
+    {
+        Free,
+        Capturing,
+        Ready,
+        Presenting,
+        Retired,
+    };
+
+    enum class PresenterState : uint8_t
+    {
+        Stopped,
+        Starting,
+        Running,
+        Paused,
+        Draining,
+        Stopping,
+        Failed,
+    };
+
+    struct ReprojFramePacket
+    {
+        ID3D12Resource* color = nullptr;
+        ID3D12Resource* depth = nullptr;
+        ID3D12Resource* velocity = nullptr;
+        ID3D12Resource* ui = nullptr;
+        D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_COMMON;
+        D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON;
+        D3D12_RESOURCE_STATES velocityState = D3D12_RESOURCE_STATE_COMMON;
+        D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON;
+        RP_Constants constants {};
+        UINT64 frameId = 0;
+        UINT64 captureFenceValue = 0;
+        UINT64 retirementFenceValue = 0;
+        double renderTimestamp = 0.0;
+        double frameDelta = 0.0;
+        bool hasDepth = false;
+        bool hasCamera = false;
+        bool hasUi = false;
+        std::atomic<PacketState> state { PacketState::Free };
+    };
+
     std::unique_ptr<RP_Dx12> _warp;                // the reprojection pass (v1/v2 PSOs)
     ID3D12Resource* _lastColor[BUFFER_COUNT] = {}; // copy of the last presented real frame
     D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
     bool _forceBorderless = false;
 
+    ReprojFramePacket _packets[BUFFER_COUNT];
+    std::atomic<UINT64> _publishedFrameId { 0 };
+    std::atomic<UINT64> _readyFrameId { 0 };
+    std::mutex _presentMutex;
+    std::condition_variable _presentCv;
+    std::thread _presentThread;
+    std::atomic<bool> _stopPresenter { false };
+    std::atomic<PresenterState> _presenterState { PresenterState::Stopped };
+
+    ID3D12CommandQueue* _presentQueue = nullptr;
+    IDXGISwapChain3* _presentSwapChain = nullptr;
+    IDCompositionDevice* _compositionDevice = nullptr;
+    IDCompositionTarget* _compositionTarget = nullptr;
+    IDCompositionVisual* _compositionVisual = nullptr;
+    bool _compositionAttached = false;
+
     UINT _bufferCount = 0;
     UINT64 _scFenceValue = 0; // monotonic SC fence value (fence outlives context recreate)
 
     bool CopyLastFrame(int fIndex);                // backbuffer -> _lastColor[fIndex], submitted before present
     bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] + MV (+depth) -> current backbuffer
+    bool CaptureFramePacket(int sourceIndex, int packetIndex);
+    bool DispatchPacketWarp(int packetIndex, float timeStep);
+    bool DisplayPacket(int packetIndex, bool composeUi);
+    bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
+                            D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
+                            D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
+    void FillConstants(int fIndex, RP_Constants& constants);
+    int AcquirePacket();
+    void RetirePackets();
+    uint32_t PacketQueueDepth() const;
+    bool CreateAsyncPresenter();
+    void DestroyAsyncPresenter();
+    bool StartAsyncPresenter();
+    void StopAsyncPresenter();
+    void PresenterMain();
+    bool AttachCompositionVisual();
+    bool WaitForPacketDeadline(int packetIndex, double deadlineMs);
+    HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated);
     double TargetRefreshHz();
     uint32_t WarpCountForFrame(double refreshHz) const;
+    uint32_t WarpCountForPeriod(double realFrameMs, double refreshHz) const;
     void WaitUntil(double deadlineMs) const;
     bool DrainGpuWork();
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags);       // skip-flag wrapped present
@@ -57,6 +145,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _metricsPoseAgeTotalMs = 0.0;
     uint32_t _metricsPoseSamples = 0;
     RuntimeMetrics _runtimeMetrics {};
+    mutable std::mutex _metricsMutex;
+    std::mutex _refreshMutex;
     double _cachedRefreshHz = 0.0;
     double _lastRefreshQueryMs = 0.0;
 
@@ -77,7 +167,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool Shutdown() override final;
 
     bool SetInterpolatedFrameCount(UINT interpolatedFrameCount) override final;
-    RuntimeMetrics GetRuntimeMetrics() const { return _runtimeMetrics; }
+    RuntimeMetrics GetRuntimeMetrics() const;
 
     // IFGFeature_Dx12
     void* FrameGenerationContext() override final;

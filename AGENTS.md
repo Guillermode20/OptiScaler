@@ -67,7 +67,7 @@ Register new files in `OptiScaler/OptiScaler.vcxproj` and `OptiScaler/OptiScaler
 
 ## Async Reprojection (in-progress feature in this repo)
 
-- Design docs: `AsyncReprojection.md` covers the original implementation; `AsyncReprojection_Continuation_Plan.md` covers the true asynchronous timewarp roadmap. Milestones **M0–M4** are implemented; **M5** (true async thread + fakenvapi) is a stretch.
+- Design docs: `AsyncReprojection.md` covers the original implementation; `AsyncReprojection_Continuation_Plan.md` covers the true asynchronous timewarp roadmap. M0–M4 and an experimental M5 DirectComposition presenter are implemented.
 - Code: `OptiScaler/framegen/reproj/AReproj_Dx12.{h,cpp}` and `OptiScaler/shaders/reprojection/RP_*`.
 - Enabled by `FGOutput::Reproj` (`OptiScaler/State.h`).
 
@@ -77,9 +77,11 @@ Known issues / limitations:
 - `ForceVsync` is applied before `AReproj_Dx12::Present()`, so the internally presented real frame receives the configured interval and tearing flags.
 - The v2 depth-aware warp is sketch-quality; disocclusion confidence and the HUD epsilon need real-footage tuning.
 - `ReprojCapAtHalfRefresh` controls whether the existing `FrameLimit` half-rate behavior is used for reprojection. Reprojection bypasses Reflex/XeLL limiter gating so that the selected cap is applied even when those limiters are inactive.
-- Reproj emits one fake frame per real frame; it cannot sustain a fixed refresh target when the real rate falls below half-refresh without multi-frame extrapolation and increased artifacts.
-- Do not move the fake present to a worker with only a fence/timer: after the real DXGI present, the next swapchain buffer becomes the game's render target and has no reservation API. True async needs a compositor or explicit backbuffer-ownership mechanism.
-- Reproj is included in fakenvapi `reportFGPresent`; Reflex markers/sleeps remain intentionally limited to DLSSG.
+- Reproj emits zero to `ReprojMaxWarpFrames` warps per real frame. The synchronous fallback blocks the game present path; `ReprojAsync=true` publishes owned color/depth/velocity/UI packets to a worker-owned DirectComposition swapchain.
+- Never point the worker at the game's DXGI backbuffers. After a real present, the next backbuffer belongs to the game; only the separate composition swapchain makes worker presentation safe.
+- Async packets transition `FREE -> CAPTURING -> READY -> PRESENTING -> RETIRED -> FREE`; reuse requires both capture and presenter fences to complete. Stop/join the presenter before draining and releasing D3D12/DComp objects.
+- DirectComposition is experimental and borderless/DWM-dependent. Creation or runtime failure falls back to the synchronous presenter; keep `ReprojAsync=false` as the shipped default until hardware testing is complete.
+- Reproj is included in fakenvapi `reportFGPresent`; the async worker reports its composition presents directly. Reflex markers/sleeps remain intentionally limited to DLSSG.
 
 ## D3D12 base-class gotchas
 

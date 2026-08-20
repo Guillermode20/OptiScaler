@@ -8,16 +8,16 @@
 #include <shaders/Shader_Dx12Utils.h>
 #include <shaders/Shader_Dx12.h>
 
-#define HC_NUM_OF_HEAPS 2
+#define RUI_NUM_OF_HEAPS BUFFER_COUNT
 
 class RUI_Dx12 : public Shader_Dx12
 {
   private:
     bool _pm = false;
-    FrameDescriptorHeap _frameHeaps[HC_NUM_OF_HEAPS];
+    FrameDescriptorHeap _frameHeaps[RUI_NUM_OF_HEAPS];
 
-    ID3D12Resource* _buffer[HC_NUM_OF_HEAPS] = {};
-    D3D12_RESOURCE_STATES _bufferState[HC_NUM_OF_HEAPS] = { D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COMMON };
+    ID3D12Resource* _buffer[RUI_NUM_OF_HEAPS] = {};
+    D3D12_RESOURCE_STATES _bufferState[RUI_NUM_OF_HEAPS] = {};
 
     static void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                                 D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);

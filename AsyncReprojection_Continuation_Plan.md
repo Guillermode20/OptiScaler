@@ -19,12 +19,12 @@ metrics, bounded adaptive warp scheduling, and fakenvapi FG reporting. The
 depth-aware shader also has conservative depth-edge, motion-disagreement, and
 screen-edge confidence tests, plus a rotation-only camera mode.
 
-M5 is intentionally not implemented in this swapchain backend. After a real DXGI
-present, the next backbuffer becomes the game's render target; a worker cannot
-safely write and present it without explicit reservation. A true async worker
-therefore requires a compositor or another backbuffer-ownership mechanism, not a
-fence/timer thread. The live UI labels queue depth as `0 (safe synchronous
-presenter)` so it never misrepresents this limitation.
+M5 now has an experimental, opt-in DirectComposition implementation. The game
+continues to own and present its DXGI backbuffers while the render thread publishes
+owned color/depth/velocity/UI packets to a worker. The worker writes only to a
+separate composition swapchain, avoiding the unsafe next-backbuffer race. Creation
+or runtime failure falls back to the existing synchronous presenter. The live UI
+reports the active presenter and actual packet queue depth.
 
 ## Current baseline
 

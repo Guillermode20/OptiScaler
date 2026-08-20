@@ -26,8 +26,8 @@ void RP_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource
 
 bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor,
                        D3D12_RESOURCE_STATES lastColorState, ID3D12Resource* velocity,
-                       D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth,
-                       D3D12_RESOURCE_STATES depthState, ID3D12Resource* output, RP_Constants& constants)
+                       D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth, D3D12_RESOURCE_STATES depthState,
+                       ID3D12Resource* output, RP_Constants& constants)
 {
     if (!_init || _device == nullptr || cmdList == nullptr || lastColor == nullptr || velocity == nullptr ||
         output == nullptr)
@@ -73,7 +73,7 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     CreateUnorderedAccessView(_device, output, currentHeap.GetUavCPU(0), 0);
 
-    if (!CreateConstantsBuffer(_device, _constantBuffer, constants, currentHeap.GetCbvCPU(0)))
+    if (!CreateConstantsBuffer(_device, _constantBuffers[_counter], constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{}] Failed to create a constants buffer", _name);
         return false;
@@ -129,14 +129,16 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
     D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(RP_Constants));
     auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
 
-    auto result =
-        InDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
-                                          nullptr, IID_PPV_ARGS(&_constantBuffer));
-
-    if (result != S_OK)
+    for (auto& constantBuffer : _constantBuffers)
     {
-        LOG_ERROR("[{}] CreateCommittedResource error {:x}", _name, (unsigned int) result);
-        return;
+        const auto result = InDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc,
+                                                              D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                              IID_PPV_ARGS(&constantBuffer));
+        if (result != S_OK)
+        {
+            LOG_ERROR("[{}] CreateCommittedResource error {:x}", _name, (unsigned int) result);
+            return;
+        }
     }
 
     if (!CreateComputePipeline(InDevice, &_pipelineState, RP_cso, sizeof(RP_cso), RPMV_ShaderCode.c_str()))
@@ -163,6 +165,7 @@ RP_Dx12::~RP_Dx12()
 
     for (int i = 0; i < RP_NUM_OF_HEAPS; i++)
     {
+        SAFE_RELEASE(_constantBuffers[i]);
         _frameHeaps[i].ReleaseHeaps();
     }
 }

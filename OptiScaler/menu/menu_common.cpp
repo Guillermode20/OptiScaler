@@ -3792,8 +3792,17 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             if (config->FGEnabled.value_or_default())
                 state.fgChanged = true;
         }
-        ShowHelpMarker("Enable async reprojection\n"
+        ShowHelpMarker("Enable reprojection\n"
                        "Game runs at half the set FramerateLimit, so set it to your refresh rate");
+
+        bool reprojAsync = config->ReprojAsync.value_or_default();
+        if (ImGui::Checkbox("Async DirectComposition presenter##reproj", &reprojAsync))
+        {
+            config->ReprojAsync = reprojAsync;
+            state.fgChanged = true;
+        }
+        ShowHelpMarker("Presents from a worker-owned composition swapchain without blocking the game thread.\n"
+                       "Falls back to the safe synchronous presenter when DirectComposition is unavailable.");
 
         static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware", "Camera-only timewarp" };
         int reprojMode = config->ReprojMode.value_or_default();
@@ -3819,8 +3828,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         int maxWarpFrames = config->ReprojMaxWarpFrames.value_or_default();
         if (ImGui::SliderInt("Max warp frames##reproj", &maxWarpFrames, 1, 8))
             config->ReprojMaxWarpFrames = maxWarpFrames;
-        ShowHelpMarker("Bounded number of extra warp presents per real frame. They are synchronous until a compositor "
-                       "backend exists, so higher values can reduce game-thread throughput.");
+        ShowHelpMarker("Bounded number of extra warp presents per real frame. Higher values block the game thread only "
+                       "when the synchronous fallback is active.");
 
         float targetRefresh = config->ReprojTargetRefresh.value_or_default();
         if (ImGui::InputFloat("Target refresh##reproj", &targetRefresh, 1.0f, 10.0f, "%.0f Hz"))
@@ -3859,8 +3868,10 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ImGui::TextDisabled("Real %.1f FPS | warp %.1f FPS | target %.0f Hz | warps %u | dropped %u",
                                 metrics.realFps, metrics.warpFps, metrics.targetRefreshHz, metrics.warpsPerReal,
                                 metrics.droppedWarps);
-            ImGui::TextDisabled("Pose age %.1f ms | queue 0 (safe synchronous presenter)%s", metrics.poseAgeMs,
-                                metrics.depthReady ? " | depth ready" : "");
+            ImGui::TextDisabled("Pose age %.1f ms | queue %u (%s)%s%s", metrics.poseAgeMs, metrics.queueDepth,
+                                metrics.asyncPresenter ? "async DComp" : "safe synchronous",
+                                metrics.depthReady ? " | depth ready" : "",
+                                metrics.latePoseEstimated ? " | pose extrapolated" : "");
         }
     }
 

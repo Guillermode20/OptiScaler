@@ -152,7 +152,7 @@ RUI_Dx12::RUI_Dx12(std::string InName, ID3D12Device* InDevice, bool preMultiplie
         return;
     }
 
-    _init = InitHeaps(InDevice, _frameHeaps, HC_NUM_OF_HEAPS);
+    _init = InitHeaps(InDevice, _frameHeaps, RUI_NUM_OF_HEAPS);
 }
 
 bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* hudless,
@@ -191,7 +191,7 @@ bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList,
     }
 
     _counter++;
-    _counter = _counter % HC_NUM_OF_HEAPS;
+    _counter = _counter % RUI_NUM_OF_HEAPS;
 
     if (!CreateBufferResource(_counter, _device, scBuffer, D3D12_RESOURCE_STATE_COPY_DEST))
     {
@@ -267,7 +267,7 @@ RUI_Dx12::~RUI_Dx12()
     SAFE_RELEASE(_rootSignature);
     SAFE_RELEASE(_constantBuffer);
 
-    for (int i = 0; i < HC_NUM_OF_HEAPS; i++)
+    for (int i = 0; i < RUI_NUM_OF_HEAPS; i++)
     {
         _frameHeaps[i].ReleaseHeaps();
     }

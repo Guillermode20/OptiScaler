@@ -8,7 +8,7 @@
 #include <shaders/Shader_Dx12.h>
 #include <shaders/reprojection/RP_Common.h>
 
-#define RP_NUM_OF_HEAPS 2
+#define RP_NUM_OF_HEAPS BUFFER_COUNT
 
 // Async reprojection warp pass. Two PSOs sharing one root signature:
 //   - MV-only warp (v1): LastColor(t0) + Velocity(t1)
@@ -18,6 +18,7 @@ class RP_Dx12 : public Shader_Dx12
 {
   private:
     FrameDescriptorHeap _frameHeaps[RP_NUM_OF_HEAPS];
+    ID3D12Resource* _constantBuffers[RP_NUM_OF_HEAPS] = {};
     ID3D12PipelineState* _pipelineStateDepth = nullptr;
 
     static void ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource,
@@ -28,9 +29,8 @@ class RP_Dx12 : public Shader_Dx12
     // `depth` is optional: when null (or constants.mode == 0) the MV-only PSO runs.
     // Inputs are transitioned to NON_PIXEL_SHADER_RESOURCE; `output` is transitioned
     // from COMMON to UNORDERED_ACCESS (caller tracks follow-up states).
-    bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor,
-                  D3D12_RESOURCE_STATES lastColorState, ID3D12Resource* velocity,
-                  D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth,
+    bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor, D3D12_RESOURCE_STATES lastColorState,
+                  ID3D12Resource* velocity, D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth,
                   D3D12_RESOURCE_STATES depthState, ID3D12Resource* output, RP_Constants& constants);
 
     RP_Dx12(std::string InName, ID3D12Device* InDevice);
