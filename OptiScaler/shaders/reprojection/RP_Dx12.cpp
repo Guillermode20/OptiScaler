@@ -141,7 +141,7 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
         }
     }
 
-    if (!CreateComputePipeline(InDevice, &_pipelineState, RP_cso, sizeof(RP_cso), RPMV_ShaderCode.c_str()))
+    if (!CreateComputePipeline(InDevice, &_pipelineState, RPMV_cso, sizeof(RPMV_cso), RPMV_ShaderCode.c_str()))
     {
         LOG_ERROR("[{}] Failed to create MV compute pipeline", _name);
         return;
