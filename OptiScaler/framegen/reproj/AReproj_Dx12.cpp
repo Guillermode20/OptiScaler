@@ -829,6 +829,9 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     IDXGIFactory2* factory = nullptr;
     if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))))
         return false;
+    IDXGIFactory2* realFactory = nullptr;
+    if (!CheckForRealObject(__FUNCTION__, factory, reinterpret_cast<IUnknown**>(&realFactory)))
+        realFactory = factory;
 
     DXGI_SWAP_CHAIN_DESC1 desc {};
     desc.Width = mainDesc.BufferDesc.Width;
@@ -842,7 +845,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
     IDXGISwapChain1* swapChain1 = nullptr;
-    result = factory->CreateSwapChainForComposition(_presentQueue, &desc, nullptr, &swapChain1);
+    result = realFactory->CreateSwapChainForComposition(_presentQueue, &desc, nullptr, &swapChain1);
     if (SUCCEEDED(result))
     {
         result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
@@ -900,7 +903,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 
         desc.Width = static_cast<UINT>(client.right);
         desc.Height = static_cast<UINT>(client.bottom);
-        result = factory->CreateSwapChainForHwnd(_presentQueue, _presentHwnd, &desc, nullptr, nullptr, &swapChain1);
+        result = realFactory->CreateSwapChainForHwnd(_presentQueue, _presentHwnd, &desc, nullptr, nullptr, &swapChain1);
         if (SUCCEEDED(result))
             result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
         SAFE_RELEASE(swapChain1);
