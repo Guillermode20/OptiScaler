@@ -3860,6 +3860,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojRotationOnly = reprojRotationOnly;
         ShowHelpMarker("Keep camera position fixed in depth-aware modes to avoid translation disocclusions");
 
+        bool reprojLateLatch = config->ReprojLateLatch.value_or_default();
+        if (ImGui::Checkbox("Late-latch mouse camera##reproj", &reprojLateLatch))
+            config->ReprojLateLatch = reprojLateLatch;
+        ShowHelpMarker("Apply mouse movement received after the real camera pose immediately before each camera warp");
+
+        bool reprojAutoCalibrate = config->ReprojAutoCalibrate.value_or_default();
+        if (ImGui::Checkbox("Auto-calibrate camera input##reproj", &reprojAutoCalibrate))
+            config->ReprojAutoCalibrate = reprojAutoCalibrate;
+        ShowHelpMarker("Automatically learn sensitivity, axes, inversion, and input delay from real camera movement");
+
         bool reprojDebugView = config->ReprojDebugView.value_or_default();
         if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))
             config->ReprojDebugView = reprojDebugView;
@@ -3881,6 +3891,9 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                                 metrics.asyncPresenter ? "async DComp" : "safe synchronous",
                                 metrics.depthReady ? " | depth ready" : "",
                                 metrics.latePoseEstimated ? " | pose extrapolated" : "");
+            if (reprojLateLatch && reprojAutoCalibrate)
+                ImGui::TextDisabled("Mouse calibration %.0f%% | learned delay %d ms",
+                                    metrics.mouseCalibrationConfidence * 100.0f, metrics.mouseCalibrationLagMs);
         }
     }
 

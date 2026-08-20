@@ -23,6 +23,8 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
+    float  LateYaw;
+    float  LatePitch;
 };
 
 Texture2D<float4> LastColor : register(t0);

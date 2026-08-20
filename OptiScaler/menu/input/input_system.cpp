@@ -1352,6 +1352,27 @@ POINT GetMouseScreenPos()
     return _state.MouseScreenPos;
 }
 
+RawMouseMotion GetRawMouseMotion()
+{
+    std::unique_lock lock(_state.Mutex);
+    return _state.RawMouseMotionState;
+}
+
+RawMouseMotion GetRawMouseMotionAt(double timestampMs)
+{
+    std::unique_lock lock(_state.Mutex);
+    RawMouseMotion result {};
+    RawMouseMotion oldest = _state.RawMouseMotionState;
+    for (const auto& sample : _state.RawMouseHistory)
+    {
+        if (sample.TimestampMs > 0.0 && sample.TimestampMs < oldest.TimestampMs)
+            oldest = sample;
+        if (sample.TimestampMs <= timestampMs && sample.TimestampMs >= result.TimestampMs)
+            result = sample;
+    }
+    return result.TimestampMs > 0.0 ? result : oldest;
+}
+
 bool ShouldBlockMouse()
 {
     std::unique_lock lock(_state.Mutex);

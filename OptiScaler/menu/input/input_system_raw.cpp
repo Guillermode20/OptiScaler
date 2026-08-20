@@ -538,6 +538,27 @@ void UpdateStateFromRawMouseLocked(const RAWMOUSE& mouse)
 {
     AccumulateExternalRawMouseDeltaLocked(mouse);
 
+    LARGE_INTEGER counter {};
+    LARGE_INTEGER frequency {};
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    const auto now = 1000.0 * static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
+    if ((mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 && (mouse.lLastX != 0 || mouse.lLastY != 0))
+    {
+        auto& motion = _state.RawMouseMotionState;
+        if (motion.TimestampMs > 0.0 && now > motion.TimestampMs)
+        {
+            const auto dt = now - motion.TimestampMs;
+            motion.VelocityX = motion.VelocityX * 0.5 + static_cast<double>(mouse.lLastX) / dt * 0.5;
+            motion.VelocityY = motion.VelocityY * 0.5 + static_cast<double>(mouse.lLastY) / dt * 0.5;
+        }
+        motion.TotalX += mouse.lLastX;
+        motion.TotalY += mouse.lLastY;
+        motion.TimestampMs = now;
+        _state.RawMouseHistory[_state.RawMouseHistoryWriteIndex] = motion;
+        _state.RawMouseHistoryWriteIndex = (_state.RawMouseHistoryWriteIndex + 1) % _state.RawMouseHistory.size();
+    }
+
     const DWORD time = GetTickCount();
 
     if (mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)

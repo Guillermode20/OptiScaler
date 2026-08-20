@@ -622,6 +622,12 @@ class Config
     CustomOptional<float> ReprojTargetRefresh { 0.0f };   // 0 = FramerateLimit, then active display refresh
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { false };    // suppress camera translation in depth-aware modes
+    CustomOptional<bool> ReprojLateLatch { false };       // add post-render raw mouse rotation immediately before warp
+    CustomOptional<bool> ReprojAutoCalibrate { true };    // learn mouse-to-camera mapping and delay from real poses
+    CustomOptional<float> ReprojMouseDegreesX { 0.022f }; // fallback yaw degrees/count when calibration is unavailable
+    CustomOptional<float> ReprojMouseDegreesY { 0.022f }; // pitch degrees per raw mouse count; sign controls direction
+    CustomOptional<float> ReprojPredictionMs { 2.0f };    // extrapolate recent raw input toward scanout
+    CustomOptional<float> ReprojMaxRotation { 15.0f };    // clamp late rotation to limit edge artifacts
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
 

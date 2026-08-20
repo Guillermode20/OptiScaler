@@ -15,6 +15,15 @@ enum class InputAcquisitionMode : std::uint32_t
     ExternalRawVirtualMouse = 4,
 };
 
+struct RawMouseMotion
+{
+    std::int64_t TotalX = 0;
+    std::int64_t TotalY = 0;
+    double VelocityX = 0.0; // counts/ms, smoothed over recent relative packets
+    double VelocityY = 0.0;
+    double TimestampMs = 0.0;
+};
+
 struct InitializeOptions
 {
     // Target/game window. Can be foreign-process in external overlay mode.
@@ -221,6 +230,8 @@ bool IsMouseReleased(int button);
 
 float GetMouseWheel();
 POINT GetMouseScreenPos();
+RawMouseMotion GetRawMouseMotion();
+RawMouseMotion GetRawMouseMotionAt(double timestampMs);
 
 bool ShouldBlockMouse();
 bool ShouldBlockKeyboard();

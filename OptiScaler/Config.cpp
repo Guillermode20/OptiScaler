@@ -192,6 +192,12 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojTargetRefresh.set_from_config(readFloat("Reproj", "TargetRefresh"));
             ReprojUseDepth.set_from_config(readBool("Reproj", "UseDepth"));
             ReprojRotationOnly.set_from_config(readBool("Reproj", "RotationOnly"));
+            ReprojLateLatch.set_from_config(readBool("Reproj", "LateLatch"));
+            ReprojAutoCalibrate.set_from_config(readBool("Reproj", "AutoCalibrate"));
+            ReprojMouseDegreesX.set_from_config(readFloat("Reproj", "MouseDegreesX"));
+            ReprojMouseDegreesY.set_from_config(readFloat("Reproj", "MouseDegreesY"));
+            ReprojPredictionMs.set_from_config(readFloat("Reproj", "PredictionMs"));
+            ReprojMaxRotation.set_from_config(readFloat("Reproj", "MaxRotation"));
             ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
         }
@@ -1028,6 +1034,17 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojTargetRefresh.value_for_config()).c_str());
         ini.SetValue("Reproj", "UseDepth", GetBoolValue(Instance()->ReprojUseDepth.value_for_config()).c_str());
         ini.SetValue("Reproj", "RotationOnly", GetBoolValue(Instance()->ReprojRotationOnly.value_for_config()).c_str());
+        ini.SetValue("Reproj", "LateLatch", GetBoolValue(Instance()->ReprojLateLatch.value_for_config()).c_str());
+        ini.SetValue("Reproj", "AutoCalibrate",
+                     GetBoolValue(Instance()->ReprojAutoCalibrate.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MouseDegreesX",
+                     GetFloatValue(Instance()->ReprojMouseDegreesX.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MouseDegreesY",
+                     GetFloatValue(Instance()->ReprojMouseDegreesY.value_for_config()).c_str());
+        ini.SetValue("Reproj", "PredictionMs",
+                     GetFloatValue(Instance()->ReprojPredictionMs.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MaxRotation",
+                     GetFloatValue(Instance()->ReprojMaxRotation.value_for_config()).c_str());
         ini.SetValue("Reproj", "DebugView", GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
         ini.SetValue("Reproj", "ForceBorderless",
                      GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());

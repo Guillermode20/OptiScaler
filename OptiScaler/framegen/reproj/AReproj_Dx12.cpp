@@ -253,8 +253,83 @@ bool AReproj_Dx12::IsCameraAllZero(int fIndex)
     return true;
 }
 
+void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
+{
+    if (!Config::Instance()->ReprojAutoCalibrate.value_or_default())
+        return;
+
+    const auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    const auto timestamp = _cameraTimestamp[fIndex];
+    const auto prevTimestamp = _cameraTimestamp[prevIndex];
+    if (timestamp <= prevTimestamp || timestamp == _lastCalibrationTimestamp || IsCameraAllZero(fIndex) ||
+        IsCameraAllZero(prevIndex))
+        return;
+    _lastCalibrationTimestamp = timestamp;
+
+    const auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    const auto yaw = std::atan2(dot(_cameraForward[fIndex], _cameraRight[prevIndex]),
+                                dot(_cameraForward[fIndex], _cameraForward[prevIndex]));
+    const auto pitch = -std::atan2(dot(_cameraForward[fIndex], _cameraUp[prevIndex]),
+                                   dot(_cameraForward[fIndex], _cameraForward[prevIndex]));
+    if (std::hypot(yaw, pitch) > 0.5)
+        return; // scene cut or non-gameplay camera jump
+
+    for (int i = 0; i < CALIBRATION_LAG_BINS; ++i)
+    {
+        const auto lag = static_cast<double>(i * 2);
+        const auto first = OptiInput::GetRawMouseMotionAt(prevTimestamp - lag);
+        const auto last = OptiInput::GetRawMouseMotionAt(timestamp - lag);
+        const auto x = static_cast<double>(last.TotalX - first.TotalX);
+        const auto y = static_cast<double>(last.TotalY - first.TotalY);
+        if (std::hypot(x, y) < 2.0)
+            continue;
+
+        auto& bin = _calibration[i];
+        if (bin.samples > 300)
+        {
+            bin.xx *= 0.995; bin.xy *= 0.995; bin.yy *= 0.995;
+            bin.xYaw *= 0.995; bin.yYaw *= 0.995; bin.xPitch *= 0.995; bin.yPitch *= 0.995;
+            bin.yaw2 *= 0.995; bin.pitch2 *= 0.995;
+        }
+        bin.xx += x * x; bin.xy += x * y; bin.yy += y * y;
+        bin.xYaw += x * yaw; bin.yYaw += y * yaw;
+        bin.xPitch += x * pitch; bin.yPitch += y * pitch;
+        bin.yaw2 += yaw * yaw; bin.pitch2 += pitch * pitch;
+        ++bin.samples;
+    }
+
+    double bestScore = 1.0;
+    for (int i = 0; i < CALIBRATION_LAG_BINS; ++i)
+    {
+        const auto& bin = _calibration[i];
+        const auto determinant = bin.xx * bin.yy - bin.xy * bin.xy;
+        if (bin.samples < 12 || determinant < 1.0 || bin.yaw2 + bin.pitch2 < 1e-6)
+            continue;
+
+        const double yawX = (bin.yy * bin.xYaw - bin.xy * bin.yYaw) / determinant;
+        const double yawY = (bin.xx * bin.yYaw - bin.xy * bin.xYaw) / determinant;
+        const double pitchX = (bin.yy * bin.xPitch - bin.xy * bin.yPitch) / determinant;
+        const double pitchY = (bin.xx * bin.yPitch - bin.xy * bin.xPitch) / determinant;
+        if (std::max({ std::abs(yawX), std::abs(yawY), std::abs(pitchX), std::abs(pitchY) }) > 0.02)
+            continue;
+
+        const auto yawExplained = yawX * bin.xYaw + yawY * bin.yYaw;
+        const auto pitchExplained = pitchX * bin.xPitch + pitchY * bin.yPitch;
+        const auto score = std::max(0.0, 1.0 - (yawExplained + pitchExplained) / (bin.yaw2 + bin.pitch2));
+        if (score < bestScore)
+        {
+            bestScore = score;
+            _calibrationMatrix[0] = yawX; _calibrationMatrix[1] = yawY;
+            _calibrationMatrix[2] = pitchX; _calibrationMatrix[3] = pitchY;
+            _calibrationLagMs = i * 2;
+        }
+    }
+    _calibrationConfidence = static_cast<float>(std::clamp(1.0 - bestScore, 0.0, 1.0));
+}
+
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 {
+    UpdateMouseCalibration(fIndex);
     auto& state = State::Instance();
     auto config = Config::Instance();
     auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
@@ -296,6 +371,49 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
         cb.mode = 0;
     else if (config->ReprojRotationOnly.value_or_default() && cb.mode != 0)
         cb.mode = 2;
+}
+
+void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse) const
+{
+    auto config = Config::Instance();
+    if (!config->ReprojLateLatch.value_or_default() || constants.mode == 0 || !OptiInput::IsFocused())
+        return;
+
+    const auto current = OptiInput::GetRawMouseMotion();
+    double dx = static_cast<double>(current.TotalX - sourceMouse.TotalX);
+    double dy = static_cast<double>(current.TotalY - sourceMouse.TotalY);
+
+    const auto now = Util::MillisecondsNow();
+    const auto predictionMs = std::clamp<double>(config->ReprojPredictionMs.value_or_default(), 0.0, 20.0);
+    if (current.TimestampMs != 0 && now - current.TimestampMs <= 25)
+    {
+        dx += current.VelocityX * predictionMs;
+        dy += current.VelocityY * predictionMs;
+    }
+
+    constexpr double radiansPerDegree = 0.017453292519943295;
+    double yaw;
+    double pitch;
+    if (config->ReprojAutoCalibrate.value_or_default() && _calibrationConfidence >= 0.35f)
+    {
+        yaw = _calibrationMatrix[0] * dx + _calibrationMatrix[1] * dy;
+        pitch = _calibrationMatrix[2] * dx + _calibrationMatrix[3] * dy;
+    }
+    else
+    {
+        yaw = dx * config->ReprojMouseDegreesX.value_or_default() * radiansPerDegree;
+        pitch = dy * config->ReprojMouseDegreesY.value_or_default() * radiansPerDegree;
+    }
+    const auto maximum = std::clamp<double>(config->ReprojMaxRotation.value_or_default(), 0.0, 45.0) * radiansPerDegree;
+    const auto length = std::hypot(yaw, pitch);
+    if (length > maximum && length > 0.0)
+    {
+        yaw *= maximum / length;
+        pitch *= maximum / length;
+    }
+
+    constants.lateYaw = static_cast<float>(yaw);
+    constants.latePitch = static_cast<float>(pitch);
 }
 
 bool AReproj_Dx12::CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
@@ -437,6 +555,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex)
         return false;
 
     FillConstants(sourceIndex, packet.constants);
+    packet.sourceMouse = OptiInput::GetRawMouseMotionAt(_cameraTimestamp[sourceIndex]);
     packet.hasCamera = packet.constants.mode != 0;
     if (!packet.hasDepth)
         packet.constants.mode = 0;
@@ -514,6 +633,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep)
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
     auto constants = packet.constants;
     constants.timeStep = timeStep;
+    ApplyLateLatch(constants, packet.sourceMouse);
     const bool ok = _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
                                     packet.hasDepth ? packet.depth : nullptr, packet.depthState,
                                     _warpOutput[outputIndex], constants);
@@ -592,6 +712,7 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     RP_Constants cb {};
     FillConstants(fIndex, cb);
     cb.timeStep = timeStep;
+    ApplyLateLatch(cb, _syncSourceMouse);
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
@@ -997,10 +1118,14 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.droppedWarps = _metricsDroppedWarps;
     _runtimeMetrics.queueDepth = PacketQueueDepth();
     _runtimeMetrics.asyncPresenter = _presenterState.load() == PresenterState::Running;
-    _runtimeMetrics.latePoseEstimated = _runtimeMetrics.asyncPresenter && _runtimeMetrics.depthReady;
-    LOG_INFO("Reproj: real={:.1f} FPS, warp={:.1f} FPS, dropped={}, maxWarps={}, poseAge={:.1f} ms, queue={} ({})",
+    _runtimeMetrics.latePoseEstimated =
+        _runtimeMetrics.depthReady && Config::Instance()->ReprojLateLatch.value_or_default();
+    _runtimeMetrics.mouseCalibrationConfidence = _calibrationConfidence;
+    _runtimeMetrics.mouseCalibrationLagMs = _calibrationLagMs;
+    LOG_INFO("Reproj: real={:.1f} FPS, warp={:.1f} FPS, dropped={}, maxWarps={}, poseAge={:.1f} ms, queue={} ({}), mouseCal={:.0f}%/{}ms",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsDroppedWarps, _metricsMaxWarpsPerReal,
-             poseAge, _runtimeMetrics.queueDepth, _runtimeMetrics.asyncPresenter ? "async DComp" : "safe sync");
+             poseAge, _runtimeMetrics.queueDepth, _runtimeMetrics.asyncPresenter ? "async DComp" : "safe sync",
+             _calibrationConfidence * 100.0f, _calibrationLagMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;
@@ -1113,6 +1238,7 @@ bool AReproj_Dx12::Present()
     }
 
     // 4. Copy the real frame BEFORE presenting it
+    _syncSourceMouse = OptiInput::GetRawMouseMotionAt(_cameraTimestamp[fIndex]);
     if (!CopyLastFrame(fIndex))
     {
         LOG_WARN("Reproj: failed to copy last frame, skipping fake frame");
@@ -1201,6 +1327,11 @@ void AReproj_Dx12::Activate()
     }
     _cachedRefreshHz = 0.0;
     _lastRefreshQueryMs = 0.0;
+    std::memset(_calibration, 0, sizeof(_calibration));
+    std::memset(_calibrationMatrix, 0, sizeof(_calibrationMatrix));
+    _lastCalibrationTimestamp = 0.0;
+    _calibrationConfidence = 0.0f;
+    _calibrationLagMs = 0;
     const bool async = StartAsyncPresenter();
     LOG_INFO("Reproj: activated ({})", async ? "async" : "synchronous");
 }

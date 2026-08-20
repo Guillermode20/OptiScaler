@@ -2,6 +2,7 @@
 #include "SysUtils.h"
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
+#include <menu/input/input_system.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -33,6 +34,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool depthReady = false;
         bool asyncPresenter = false;
         bool latePoseEstimated = false;
+        float mouseCalibrationConfidence = 0.0f;
+        int mouseCalibrationLagMs = 0;
     };
 
   private:
@@ -56,6 +59,14 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         Failed,
     };
 
+    struct CalibrationBin
+    {
+        double xx = 0.0, xy = 0.0, yy = 0.0;
+        double xYaw = 0.0, yYaw = 0.0, xPitch = 0.0, yPitch = 0.0;
+        double yaw2 = 0.0, pitch2 = 0.0;
+        uint32_t samples = 0;
+    };
+
     struct ReprojFramePacket
     {
         ID3D12Resource* color = nullptr;
@@ -76,6 +87,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool hasDepth = false;
         bool hasCamera = false;
         bool hasUi = false;
+        OptiInput::RawMouseMotion sourceMouse {};
         std::atomic<PacketState> state { PacketState::Free };
     };
 
@@ -113,6 +125,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
     void FillConstants(int fIndex, RP_Constants& constants);
+    void UpdateMouseCalibration(int fIndex);
+    void ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse) const;
     int AcquirePacket();
     void RetirePackets();
     uint32_t PacketQueueDepth() const;
@@ -138,6 +152,13 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs);
     void LogMetricsIfDue();
 
+    OptiInput::RawMouseMotion _syncSourceMouse {};
+    static constexpr int CALIBRATION_LAG_BINS = 26; // 0..50 ms in 2 ms steps
+    CalibrationBin _calibration[CALIBRATION_LAG_BINS] {};
+    double _calibrationMatrix[4] = {}; // yawX, yawY, pitchX, pitchY in radians/count
+    double _lastCalibrationTimestamp = 0.0;
+    float _calibrationConfidence = 0.0f;
+    int _calibrationLagMs = 0;
     double _metricsTimestamp = 0.0;
     uint32_t _metricsRealFrames = 0;
     uint32_t _metricsWarpFrames = 0;

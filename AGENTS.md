@@ -81,6 +81,7 @@ Known issues / limitations:
 - Never point the worker at the game's DXGI backbuffers. After a real present, the next backbuffer belongs to the game; only the separate composition swapchain makes worker presentation safe.
 - Async packets transition `FREE -> CAPTURING -> READY -> PRESENTING -> RETIRED -> FREE`; reuse requires both capture and presenter fences to complete. Stop/join the presenter before draining and releasing D3D12/DComp objects. `IFGFeature::_cameraTimestamp` records source-pose age when camera data is captured.
 - DirectComposition is experimental and borderless/DWM-dependent. Creation or runtime failure falls back to the synchronous presenter; keep `ReprojAsync=false` as the shipped default until hardware testing is complete.
+- Raw-mouse late latching uses the shared `OptiInput` cumulative relative-motion history, sampled at `_cameraTimestamp` and again immediately before warp dispatch. It only affects depth/camera modes (1/2) and remains opt-in. `ReprojAutoCalibrate` fits a 2x2 mouse-to-yaw/pitch map across 0–50 ms lag bins from real camera poses; `MouseDegreesX/Y` are fallback values while confidence is low. Recoil, nonlinear acceleration, and controller-only motion remain limits.
 - Reproj reports real/fake frame types at its internal present sites; the generic wrapped-swapchain fakenvapi block intentionally excludes it. The FGHooks present-skip flags are `thread_local`, so a worker present cannot bypass a concurrent game present. Reflex markers/sleeps remain intentionally limited to DLSSG.
 
 ## D3D12 base-class gotchas

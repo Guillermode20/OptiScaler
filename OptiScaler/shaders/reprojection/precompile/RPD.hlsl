@@ -23,6 +23,8 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
+    float  LateYaw;
+    float  LatePitch;
 };
 
 Texture2D<float4> LastColor : register(t0);
@@ -46,6 +48,13 @@ float3 ReconstructWorld(float2 ndc, float viewZ,
 {
     float3 viewDir = normalize(right * ndc.x * aspect * tanHalf + up * ndc.y * tanHalf + forward);
     return camPos + viewDir * viewZ;
+}
+
+float3 RotateAxis(float3 v, float3 axis, float angle)
+{
+    float s, c;
+    sincos(angle, s, c);
+    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0f - c);
 }
 
 [numthreads(16, 16, 1)]
@@ -88,6 +97,11 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float3 midRight   = normalize(lerp(PrevCameraRight.xyz, right, 1.0f + t));
     float3 midUp      = normalize(lerp(PrevCameraUp.xyz, up, 1.0f + t));
     float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, 1.0f + t));
+
+    midRight = normalize(RotateAxis(midRight, midUp, LateYaw));
+    midForward = normalize(RotateAxis(midForward, midUp, LateYaw));
+    midUp = normalize(RotateAxis(midUp, midRight, LatePitch));
+    midForward = normalize(RotateAxis(midForward, midRight, LatePitch));
 
     // Mode 2 is rotation-only timewarp. Keep the source position so the warp
     // cannot reveal geometry through a translation that we cannot synthesize.
