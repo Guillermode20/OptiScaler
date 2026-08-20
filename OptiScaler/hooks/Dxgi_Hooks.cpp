@@ -13,6 +13,7 @@
 #include <with_dx12/with_dx12.h>
 
 #include "Hook_Utils.h"
+#include <fstream>
 
 static DxgiProxy::PFN_CreateDxgiFactory o_CreateDXGIFactory = nullptr;
 static DxgiProxy::PFN_CreateDxgiFactory1 o_CreateDXGIFactory1 = nullptr;
@@ -275,6 +276,21 @@ void DxgiHooks::Hook()
          Config::Instance()->FGInput.value_or_default() == FGInput::NvngxFG) &&
         !Config::Instance()->DxgiSpoofing.value_or_default())
     {
+        State::Instance().overlayDisableReason =
+            "DxgiHooks skipped: OverlayMenu=false + FGInput=NoFG/NvngxFG + DxgiSpoofing=false (no DXGI hook needed)";
+        State::Instance().postCodes |= PostCode::OverlayDisabled;
+        LOG_WARN("DxgiHooks skipped - overlay will not load: {}", State::Instance().overlayDisableReason);
+        OutputDebugStringA(("[OptiScaler] " + State::Instance().overlayDisableReason + "\n").c_str());
+        try
+        {
+            auto path = Util::DllPath().parent_path() / L"OptiScaler_diagnostic.txt";
+            std::ofstream f(path, std::ios::app);
+            if (f)
+                f << "[OptiScaler] " << State::Instance().overlayDisableReason << "\n";
+        }
+        catch (...)
+        {
+        }
         return;
     }
 

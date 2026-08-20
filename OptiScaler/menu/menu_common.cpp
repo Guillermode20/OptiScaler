@@ -1427,6 +1427,31 @@ void MenuCommon::UpdateVersionAndStartupNotifications(RenderMenuContext& ctx)
             ImGui::InsertNotification(notification);
         }
 
+        if (state.postCodes & PostCode::PassThruMode)
+        {
+            ImGuiToast notification { ImGuiToastType::Error, 15000 };
+            notification.setTitle("OptiScaler PASS-THRU (inactive)");
+            notification.setContent("%s\nFix: clear [ProcessFilter] TargetProcessName/ProcessExclusionList or rename dll correctly.",
+                                    state.passThruReason.c_str());
+            ImGui::InsertNotification(notification);
+        }
+
+        if (state.postCodes & PostCode::OverlayDisabled)
+        {
+            ImGuiToast notification { ImGuiToastType::Warning, 12000 };
+            notification.setTitle("Overlay disabled");
+            notification.setContent("%s", state.overlayDisableReason.c_str());
+            ImGui::InsertNotification(notification);
+        }
+
+        if (state.postCodes & PostCode::ReprojDisabled && !state.reprojDisableReason.empty())
+        {
+            ImGuiToast notification { ImGuiToastType::Info, 15000 };
+            notification.setTitle("Timewarp inactive");
+            notification.setContent("%s", state.reprojDisableReason.c_str());
+            ImGui::InsertNotification(notification);
+        }
+
         state.postDone = true;
     }
 
@@ -2144,6 +2169,20 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
     else
     {
         _selectedScale = 0;
+    }
+
+    // Startup / reproj diagnostics - always visible so "UI doesn't load" is diagnosable once it does
+    if (!state.startupDiagnostic.empty())
+    {
+        ImGui::Spacing();
+        ImGui::TextColored(toneMapColor(ImVec4(0.7f, 0.85f, 1.f, 1.f)), "Startup: %s", state.startupDiagnostic.c_str());
+        if (!state.passThruReason.empty())
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.3f, 1.f)), "PASS-THRU (OptiScaler inactive): %s", state.passThruReason.c_str());
+        if (!state.overlayDisableReason.empty())
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.6f, 0.2f, 1.f)), "Overlay disabled: %s", state.overlayDisableReason.c_str());
+        if (!state.reprojDisableReason.empty())
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Timewarp inactive: %s", state.reprojDisableReason.c_str());
+        ImGui::Spacing();
     }
 
     if (versionStatus.completed)
@@ -3780,7 +3819,20 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
     }
 
-    // Async reprojection controls
+    // Async reprojection controls - show diagnostic even before swapchain is ready
+    if (config->FGOutput.value_or_default() == FGOutput::Reproj && !state.reprojDisableReason.empty())
+    {
+        ImGui::SeparatorText("Output (Async Timewarp) - INACTIVE");
+        ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.5f, 0.3f, 1.f)), "Disabled: %s", state.reprojDisableReason.c_str());
+        ImGui::Spacing();
+        ImGui::TextDisabled("Requires: DX12 + FGInput=upscaler + Dx12Upscaler=fsr22/ffx + [FrameGen] Enabled=true + FGOutput=reproj + "
+                            "[AsyncTimewarp] Enabled=true");
+        if (state.swapchainApi != API::DX12 && state.swapchainApi != API::NotSelected)
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.3f, 1.f)), "Current API: %s (DX12 required)",
+                               magic_enum::enum_name(state.swapchainApi).data());
+        ImGui::Spacing();
+    }
+
     if (state.activeFgOutput == FGOutput::Reproj && state.activeFgInput != FGInput::NoFG &&
         state.currentFGSwapchain != nullptr)
     {
@@ -3794,15 +3846,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             state.fgChanged = true;
         }
         ShowHelpMarker("Opt-in depth timewarp output. Disabling it always presents the game frame unchanged.");
-
-        bool reprojAsync = config->ReprojAsync.value_or_default();
-        if (ImGui::Checkbox("Async DirectComposition presenter##reproj", &reprojAsync))
-        {
-            config->ReprojAsync = reprojAsync;
-            state.fgChanged = true;
-        }
-        ShowHelpMarker("Presents from a worker-owned composition swapchain without blocking the game thread.\n"
-                       "Falls back to the safe synchronous presenter when DirectComposition is unavailable.");
 
         static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware", "Camera-only timewarp" };
         int reprojMode = config->ReprojMode.value_or_default();

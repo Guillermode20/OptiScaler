@@ -6,6 +6,8 @@
 #include "Logger.h"
 #include "resource.h"
 #include "DllNames.h"
+#include <format>
+#include <fstream>
 
 #include "proxies/Dxgi_Proxy.h"
 #include "proxies/Kernel32_Proxy.h"
@@ -52,6 +54,23 @@
 static std::vector<HMODULE> _asiHandles;
 static std::vector<std::filesystem::directory_entry> _lateLoadingEntries;
 static bool _passThruMode = false;
+static std::string _passThruReason;
+static std::string _workingModeDiagnostic;
+
+static void WriteFallbackDiagnostic(const std::string& msg)
+{
+    try
+    {
+        auto path = Util::DllPath().parent_path() / L"OptiScaler_diagnostic.txt";
+        std::ofstream f(path, std::ios::app);
+        if (f)
+            f << "[" << Util::MillisecondsNow() << "] " << msg << "\n";
+    }
+    catch (...)
+    {
+    }
+    OutputDebugStringA((msg + "\n").c_str());
+}
 
 typedef const char*(CDECL* PFN_wine_get_version)(void);
 typedef void (*PFN_InitializeASI)(void);
@@ -348,17 +367,33 @@ void LoadAsiPlugins()
 
 static void CheckWorkingMode()
 {
-    if (!_passThruMode)
-        LOG_FUNC();
+    LOG_FUNC();
 
     bool modeFound = false;
     std::string filename = wstring_to_string(Util::DllPath().filename().wstring()); // .string() can crash
     std::string lCaseFilename(filename);
+    for (size_t i = 0; i < lCaseFilename.size(); i++)
+        lCaseFilename[i] = std::tolower(lCaseFilename[i]);
     std::filesystem::path pluginPath(Config::Instance()->PluginPath.value_or(L"plugins"));
     auto optiDllPath = std::filesystem::path(Config::Instance()->MainDllPath.value());
 
-    for (size_t i = 0; i < lCaseFilename.size(); i++)
-        lCaseFilename[i] = std::tolower(lCaseFilename[i]);
+    // Always emit minimal startup diagnostics to debugger + fallback file even before logger is ready.
+    {
+        auto diag = std::format("[OptiScaler] CheckWorkingMode: dll='{}' passThru={} OverlayMenu={} FGInput={} FGOutput={} FGEnabled={}",
+                                lCaseFilename, _passThruMode, Config::Instance()->OverlayMenu.value_or_default(),
+                                (int) Config::Instance()->FGInput.value_or_default(),
+                                (int) Config::Instance()->FGOutput.value_or_default(),
+                                Config::Instance()->FGEnabled.value_or_default());
+        WriteFallbackDiagnostic(diag);
+        _workingModeDiagnostic = diag;
+        State::Instance().startupDiagnostic = diag;
+        if (!_passThruMode && !Config::Instance()->OverlayMenu.value_or_default())
+        {
+            State::Instance().overlayDisableReason = "OverlayMenu=false (INI [Menu] or OldOverlayMenu quirk) - D3D12/D3D11 hooks skipped";
+            State::Instance().postCodes |= PostCode::OverlayDisabled;
+            WriteFallbackDiagnostic("[OptiScaler] Overlay disabled: " + State::Instance().overlayDisableReason);
+        }
+    }
 
     do
     {
@@ -791,12 +826,34 @@ static void CheckWorkingMode()
 
     // Work as a dummy dll
     if (_passThruMode)
+    {
+        auto msg = _passThruReason.empty() ? "unknown exclusion" : _passThruReason;
+        LOG_WARN("PassThru mode active: {}", msg);
+        WriteFallbackDiagnostic("[OptiScaler] PASS-THRU active: " + msg);
+        OutputDebugStringW(std::format(L"[OptiScaler] PASS-THRU active: {}\n", string_to_wstring(msg)).c_str());
+        State::Instance().passThruReason = msg;
+        State::Instance().postCodes |= PostCode::PassThruMode;
+        State::Instance().startupDiagnostic += " | PASS-THRU: " + msg;
         return;
+    }
 
     if (!modeFound)
     {
-        LOG_ERROR("Unsupported dll name: {0}", filename);
+        auto msg = std::format("Unsupported dll name: '{}' (expected version.dll|winmm.dll|wininet.dll|dbghelp.dll|winhttp.dll|dxgi.dll|d3d12.dll|optiscaler.dll|optiscaler.asi)", filename);
+        LOG_ERROR("{}", msg);
+        WriteFallbackDiagnostic("[OptiScaler] " + msg);
+        OutputDebugStringA((std::string("[OptiScaler] ") + msg + "\n").c_str());
+        State::Instance().startupDiagnostic = msg;
+        State::Instance().overlayDisableReason = msg;
+        State::Instance().postCodes |= PostCode::OverlayDisabled;
         return;
+    }
+
+    {
+        auto okMsg = std::format("Working as '{}' original loaded={}", lCaseFilename, (originalModule != nullptr ? "yes" : "no"));
+        WriteFallbackDiagnostic("[OptiScaler] " + okMsg);
+        OutputDebugStringA((std::string("[OptiScaler] ") + okMsg + "\n").c_str());
+        State::Instance().startupDiagnostic += " | " + okMsg;
     }
 
     Config::Instance()->CheckUpscalerFiles();
@@ -1672,6 +1729,12 @@ void CheckForExcludedProcess()
         if (exeLower != targetProcess)
         {
             _passThruMode = true;
+            _passThruReason = std::format("TargetProcessName mismatch: exe '{}' != target '{}'",
+                                          wstring_to_string(exeLower), wstring_to_string(targetProcess));
+            State::Instance().passThruReason = _passThruReason;
+            State::Instance().postCodes |= PostCode::PassThruMode;
+            WriteFallbackDiagnostic("[OptiScaler] PASS-THRU: " + _passThruReason);
+            OutputDebugStringW(std::format(L"[OptiScaler] PASS-THRU: {}\n", string_to_wstring(_passThruReason)).c_str());
             return;
         }
     }
@@ -1697,11 +1760,18 @@ void CheckForExcludedProcess()
         if (exeLower == e)
         {
             _passThruMode = true;
+            _passThruReason = std::format("ProcessExclusionList hit: '{}'", wstring_to_string(e));
+            State::Instance().passThruReason = _passThruReason;
+            State::Instance().postCodes |= PostCode::PassThruMode;
+            WriteFallbackDiagnostic("[OptiScaler] PASS-THRU: " + _passThruReason);
+            OutputDebugStringW(std::format(L"[OptiScaler] PASS-THRU: {}\n", string_to_wstring(_passThruReason)).c_str());
             return;
         }
     }
 
     _passThruMode = false;
+    _passThruReason.clear();
+    State::Instance().passThruReason.clear();
 }
 
 void CheckMemoryForProxies()
@@ -1801,6 +1871,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         if (_passThruMode)
         {
+            // Ensure diagnostics are visible even when logging to file is disabled.
+            // Force debug-output sink so pass-thru reason appears in DebugView.
+            if (!Config::Instance()->LogToDebug.has_value())
+                Config::Instance()->LogToDebug.set_volatile_value(true);
+            PrepareLogger();
+
             NtdllProxy::Init();
             KernelBaseProxy::Init();
             Kernel32Proxy::Init();
@@ -2005,6 +2081,19 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // Check for working mode and attach hooks
         spdlog::info("");
         CheckWorkingMode();
+        // Re-evaluate overlay after quirks (OldOverlayMenu may have disabled it)
+        if (!Config::Instance()->OverlayMenu.value_or_default())
+        {
+            State::Instance().overlayDisableReason =
+                State::Instance().gameQuirks & GameQuirk::OldOverlayMenu
+                    ? "OldOverlayMenu quirk: game uses legacy overlay (draws on upscaled image) - check Quirks or set OverlayMenu=true"
+                    : "OverlayMenu=false (INI [Menu] or config) - hooks for D3D12/D3D11 skipped, new overlay inactive";
+            State::Instance().postCodes |= PostCode::OverlayDisabled;
+            LOG_WARN("Overlay disabled: {}", State::Instance().overlayDisableReason);
+            WriteFallbackDiagnostic("[OptiScaler] Overlay disabled: " + State::Instance().overlayDisableReason);
+            OutputDebugStringA((std::string("[OptiScaler] Overlay disabled: ") + State::Instance().overlayDisableReason + "\n").c_str());
+            State::Instance().startupDiagnostic += " | Overlay disabled: " + State::Instance().overlayDisableReason;
+        }
         CheckMemoryForProxies();
 
         // OptiFG & Overlay Checks

@@ -69,6 +69,9 @@ enum class PostCode : uint32_t
 {
     SlPluginsAlreadyInMemory,
     TryingFsr4Fp8OnUnsupported,
+    PassThruMode,
+    OverlayDisabled,
+    ReprojDisabled,
     _
 };
 
@@ -317,6 +320,12 @@ class State
     // menu warnings
     bool fgSettingsChanged = false;
     bool nvngxIniDetected = false;
+
+    // startup / reproj diagnostics (visible in menu even when features are inactive)
+    std::string passThruReason;
+    std::string reprojDisableReason;
+    std::string startupDiagnostic;
+    std::string overlayDisableReason;
 
     bool nvngxExists = false;
     std::optional<std::wstring> nvngxReplacement = std::nullopt;

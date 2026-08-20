@@ -187,7 +187,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojMaxPoseAgeMs.set_from_config(readFloat("AsyncTimewarp", "MaxPoseAgeMs"));
             ReprojManualYawDegrees.set_from_config(readFloat("AsyncTimewarp", "ManualYawDegrees"));
             ReprojManualPitchDegrees.set_from_config(readFloat("AsyncTimewarp", "ManualPitchDegrees"));
-            ReprojAsync.set_from_config(readBool("Reproj", "Async"));
             ReprojMode.set_from_config(readInt("Reproj", "Mode"));
             ReprojStrength.set_from_config(readFloat("Reproj", "Strength"));
             ReprojTimeStep.set_from_config(readFloat("Reproj", "TimeStep"));
@@ -1032,7 +1031,6 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojManualYawDegrees.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "ManualPitchDegrees",
                      GetFloatValue(Instance()->ReprojManualPitchDegrees.value_for_config()).c_str());
-        ini.SetValue("Reproj", "Async", GetBoolValue(Instance()->ReprojAsync.value_for_config()).c_str());
         ini.SetValue("Reproj", "Mode", GetIntValue(Instance()->ReprojMode.value_for_config()).c_str());
         ini.SetValue("Reproj", "Strength", GetFloatValue(Instance()->ReprojStrength.value_for_config()).c_str());
         ini.SetValue("Reproj", "TimeStep", GetFloatValue(Instance()->ReprojTimeStep.value_for_config()).c_str());
