@@ -341,8 +341,7 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             InputAntiLag2::injectAl2Context(pSwapChain, fgIsActive);
         }
 #else
-        if (State::Instance().activeFgOutput == FGOutput::FSRFG || State::Instance().activeFgOutput == FGOutput::XeFG ||
-            State::Instance().activeFgOutput == FGOutput::Reproj)
+        if (State::Instance().activeFgOutput == FGOutput::FSRFG || State::Instance().activeFgOutput == FGOutput::XeFG)
         {
             LOG_DEBUG("Calling fakenvapi");
 

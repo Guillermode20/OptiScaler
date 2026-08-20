@@ -3837,6 +3837,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("0 = FramerateLimit, then the active monitor refresh rate");
         ImGui::PopItemWidth();
 
+        bool drawReprojUi = config->FGDrawUIOverFG.value_or_default();
+        if (ImGui::Checkbox("Composite supplied UI##reproj", &drawReprojUi))
+        {
+            config->FGDrawUIOverFG = drawReprojUi;
+            state.fgChanged = true;
+        }
+        ShowHelpMarker("In async mode, warp the supplied HUDless world image, then composite the game's UI in screen "
+                       "space.\nFalls back to warping the full backbuffer when either resource is missing.");
+
         bool reprojInvertMV = config->ReprojInvertMV.value_or_default();
         if (ImGui::Checkbox("Invert motion vectors##reproj", &reprojInvertMV))
             config->ReprojInvertMV = reprojInvertMV;

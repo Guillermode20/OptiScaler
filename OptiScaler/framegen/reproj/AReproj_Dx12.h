@@ -71,6 +71,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         UINT64 captureFenceValue = 0;
         UINT64 retirementFenceValue = 0;
         double renderTimestamp = 0.0;
+        double sourcePoseTimestamp = 0.0;
         double frameDelta = 0.0;
         bool hasDepth = false;
         bool hasCamera = false;
@@ -128,7 +129,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t WarpCountForPeriod(double realFrameMs, double refreshHz) const;
     void WaitUntil(double deadlineMs) const;
     bool DrainGpuWork();
-    HRESULT PresentFrame(UINT SyncInterval, UINT Flags);       // skip-flag wrapped present
+    HRESULT PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated = false); // skip-flag wrapped present
     bool SubmitSCCommandList(int fIndex);                      // close + execute the SC command list
     bool WaitForSCAllocator(int fIndex);                       // wait for the previous warp on this slot to finish
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless

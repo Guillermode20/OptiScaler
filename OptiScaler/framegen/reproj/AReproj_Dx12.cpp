@@ -38,7 +38,7 @@ bool AReproj_Dx12::SetInterpolatedFrameCount(UINT interpolatedFrameCount)
 
 void AReproj_Dx12::SetCommandQueue(FG_ResourceType type, ID3D12CommandQueue* queue) { _gameCommandQueue = queue; }
 
-HRESULT AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags)
+HRESULT AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated)
 {
     if (_swapChain == nullptr)
         return E_FAIL;
@@ -50,7 +50,10 @@ HRESULT AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags)
     FGHooks::SkipPresent(false);
 
     if (result == S_OK)
+    {
         LOG_DEBUG("Presented frame, SyncInterval: {}, Flags: {:X}", SyncInterval, Flags);
+        fakenvapi::reportFGPresent(_swapChain, true, interpolated);
+    }
     else
         LOG_DEBUG("Present result: {:X}", (UINT) result);
 
@@ -397,7 +400,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex)
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
 
-    if (hudless && ui && IsResourceReady(FG_ResourceType::HudlessColor, sourceIndex) &&
+    if (Config::Instance()->FGDrawUIOverFG.value_or_default() && hudless && ui &&
+        IsResourceReady(FG_ResourceType::HudlessColor, sourceIndex) &&
         IsResourceReady(FG_ResourceType::UIColor, sourceIndex))
     {
         const auto hudlessDesc = hudless->GetResource()->GetDesc();
@@ -438,6 +442,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex)
         packet.constants.mode = 0;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
+    packet.sourcePoseTimestamp = _cameraTimestamp[sourceIndex];
     packet.frameDelta = State::Instance().lastFGFrameTime;
     return true;
 }
@@ -819,8 +824,8 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     FGHooks::SkipPresent(true);
     const auto result = _presentSwapChain->Present(syncInterval, flags);
     FGHooks::SkipPresent(false);
-    if (result == S_OK)
-        fakenvapi::reportFGPresent(_presentSwapChain, true, interpolated);
+    if (result == S_OK && interpolated)
+        fakenvapi::reportFGPresent(_presentSwapChain, true, true);
     else if (result == DXGI_ERROR_DEVICE_REMOVED && _device != nullptr)
         Util::GetDeviceRemovedReason(_device);
     return result;
@@ -899,7 +904,9 @@ void AReproj_Dx12::PresenterMain()
             }
 
             const auto result = PresentCompositorFrame(0, 0, true);
-            const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - packet.renderTimestamp));
+            const auto poseTimestamp =
+                packet.sourcePoseTimestamp > 0.0 ? packet.sourcePoseTimestamp : packet.renderTimestamp;
+            const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - poseTimestamp));
             RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
             if (result != S_OK)
                 break;
@@ -1163,8 +1170,9 @@ bool AReproj_Dx12::Present()
             fakeInterval = 1;
         }
 
-        const auto fakeResult = PresentFrame(fakeInterval, fakeFlags);
-        const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - sourceTimestamp));
+        const auto fakeResult = PresentFrame(fakeInterval, fakeFlags, true);
+        const auto poseTimestamp = _cameraTimestamp[fIndex] > 0.0 ? _cameraTimestamp[fIndex] : sourceTimestamp;
+        const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - poseTimestamp));
         RecordWarpFrame(fakeResult == S_OK, fakeResult != S_OK, poseAge);
         if (fakeResult != S_OK)
             break;

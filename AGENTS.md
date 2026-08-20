@@ -79,9 +79,9 @@ Known issues / limitations:
 - `ReprojCapAtHalfRefresh` controls whether the existing `FrameLimit` half-rate behavior is used for reprojection. Reprojection bypasses Reflex/XeLL limiter gating so that the selected cap is applied even when those limiters are inactive.
 - Reproj emits zero to `ReprojMaxWarpFrames` warps per real frame. The synchronous fallback blocks the game present path; `ReprojAsync=true` publishes owned color/depth/velocity/UI packets to a worker-owned DirectComposition swapchain.
 - Never point the worker at the game's DXGI backbuffers. After a real present, the next backbuffer belongs to the game; only the separate composition swapchain makes worker presentation safe.
-- Async packets transition `FREE -> CAPTURING -> READY -> PRESENTING -> RETIRED -> FREE`; reuse requires both capture and presenter fences to complete. Stop/join the presenter before draining and releasing D3D12/DComp objects.
+- Async packets transition `FREE -> CAPTURING -> READY -> PRESENTING -> RETIRED -> FREE`; reuse requires both capture and presenter fences to complete. Stop/join the presenter before draining and releasing D3D12/DComp objects. `IFGFeature::_cameraTimestamp` records source-pose age when camera data is captured.
 - DirectComposition is experimental and borderless/DWM-dependent. Creation or runtime failure falls back to the synchronous presenter; keep `ReprojAsync=false` as the shipped default until hardware testing is complete.
-- Reproj is included in fakenvapi `reportFGPresent`; the async worker reports its composition presents directly. Reflex markers/sleeps remain intentionally limited to DLSSG.
+- Reproj reports real/fake frame types at its internal present sites; the generic wrapped-swapchain fakenvapi block intentionally excludes it. The FGHooks present-skip flags are `thread_local`, so a worker present cannot bypass a concurrent game present. Reflex markers/sleeps remain intentionally limited to DLSSG.
 
 ## D3D12 base-class gotchas
 
