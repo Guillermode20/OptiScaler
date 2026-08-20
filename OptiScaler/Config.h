@@ -608,9 +608,12 @@ class Config
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
 
-    // Async Reprojection (ASW-style, see AsyncReprojection.md)
+    // Async Timewarp / Reprojection (ASW-style, see AsyncReprojection.md)
+    // Selecting FGOutput=Reproj is the opt-in; this setting only exists as an
+    // explicit off-switch on top of that selection (default resolves to on).
+    CustomOptional<bool> ReprojEnabled { true };
     CustomOptional<bool> ReprojAsync { false };           // DComp presenter; falls back to synchronous on failure
-    CustomOptional<int> ReprojMode { 0 };                 // 0 = MV warp, 1 = depth-aware, 2 = camera-only
+    CustomOptional<int> ReprojMode { 1 };                 // 0 = MV warp, 1 = depth-aware, 2 = camera-only
     CustomOptional<float> ReprojStrength { 1.0f };        // blend of the warp result with the original frame
     CustomOptional<float> ReprojTimeStep { 0.5f };        // warp fraction (0.5 = midpoint between real frames)
     CustomOptional<bool> ReprojInvertMV { false };        // per-game MV sign convention
@@ -619,13 +622,16 @@ class Config
     CustomOptional<int> ReprojMaxWarpFrames {
         1
     }; // bounded synchronous fallback; async compositor required for >1 non-blocking
-    CustomOptional<float> ReprojTargetRefresh { 0.0f };   // 0 = FramerateLimit, then active display refresh
-    CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
-    CustomOptional<bool> ReprojRotationOnly { false };    // suppress camera translation in depth-aware modes
-    CustomOptional<bool> ReprojLateLatch { false };       // add post-render raw mouse rotation immediately before warp
-    CustomOptional<bool> ReprojAutoCalibrate { true };    // learn mouse-to-camera mapping and delay from real poses
+    CustomOptional<float> ReprojTargetRefresh { 0.0f }; // 0 = FramerateLimit, then active display refresh
+    CustomOptional<bool> ReprojUseDepth { true };       // fall back to MV warp when depth/camera data is unavailable
+    CustomOptional<bool> ReprojRotationOnly { false };  // suppress camera translation in depth-aware modes
+    CustomOptional<bool> ReprojLateLatch { false };     // add post-render raw mouse rotation immediately before warp
+    CustomOptional<bool> ReprojAutoCalibrate { true };  // learn mouse-to-camera mapping and delay from real poses
+    CustomOptional<float, NoDefault> ReprojManualYawDegrees;
+    CustomOptional<float, NoDefault> ReprojManualPitchDegrees;
     CustomOptional<float> ReprojMouseDegreesX { 0.022f }; // fallback yaw degrees/count when calibration is unavailable
     CustomOptional<float> ReprojMouseDegreesY { 0.022f }; // pitch degrees per raw mouse count; sign controls direction
+    CustomOptional<float> ReprojMaxPoseAgeMs { 50.0f };   // do not warp anchors with an old source pose
     CustomOptional<float> ReprojPredictionMs { 2.0f };    // extrapolate recent raw input toward scanout
     CustomOptional<float> ReprojMaxRotation { 15.0f };    // clamp late rotation to limit edge artifacts
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output

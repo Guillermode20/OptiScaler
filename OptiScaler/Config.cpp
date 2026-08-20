@@ -103,7 +103,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                     FGOutput.set_from_config(FGOutput::XeFG);
                 else if (lstrcmpiA(FGOutputString.value().c_str(), "dlssg") == 0)
                     FGOutput.set_from_config(FGOutput::DLSSG);
-                else if (lstrcmpiA(FGOutputString.value().c_str(), "reproj") == 0)
+                else if (lstrcmpiA(FGOutputString.value().c_str(), "reproj") == 0 ||
+                         lstrcmpiA(FGOutputString.value().c_str(), "asynctimewarp") == 0)
                     FGOutput.set_from_config(FGOutput::Reproj);
             }
 
@@ -179,8 +180,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             FSRFGEnableWatermark.set_from_config(readBool("FSRFG", "EnableWatermark"));
         }
 
-        // Async Reprojection
+        // Async Timewarp. The [Reproj] names below remain accepted for the
+        // already-published experimental configuration.
         {
+            ReprojEnabled.set_from_config(readBool("AsyncTimewarp", "Enabled"));
+            ReprojMaxPoseAgeMs.set_from_config(readFloat("AsyncTimewarp", "MaxPoseAgeMs"));
+            ReprojManualYawDegrees.set_from_config(readFloat("AsyncTimewarp", "ManualYawDegrees"));
+            ReprojManualPitchDegrees.set_from_config(readFloat("AsyncTimewarp", "ManualPitchDegrees"));
             ReprojAsync.set_from_config(readBool("Reproj", "Async"));
             ReprojMode.set_from_config(readInt("Reproj", "Mode"));
             ReprojStrength.set_from_config(readFloat("Reproj", "Strength"));
@@ -935,7 +941,7 @@ bool Config::SaveIni()
             else if (FGOutputHeld.value() == FGOutput::DLSSG)
                 FGOutputString = "DLSSG";
             else if (FGOutputHeld.value() == FGOutput::Reproj)
-                FGOutputString = "Reproj";
+                FGOutputString = "AsyncTimewarp";
         }
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
 
@@ -1017,8 +1023,15 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->FSRFGEnableWatermark.value_for_config()).c_str());
     }
 
-    // Async Reprojection output
+    // Async Timewarp output (legacy Reproj keys are kept below)
     {
+        ini.SetValue("AsyncTimewarp", "Enabled", GetBoolValue(Instance()->ReprojEnabled.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "MaxPoseAgeMs",
+                     GetFloatValue(Instance()->ReprojMaxPoseAgeMs.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "ManualYawDegrees",
+                     GetFloatValue(Instance()->ReprojManualYawDegrees.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "ManualPitchDegrees",
+                     GetFloatValue(Instance()->ReprojManualPitchDegrees.value_for_config()).c_str());
         ini.SetValue("Reproj", "Async", GetBoolValue(Instance()->ReprojAsync.value_for_config()).c_str());
         ini.SetValue("Reproj", "Mode", GetIntValue(Instance()->ReprojMode.value_for_config()).c_str());
         ini.SetValue("Reproj", "Strength", GetFloatValue(Instance()->ReprojStrength.value_for_config()).c_str());

@@ -3041,10 +3041,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         { FGOutput::FSRFG, "FSR FG", "FSR3/4-FG, RDNA4 autoupgrades to FSR4-FG\n\nFSR4-FG sometimes better/worse than XeFG" },
         { FGOutput::DLSSG, "DLSSG", "DLSSG output\ncan be used in conjuction with Nukem's for example" },
         { FGOutput::XeFG, "XeFG", "XeFG - heaviest, but best universal FG\n\nXeFG 3 overall deals best with HUD\n\nEnable UI Composition if HUD ghosting" },
-        { FGOutput::Reproj, "Async Reproj", "Reprojects the previous frame at half rate (ASW-style)\n\n"
-                                            "Cheapest FG alternative, works on any DX12 GPU\n"
-                                            "Expect smearing at disocclusions\n"
-                                            "Set FramerateLimit = refresh rate, reproj halves it" },
+        { FGOutput::Reproj, "Async Timewarp", "Depth-reprojects the completed FSR/FFX-upscaled anchor at display cadence.\n\n"
+                                                "No frame-interpolation dispatch is issued. Requires DX12, FG Input = Upscaler, "
+                                                "and an active FSR/FFX upscaler.\n"
+                                                "Rotation-only mouse late latch is used until a predicted camera source is available.\n"
+                                                "Set FramerateLimit = refresh rate, then enable [AsyncTimewarp]." },
     };
 
     // clang-format on
@@ -3080,9 +3081,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
     outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
 
-    // Async Reproj output requirements
+    // Async Timewarp requires the DX12 FSR/FFX upscaler input. It intentionally
+    // remains separate from the existing FSR/DLSS/XeSS interpolation selections.
     auto constexpr reprojOutputIndex = (uint32_t) FGOutput::Reproj;
-    outputOptions[reprojOutputIndex].set_disabled(state.swapchainApi != API::DX12, "Unsupported API");
+    outputOptions[reprojOutputIndex].set_disabled(state.swapchainApi != API::DX12 || !IsFsr(currentBackend),
+                                                  "Requires DX12 FSR/FFX upscaler input");
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&
@@ -3781,19 +3784,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
     if (state.activeFgOutput == FGOutput::Reproj && state.activeFgInput != FGInput::NoFG &&
         state.currentFGSwapchain != nullptr)
     {
-        ImGui::SeparatorText("Frame Generation (Async Reproj)");
+        ImGui::SeparatorText("Output (Async Timewarp)");
 
-        bool fgActive = config->FGEnabled.value_or_default();
-        if (ImGui::Checkbox("Active##reproj", &fgActive))
+        bool timewarpEnabled = config->ReprojEnabled.value_or_default();
+        if (ImGui::Checkbox("Enable Async Timewarp##reproj", &timewarpEnabled))
         {
-            config->FGEnabled = fgActive;
-            LOG_DEBUG("FGEnabled set FGEnabled: {}", fgActive);
-
-            if (config->FGEnabled.value_or_default())
-                state.fgChanged = true;
+            config->ReprojEnabled = timewarpEnabled;
+            config->FGEnabled = timewarpEnabled;
+            state.fgChanged = true;
         }
-        ShowHelpMarker("Enable reprojection\n"
-                       "Game runs at half the set FramerateLimit, so set it to your refresh rate");
+        ShowHelpMarker("Opt-in depth timewarp output. Disabling it always presents the game frame unchanged.");
 
         bool reprojAsync = config->ReprojAsync.value_or_default();
         if (ImGui::Checkbox("Async DirectComposition presenter##reproj", &reprojAsync))
@@ -3835,6 +3835,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::InputFloat("Target refresh##reproj", &targetRefresh, 1.0f, 10.0f, "%.0f Hz"))
             config->ReprojTargetRefresh = std::max(0.0f, targetRefresh);
         ShowHelpMarker("0 = FramerateLimit, then the active monitor refresh rate");
+
+        float maxPoseAge = config->ReprojMaxPoseAgeMs.value_or_default();
+        if (ImGui::InputFloat("Max pose age##reproj", &maxPoseAge, 1.0f, 5.0f, "%.0f ms"))
+            config->ReprojMaxPoseAgeMs = std::clamp(maxPoseAge, 1.0f, 1000.0f);
+        ShowHelpMarker(
+            "Suppress warps and retain the latest unwarped anchor when the source camera pose is older than this.");
         ImGui::PopItemWidth();
 
         bool drawReprojUi = config->FGDrawUIOverFG.value_or_default();
@@ -3870,6 +3876,17 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojAutoCalibrate = reprojAutoCalibrate;
         ShowHelpMarker("Automatically learn sensitivity, axes, inversion, and input delay from real camera movement");
 
+        ImGui::PushItemWidth(135.0f * menuResScale);
+        float manualYaw = config->ReprojManualYawDegrees.value_or(0.0f);
+        float manualPitch = config->ReprojManualPitchDegrees.value_or(0.0f);
+        if (ImGui::InputFloat("Manual yaw deg/count##reproj", &manualYaw, 0.001f, 0.01f, "%.4f"))
+            config->ReprojManualYawDegrees = manualYaw;
+        if (ImGui::InputFloat("Manual pitch deg/count##reproj", &manualPitch, 0.001f, 0.01f, "%.4f"))
+            config->ReprojManualPitchDegrees = manualPitch;
+        ImGui::PopItemWidth();
+        ShowHelpMarker("Optional explicit fallback for rotation-only mouse timewarp. Both axes are required when "
+                       "calibration is unavailable.");
+
         bool reprojDebugView = config->ReprojDebugView.value_or_default();
         if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))
             config->ReprojDebugView = reprojDebugView;
@@ -3887,13 +3904,24 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ImGui::TextDisabled("Real %.1f FPS | warp %.1f FPS | target %.0f Hz | warps %u | dropped %u",
                                 metrics.realFps, metrics.warpFps, metrics.targetRefreshHz, metrics.warpsPerReal,
                                 metrics.droppedWarps);
-            ImGui::TextDisabled("Pose age %.1f ms | queue %u (%s)%s%s", metrics.poseAgeMs, metrics.queueDepth,
+            ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s)%s%s", metrics.poseAgeMs, metrics.queueDepth,
                                 metrics.asyncPresenter ? "async DComp" : "safe synchronous",
                                 metrics.depthReady ? " | depth ready" : "",
                                 metrics.latePoseEstimated ? " | pose extrapolated" : "");
+            if (metrics.focusLost || metrics.anchorStale || !metrics.depthReady)
+                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Warp paused: %s%s%s",
+                                   metrics.focusLost ? "focus lost " : "", metrics.anchorStale ? "anchor stale " : "",
+                                   !metrics.depthReady ? "depth unavailable" : "");
+            if (metrics.rotationOnly)
+                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                                   "Rotation-only fallback: no predicted camera pose source is available.");
+            if (metrics.hudWarped)
+                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                                   "HUD warning: the supplied UI is being warped with the scene.");
             if (reprojLateLatch && reprojAutoCalibrate)
-                ImGui::TextDisabled("Mouse calibration %.0f%% | learned delay %d ms",
-                                    metrics.mouseCalibrationConfidence * 100.0f, metrics.mouseCalibrationLagMs);
+                ImGui::TextDisabled("Mouse calibration %.0f%% | learned delay %d ms%s",
+                                    metrics.mouseCalibrationConfidence * 100.0f, metrics.mouseCalibrationLagMs,
+                                    metrics.calibrationReady ? "" : " | awaiting calibration or manual axes");
         }
     }
 

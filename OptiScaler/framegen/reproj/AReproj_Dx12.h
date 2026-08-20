@@ -32,8 +32,13 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         uint32_t droppedWarps = 0;
         uint32_t queueDepth = 0;
         bool depthReady = false;
+        bool anchorStale = false;
+        bool focusLost = false;
+        bool rotationOnly = false;
+        bool hudWarped = true;
         bool asyncPresenter = false;
         bool latePoseEstimated = false;
+        bool calibrationReady = false;
         float mouseCalibrationConfidence = 0.0f;
         int mouseCalibrationLagMs = 0;
     };
@@ -149,7 +154,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool SubmitSCCommandList(int fIndex);                      // close + execute the SC command list
     bool WaitForSCAllocator(int fIndex);                       // wait for the previous warp on this slot to finish
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
-    bool IsCameraAllZero(int fIndex);
+    bool IsCameraAllZero(int fIndex) const;
+    bool IsPoseFresh(double timestamp, float* ageMs = nullptr) const;
+    bool HasFreshCameraPose(int fIndex, float* ageMs = nullptr) const;
     void RecordRealFrame();
     void RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs);
     void LogMetricsIfDue();

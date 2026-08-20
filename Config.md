@@ -34,23 +34,31 @@ For selecting upscalers from in-game menus `Upscalers` section could be used.
 
 ![upscalers](images/Upscalers.png)
 
-### Async Reprojection (DX12)
+### Async Timewarp (DX12, experimental)
 
-`FGOutput=reproj` warps the last real frame using the selected upscaler's motion
-vectors and, when available, depth/camera data. It does not create unseen geometry.
-Use `FGInput=upscaler` with `Dx12Upscaler=fsr22` for the supported generic path.
+`FGOutput=asynctimewarp` is a distinct opt-in output mode. It anchors the completed
+FSR/FFX-upscaled image and uses display-resolution depth plus the latest safe camera
+pose to reproject it; it does not dispatch FSR frame interpolation or create unseen
+geometry. It requires `FGInput=upscaler` with a DX12 FSR/FFX upscaler.
 
 ```ini
 [FrameGen]
 Enabled=true
 FGInput=upscaler
-FGOutput=reproj
+FGOutput=asynctimewarp
+
+[AsyncTimewarp]
+Enabled=true
+MaxPoseAgeMs=50
+; Optional only when auto-calibration cannot converge; both axes are required.
+ManualYawDegrees=auto
+ManualPitchDegrees=auto
 
 [Reproj]
 ; Experimental worker-owned DirectComposition output; false keeps the synchronous fallback
 Async=false
-; 0 = motion vectors, 1 = depth-aware, 2 = rotation-only camera timewarp
-Mode=0
+; 1 = depth-aware, 2 = rotation-only camera timewarp (0 is legacy MV diagnostics)
+Mode=1
 ; 0 uses FramerateLimit, then the active monitor refresh
 TargetRefresh=0
 ; Safe default: one extra warp per real frame
@@ -62,8 +70,10 @@ RotationOnly=false
 `Async=true` uses a worker-owned DirectComposition swapchain, keeping warp writes
 away from the game's backbuffers. If composition setup fails, OptiScaler falls back
 to the synchronous presenter. Higher `MaxWarpFrames` values may reduce game-thread
-throughput only in that fallback. The menu reports real/warp FPS, queue depth, and
-the active presenter.
+throughput only in that fallback. Timewarp pauses on lost focus, missing/invalid
+depth, a reset, or an anchor older than `MaxPoseAgeMs`, then presents the latest real
+frame unchanged until a fresh anchor arrives. The menu reports anchor age, warp
+cadence, calibration, rotation-only fallback, and HUD-warp warnings.
 
 ### Pseudo SuperSampling
 With OptiScaler 0.4 there are new options for pseudo-supersampling under `[Upscalers]`

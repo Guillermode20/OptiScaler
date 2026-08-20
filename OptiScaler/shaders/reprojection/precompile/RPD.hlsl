@@ -98,6 +98,8 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float3 midUp      = normalize(lerp(PrevCameraUp.xyz, up, 1.0f + t));
     float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, 1.0f + t));
 
+    // Late latch is sampled immediately before dispatch. Apply yaw around the
+    // camera up axis, then pitch around the yawed right axis.
     midRight = normalize(RotateAxis(midRight, midUp, LateYaw));
     midForward = normalize(RotateAxis(midForward, midUp, LateYaw));
     midUp = normalize(RotateAxis(midUp, midRight, LatePitch));

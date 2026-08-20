@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include <dcomp.h>
 
@@ -32,7 +33,7 @@ LRESULT CALLBACK ReprojPresenterWindowProc(HWND hwnd, UINT message, WPARAM wPara
 }
 } // namespace
 
-const char* AReproj_Dx12::Name() { return "Async Reproj"; }
+const char* AReproj_Dx12::Name() { return "Async Timewarp"; }
 
 feature_version AReproj_Dx12::Version() { return feature_version { 1, 0, 0 }; }
 
@@ -251,7 +252,7 @@ bool AReproj_Dx12::CreateWarpOutput(int fIndex, ID3D12Resource* source)
     return true;
 }
 
-bool AReproj_Dx12::IsCameraAllZero(int fIndex)
+bool AReproj_Dx12::IsCameraAllZero(int fIndex) const
 {
     for (int i = 0; i < 3; i++)
     {
@@ -265,6 +266,25 @@ bool AReproj_Dx12::IsCameraAllZero(int fIndex)
     return true;
 }
 
+bool AReproj_Dx12::IsPoseFresh(double timestamp, float* ageMs) const
+{
+    const auto age =
+        timestamp > 0.0 ? std::max(0.0, Util::MillisecondsNow() - timestamp) : std::numeric_limits<double>::infinity();
+    if (ageMs != nullptr)
+        *ageMs = static_cast<float>(age);
+
+    const auto maxAge = std::clamp<double>(Config::Instance()->ReprojMaxPoseAgeMs.value_or_default(), 1.0, 1000.0);
+    return std::isfinite(age) && age <= maxAge;
+}
+
+bool AReproj_Dx12::HasFreshCameraPose(int fIndex, float* ageMs) const
+{
+    const auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    const bool hasCamera = _cameraVFov[fIndex] > 0.0f && _cameraAspectRatio[fIndex] > 0.0f &&
+                           !IsCameraAllZero(fIndex) && !IsCameraAllZero(prevIndex);
+    return hasCamera && IsPoseFresh(_cameraTimestamp[fIndex], ageMs);
+}
+
 void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
 {
     if (!Config::Instance()->ReprojAutoCalibrate.value_or_default())
@@ -273,8 +293,8 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
     const auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
     const auto timestamp = _cameraTimestamp[fIndex];
     const auto prevTimestamp = _cameraTimestamp[prevIndex];
-    if (timestamp <= prevTimestamp || timestamp == _lastCalibrationTimestamp || IsCameraAllZero(fIndex) ||
-        IsCameraAllZero(prevIndex))
+    if (_reset[fIndex] || _reset[prevIndex] || timestamp <= prevTimestamp || timestamp == _lastCalibrationTimestamp ||
+        IsCameraAllZero(fIndex) || IsCameraAllZero(prevIndex))
         return;
     _lastCalibrationTimestamp = timestamp;
 
@@ -408,17 +428,28 @@ void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawM
     }
 
     constexpr double radiansPerDegree = 0.017453292519943295;
-    double yaw;
-    double pitch;
+    double yaw = 0.0;
+    double pitch = 0.0;
     if (config->ReprojAutoCalibrate.value_or_default() && _calibrationConfidence >= 0.35f)
     {
         yaw = _calibrationMatrix[0] * dx + _calibrationMatrix[1] * dy;
         pitch = _calibrationMatrix[2] * dx + _calibrationMatrix[3] * dy;
     }
+    else if (config->ReprojManualYawDegrees.has_value() && config->ReprojManualPitchDegrees.has_value())
+    {
+        yaw = dx * config->ReprojManualYawDegrees.value() * radiansPerDegree;
+        pitch = dy * config->ReprojManualPitchDegrees.value() * radiansPerDegree;
+    }
+    else if (config->ReprojMouseDegreesX.has_value() && config->ReprojMouseDegreesY.has_value())
+    {
+        // Retain explicit legacy overrides, but never silently estimate pose from
+        // the default sensitivity. A calibration or user-supplied value is required.
+        yaw = dx * config->ReprojMouseDegreesX.value() * radiansPerDegree;
+        pitch = dy * config->ReprojMouseDegreesY.value() * radiansPerDegree;
+    }
     else
     {
-        yaw = dx * config->ReprojMouseDegreesX.value_or_default() * radiansPerDegree;
-        pitch = dy * config->ReprojMouseDegreesY.value_or_default() * radiansPerDegree;
+        return;
     }
     const auto maximum = std::clamp<double>(config->ReprojMaxRotation.value_or_default(), 0.0, 45.0) * radiansPerDegree;
     const auto length = std::hypot(yaw, pitch);
@@ -1145,6 +1176,14 @@ void AReproj_Dx12::PresenterMain()
                 break;
             }
 
+            // Keep the real frame that was already copied to the composition
+            // swapchain, but do not warp it after a focus change or stale pose.
+            if (!OptiInput::IsFocused() || (packet.constants.mode != 0 && !IsPoseFresh(packet.sourcePoseTimestamp)))
+            {
+                RecordWarpFrame(false, true, 0.0f);
+                break;
+            }
+
             const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
             const auto timeStep = std::clamp(
                 static_cast<float>((refreshPeriodMs * warp) / realPeriodMs) * configuredStep * 2.0f, 0.0f, 1.0f);
@@ -1303,10 +1342,30 @@ bool AReproj_Dx12::Present()
     auto fIndex = GetIndexWillBeDispatched();
     _lastDispatchedFrame = _frameCount;
     RecordRealFrame();
+    float poseAge = 0.0f;
+    const bool useDepth = Config::Instance()->ReprojUseDepth.value_or_default() &&
+                          _resourceReady[fIndex].contains(FG_ResourceType::Depth);
+    const bool needsCameraPose = Config::Instance()->ReprojMode.value_or_default() != 0 && useDepth;
+    const int prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    // Distinguish "camera data never arrived" (fall back to the MV warp, which both
+    // dispatch paths already handle by clamping cb.mode to 0) from "camera data went
+    // stale" (pause on the last safe anchor instead of warping with old pose).
+    const bool cameraAvailable = needsCameraPose && _cameraVFov[fIndex] > 0.0f &&
+                                 _cameraAspectRatio[fIndex] > 0.0f && !IsCameraAllZero(fIndex) &&
+                                 !IsCameraAllZero(prevIndex);
+    const bool poseFresh = IsPoseFresh(_cameraTimestamp[fIndex], &poseAge);
+    const bool focused = OptiInput::IsFocused();
     {
         std::scoped_lock lock(_metricsMutex);
-        _runtimeMetrics.depthReady = Config::Instance()->ReprojUseDepth.value_or_default() &&
-                                     _resourceReady[fIndex].contains(FG_ResourceType::Depth);
+        _runtimeMetrics.depthReady = useDepth;
+        _runtimeMetrics.anchorStale = cameraAvailable && !poseFresh;
+        _runtimeMetrics.focusLost = !focused;
+        _runtimeMetrics.rotationOnly = Config::Instance()->ReprojRotationOnly.value_or_default() ||
+                                       Config::Instance()->ReprojMode.value_or_default() == 2;
+        _runtimeMetrics.hudWarped = !Config::Instance()->FGDrawUIOverFG.value_or_default();
+        _runtimeMetrics.calibrationReady =
+            _calibrationConfidence >= 0.35f || (Config::Instance()->ReprojManualYawDegrees.has_value() &&
+                                                Config::Instance()->ReprojManualPitchDegrees.has_value());
     }
 
     // 1. Flush any pending deferred command lists (resource copies from SetResource etc.)
@@ -1343,6 +1402,20 @@ bool AReproj_Dx12::Present()
         LOG_WARN("Reproj: no motion vectors for frame {}, skipping fake frame", _frameCount);
         PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
         RecordWarpFrame(false, true, 0.0f);
+        return true;
+    }
+
+    // Present the newest real frame as the safe unwarped anchor only when the
+    // previous warp would have been based on a *stale* pose or the game lost
+    // focus. Missing camera/depth data is NOT a pause reason: both dispatch paths
+    // already fall back to the motion-vector warp (cb.mode=0) for that case, so
+    // the feature keeps producing frames instead of silently looking disabled.
+    if (!focused || (cameraAvailable && !poseFresh))
+    {
+        LOG_DEBUG("Reproj: presenting safe unwarped anchor (focused:{} camera:{} poseAge:{:.1f}ms)", focused,
+                  cameraAvailable, poseAge);
+        PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
+        RecordWarpFrame(false, true, poseAge);
         return true;
     }
 
@@ -1581,7 +1654,13 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
     if (!CheckForRealObject(__FUNCTION__, cmdQueue, (IUnknown**) &realQueue))
         realQueue = cmdQueue;
 
-    // A free backbuffer slot is required for the reprojected frame: force >= 3 buffers
+    // A free backbuffer slot is required for the reprojected frame: force >= 3 buffers.
+    // Remember the caller's values so a failed creation does not leak our
+    // requirements into the game-visible fallback swapchain the DXGI hook creates.
+    const auto originalBufferCount = desc->BufferCount;
+    const auto originalFlags = desc->Flags;
+    const auto originalSwapEffect = desc->SwapEffect;
+
     if (desc->BufferCount < 3)
         desc->BufferCount = 3;
 
@@ -1595,6 +1674,13 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         desc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
     auto result = realFactory->CreateSwapChain(realQueue, desc, swapChain);
+
+    if (result != S_OK)
+    {
+        desc->BufferCount = originalBufferCount;
+        desc->Flags = originalFlags;
+        desc->SwapEffect = originalSwapEffect;
+    }
 
     if (result == S_OK)
     {
@@ -1665,7 +1751,13 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
     if (!CheckForRealObject(__FUNCTION__, cmdQueue, (IUnknown**) &realQueue))
         realQueue = cmdQueue;
 
-    // A free backbuffer slot is required for the reprojected frame: force >= 3 buffers
+    // A free backbuffer slot is required for the reprojected frame: force >= 3 buffers.
+    // Remember the caller's values so a failed creation does not leak our
+    // requirements into the game-visible fallback swapchain the DXGI hook creates.
+    const auto originalBufferCount = desc->BufferCount;
+    const auto originalFlags = desc->Flags;
+    const auto originalSwapEffect = desc->SwapEffect;
+
     if (desc->BufferCount < 3)
         desc->BufferCount = 3;
 
@@ -1683,6 +1775,10 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
 
     if (result != S_OK || factory2 == nullptr)
     {
+        desc->BufferCount = originalBufferCount;
+        desc->Flags = originalFlags;
+        desc->SwapEffect = originalSwapEffect;
+
         LOG_ERROR("Reproj swapchain creation failed, factory does not support CreateSwapChainForHwnd: {:X}",
                   (UINT) result);
         return false;
@@ -1691,6 +1787,13 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
     result = factory2->CreateSwapChainForHwnd(realQueue, hwnd, desc, pFullscreenDesc, nullptr,
                                               (IDXGISwapChain1**) swapChain);
     factory2->Release();
+
+    if (result != S_OK)
+    {
+        desc->BufferCount = originalBufferCount;
+        desc->Flags = originalFlags;
+        desc->SwapEffect = originalSwapEffect;
+    }
 
     if (result == S_OK)
     {
@@ -1804,7 +1907,33 @@ void AReproj_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants
     ReprojCheckAndUpdateFlag<FG_Flags::JitteredMVs>(fgConstants.flags, "Jittered MVs");
     ReprojCheckAndUpdateFlag<FG_Flags::DisplayResolutionMVs>(fgConstants.flags, "Display Resolution MVs");
 
-    if (Config::Instance()->FGEnabled.value_or_default())
+    // The raw Dx12Upscaler config code cannot gate this path: "auto" parses to
+    // Upscaler::Reset and many games resolve the actual backend only after their
+    // first CreateContext call. Gate on the resolved feature when available and
+    // fall back to the configured code only before the backend has materialized.
+    const auto configuredBackend = Config::Instance()->Dx12Upscaler.value_or_default();
+    const auto activeBackend = State::Instance().currentFeature != nullptr
+                                   ? State::Instance().currentFeature->GetUpscalerType()
+                                   : configuredBackend;
+    const bool supportedTimewarpInput = State::Instance().activeFgInput == FGInput::Upscaler &&
+                                        IsFsr(activeBackend);
+    // FGOutput=Reproj is the opt-in; ReprojEnabled only disables it explicitly.
+    const bool reprojEnabled = Config::Instance()->ReprojEnabled.value_or_default();
+
+    // Warn on transitions only, so an unsupported game leaves one actionable line
+    // instead of (a) spam or (b) silence.
+    static bool lastSupportedTimewarpInput = true;
+    if (!supportedTimewarpInput && lastSupportedTimewarpInput)
+    {
+        LOG_WARN("Async Timewarp cannot activate: requires FGInput=upscaler and a resolved DX12 FSR/FFX upscaler "
+                 "(FGInput={}, backend={} [{}])",
+                 magic_enum::enum_name(State::Instance().activeFgInput), magic_enum::enum_name(activeBackend),
+                 State::Instance().currentFeature != nullptr ? State::Instance().currentFeature->ShortName()
+                                                             : "not resolved");
+    }
+    lastSupportedTimewarpInput = supportedTimewarpInput;
+
+    if (Config::Instance()->FGEnabled.value_or_default() && reprojEnabled && supportedTimewarpInput)
     {
         if (_uiCommandAllocator[0] == nullptr || _warp == nullptr)
         {
@@ -1827,6 +1956,11 @@ void AReproj_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants
     }
     else if (IsActive())
     {
+        LOG_WARN("Async Timewarp deactivated (FGEnabled:{}, ReprojEnabled:{}, FGInput:{}, backend={} [{}])",
+                 Config::Instance()->FGEnabled.value_or_default(), reprojEnabled,
+                 magic_enum::enum_name(State::Instance().activeFgInput), magic_enum::enum_name(activeBackend),
+                 State::Instance().currentFeature != nullptr ? State::Instance().currentFeature->ShortName()
+                                                             : "not resolved");
         Deactivate();
     }
 
