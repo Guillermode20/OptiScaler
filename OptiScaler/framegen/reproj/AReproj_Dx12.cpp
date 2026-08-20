@@ -1465,7 +1465,6 @@ void AReproj_Dx12::ReleaseObjects()
     if (!DrainGpuWork())
         LOG_WARN("Reproj: releasing objects after an incomplete GPU drain");
 
-    DestroyAsyncPresenter();
     _warp.reset();
 
     for (size_t i = 0; i < BUFFER_COUNT; i++)
