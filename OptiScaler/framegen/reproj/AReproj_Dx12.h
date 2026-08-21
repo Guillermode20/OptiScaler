@@ -3,6 +3,7 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
 #include <menu/input/input_system.h>
+#include <dcomp.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -110,8 +111,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
 
     ID3D12CommandQueue* _presentQueue = nullptr;
     IDXGISwapChain3* _presentSwapChain = nullptr;
-    HWND _presentHwnd = nullptr; // Worker-owned child HWND with waitable flip swapchain (Wine/Proton safe)
+    IDCompositionDevice* _compositionDevice = nullptr;
+    IDCompositionTarget* _compositionTarget = nullptr;
+    IDCompositionVisual* _compositionVisual = nullptr;
+    HWND _presentHwnd = nullptr;
     HANDLE _presentWaitableObject = nullptr;
+    bool _presenterUsesComposition = false;
     bool _presenterAttached = false;
 
     UINT _bufferCount = 0;

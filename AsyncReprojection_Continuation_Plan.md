@@ -23,8 +23,10 @@ M5 now has an experimental, opt-in DirectComposition implementation. The game
 continues to own and present its DXGI backbuffers while the render thread publishes
 owned color/depth/velocity/UI packets to a worker. The worker writes only to a
 separate composition swapchain, avoiding the unsafe next-backbuffer race. Creation
-or runtime failure falls back to the existing synchronous presenter. The live UI
-reports the active presenter and actual packet queue depth.
+or runtime failure falls back to the existing synchronous presenter. Proton commonly
+returns `E_NOTIMPL` for the composition swapchain; secondary HWND swapchains are not
+used there because Wine can accept and present them while displaying only black.
+The live UI reports the active presenter and actual packet queue depth.
 
 ## Current baseline
 
