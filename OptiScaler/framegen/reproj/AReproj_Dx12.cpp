@@ -943,11 +943,6 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         // block Present() forever, freezing the worker with no error. Bitblt presents
         // degrade to a no-op copy against occluded/unsupported windows instead.
         desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-        // Present with DXGI_PRESENT_ALLOW_TEARING so the worker's Present can never
-        // block on scanout. Without it, a child window that the compositor never
-        // scans out (common on Wine/Proton) fills its flip-model queue and stalls the
-        // presenter forever once the buffers are exhausted.
-        desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
         result = realFactory->CreateSwapChainForHwnd(_presentQueue, _presentHwnd, &desc, nullptr, nullptr, &swapChain1);
         if (SUCCEEDED(result))
             result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
@@ -1076,10 +1071,12 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     if (_presentSwapChain == nullptr)
         return E_FAIL;
 
-    // The HWND fallback swapchain is tearing-enabled; presenting with the tearing
-    // flag maps to an immediate (non-blocking) Vulkan present on vkd3d-proton.
+    // The HWND fallback swapchain uses the legacy bitblt model, which does not
+    // support DXGI_PRESENT_ALLOW_TEARING (flip-model only); passing it crashes
+    // vkd3d-proton. Composition swapchains are flip-model and keep tearing so a
+    // worker Present can never block on scanout.
     UINT presentFlags = flags;
-    if (!_presenterUsesComposition)
+    if (_presenterUsesComposition)
         presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
 
     FGHooks::SkipPresent(true);
