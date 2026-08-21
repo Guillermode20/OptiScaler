@@ -94,7 +94,8 @@ static VkResult hkvkCreateWin32SurfaceKHR(VkInstance instance, const VkWin32Surf
     auto procHwnd = Util::GetProcessWindow();
     LOG_DEBUG("procHwnd: {0:X}, swapchain hwnd: {1:X}", (UINT64) procHwnd, (UINT64) pCreateInfo->hwnd);
 
-    if (result == VK_SUCCESS && !State::Instance().vulkanSkipHooks)
+    if (result == VK_SUCCESS && !State::Instance().vulkanSkipHooks &&
+        pCreateInfo->hwnd != State::Instance().reprojPresenterHwnd)
     {
         MenuOverlayVk::DestroyVulkanObjects(false);
 
@@ -293,7 +294,7 @@ static VkResult hkvkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateI
     }
 
     if (result == VK_SUCCESS && device != VK_NULL_HANDLE && pCreateInfo != nullptr && *pSwapchain != VK_NULL_HANDLE &&
-        !State::Instance().vulkanSkipHooks)
+        !State::Instance().vulkanSkipHooks && _hwnd != State::Instance().reprojPresenterHwnd)
     {
         State::Instance().screenWidth = static_cast<float>(pCreateInfo->imageExtent.width);
         State::Instance().screenHeight = static_cast<float>(pCreateInfo->imageExtent.height);

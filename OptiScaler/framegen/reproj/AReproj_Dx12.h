@@ -110,6 +110,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::thread _presentThread;
     std::atomic<bool> _stopPresenter { false };
     std::atomic<PresenterState> _presenterState { PresenterState::Stopped };
+    std::atomic<uint32_t> _stageTraceCount { 0 };
 
     ID3D12CommandQueue* _presentQueue = nullptr;
     IDXGISwapChain3* _presentSwapChain = nullptr;

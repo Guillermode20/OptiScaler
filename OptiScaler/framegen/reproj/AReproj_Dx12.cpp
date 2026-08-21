@@ -938,6 +938,11 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 
         desc.Width = static_cast<UINT>(client.right);
         desc.Height = static_cast<UINT>(client.bottom);
+        // Bitblt (DISCARD) presentation instead of flip-model: a flip-model swapchain on
+        // a child window that wine's compositor never scans out fills its queue and can
+        // block Present() forever, freezing the worker with no error. Bitblt presents
+        // degrade to a no-op copy against occluded/unsupported windows instead.
+        desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
         // Present with DXGI_PRESENT_ALLOW_TEARING so the worker's Present can never
         // block on scanout. Without it, a child window that the compositor never
         // scans out (common on Wine/Proton) fills its flip-model queue and stalls the
@@ -953,6 +958,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
             LOG_WARN("Reproj: child-window swapchain creation failed: {:X}", (UINT) result);
             return false;
         }
+        // Register before any present so overlay/input hooks never adopt this window
+        State::Instance().reprojPresenterHwnd = _presentHwnd;
         _presenterUsesComposition = false;
         LOG_INFO("Reproj: Proton child-window async presenter created ({} buffers, {}x{})", desc.BufferCount,
                  desc.Width, desc.Height);
@@ -993,6 +1000,9 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     _compositionAttached = false;
     if (_presentHwnd != nullptr)
     {
+        if (State::Instance().reprojPresenterHwnd == _presentHwnd)
+            State::Instance().reprojPresenterHwnd = nullptr;
+        ShowWindow(_presentHwnd, SW_HIDE);
         DestroyWindow(_presentHwnd);
         _presentHwnd = nullptr;
     }
@@ -1127,6 +1137,12 @@ void AReproj_Dx12::PresenterMain()
         auto& packet = _packets[packetIndex];
         consumedFrame = packet.frameId;
 
+        // One-time stage tracing for the first packets: a silent worker stall here
+        // (e.g. Present blocking on an unscanned-out window) is otherwise invisible.
+        const bool traceStages = _stageTraceCount.fetch_add(1) < 3;
+        if (traceStages)
+            LOG_INFO("Reproj: presenter consuming frame {} (packet {})", packet.frameId, packetIndex);
+
         // Fail in stages so a stalled presenter leaves an actionable message instead
         // of a silent queue buildup.
         if (FAILED(_presentQueue->Wait(_uiFence, packet.captureFenceValue)))
@@ -1143,6 +1159,8 @@ void AReproj_Dx12::PresenterMain()
             _presenterState.store(PresenterState::Failed);
             break;
         }
+        if (traceStages)
+            LOG_INFO("Reproj: presenter displayed frame {}, attaching visual", packet.frameId);
         if (!AttachCompositionVisual())
         {
             LOG_ERROR("Reproj: presenter failed to attach composition visual");
@@ -1151,6 +1169,9 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
         const auto realPresentResult = PresentCompositorFrame(0, 0, false);
+        if (traceStages)
+            LOG_INFO("Reproj: presenter compositor present result {:X} for frame {}", (UINT) realPresentResult,
+                     packet.frameId);
         if (realPresentResult != S_OK)
         {
             LOG_ERROR("Reproj: presenter real-frame present failed: {:X}", (UINT) realPresentResult);

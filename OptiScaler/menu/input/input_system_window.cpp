@@ -530,7 +530,13 @@ void UpdateFocusState(HWND targetHwnd)
 
     if (foreground == nullptr)
     {
-        SetFocusStateLocked(false, "no foreground", foreground, foregroundProcessId, foregroundThreadId);
+        // Wine/Proton can return NULL foreground transiently (and sometimes for long
+        // stretches) while the game window is still visible and receiving input.
+        // Keep the previous state instead of permanently latching "unfocused";
+        // a genuine focus loss always reports another non-NULL foreground window.
+        SetFocusStateLocked(_state.Focused, _state.Focused ? "no foreground; keeping focused state"
+                                                           : "no foreground",
+                            foreground, foregroundProcessId, foregroundThreadId);
         return;
     }
 
