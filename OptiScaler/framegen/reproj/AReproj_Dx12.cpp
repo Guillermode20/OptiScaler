@@ -7,8 +7,6 @@
 #include <cstring>
 #include <limits>
 
-#include <dcomp.h>
-
 #include <State.h>
 #include <Config.h>
 #include <Util.h>
@@ -16,8 +14,6 @@
 #include <menu/menu_overlay_dx.h>
 #include <misc/FrameLimit.h>
 #include <nvapi/fakenvapi.h>
-
-#pragma comment(lib, "dcomp.lib")
 
 #include <magic_enum.hpp>
 
@@ -868,9 +864,37 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     if (!CheckForRealObject(__FUNCTION__, factory, reinterpret_cast<IUnknown**>(&realFactory)))
         realFactory = factory;
 
+    // Waitable flip-model swapchain on a worker-owned child HWND.
+    // Works on Wine/Proton (no DComposition) and removes the DWM/borderless
+    // dependency. The waitable object lets the presenter pace to the display
+    // without blocking Present().
+    WNDCLASSW windowClass {};
+    windowClass.lpfnWndProc = ReprojPresenterWindowProc;
+    windowClass.hInstance = GetModuleHandleW(nullptr);
+    windowClass.lpszClassName = ReprojPresenterWindowClass;
+    if (RegisterClassW(&windowClass) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    {
+        factory->Release();
+        return false;
+    }
+
+    RECT client {};
+    GetClientRect(_hwnd, &client);
+    const UINT width = client.right > 0 ? static_cast<UINT>(client.right) : mainDesc.BufferDesc.Width;
+    const UINT height = client.bottom > 0 ? static_cast<UINT>(client.bottom) : mainDesc.BufferDesc.Height;
+
+    _presentHwnd = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, ReprojPresenterWindowClass, L"", WS_CHILD,
+                                   0, 0, width, height, _hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (_presentHwnd == nullptr)
+    {
+        factory->Release();
+        LOG_WARN("Reproj: child presenter window creation failed: {}", GetLastError());
+        return false;
+    }
+
     DXGI_SWAP_CHAIN_DESC1 desc {};
-    desc.Width = mainDesc.BufferDesc.Width;
-    desc.Height = mainDesc.BufferDesc.Height;
+    desc.Width = width;
+    desc.Height = height;
     desc.Format = mainDesc.BufferDesc.Format;
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
@@ -878,121 +902,70 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     desc.Scaling = DXGI_SCALING_STRETCH;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 
     IDXGISwapChain1* swapChain1 = nullptr;
-    result = realFactory->CreateSwapChainForComposition(_presentQueue, &desc, nullptr, &swapChain1);
-    if (SUCCEEDED(result))
+    result = realFactory->CreateSwapChainForHwnd(_presentQueue, _presentHwnd, &desc, nullptr, nullptr, &swapChain1);
+    // Fallback without waitable flag if the runtime doesn't support it (older DXGI).
+    if (FAILED(result))
     {
-        result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
-        swapChain1->Release();
-        if (FAILED(result))
-        {
-            factory->Release();
-            LOG_WARN("Reproj: composition swapchain query failed: {:X}", (UINT) result);
-            return false;
-        }
-
-        result = DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&_compositionDevice));
-        if (SUCCEEDED(result))
-            result = _compositionDevice->CreateTargetForHwnd(_hwnd, TRUE, &_compositionTarget);
-        if (SUCCEEDED(result))
-            result = _compositionDevice->CreateVisual(&_compositionVisual);
-        if (SUCCEEDED(result))
-            result = _compositionVisual->SetContent(_presentSwapChain);
-        if (FAILED(result))
-        {
-            factory->Release();
-            LOG_WARN("Reproj: DirectComposition setup failed: {:X}", (UINT) result);
-            return false;
-        }
-        _presenterUsesComposition = true;
-        LOG_INFO("Reproj: DirectComposition async presenter created ({} buffers, {}x{})", desc.BufferCount,
-                 desc.Width, desc.Height);
-    }
-    else
-    {
-        // Wine/Proton currently returns E_NOTIMPL for CreateSwapChainForComposition.
-        // A child HWND gives the worker an independently owned swapchain without touching game backbuffers.
-        LOG_INFO("Reproj: composition swapchain unavailable ({:X}); trying child-window presenter", (UINT) result);
-        WNDCLASSW windowClass {};
-        windowClass.lpfnWndProc = ReprojPresenterWindowProc;
-        windowClass.hInstance = GetModuleHandleW(nullptr);
-        windowClass.lpszClassName = ReprojPresenterWindowClass;
-        if (RegisterClassW(&windowClass) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-        {
-            factory->Release();
-            return false;
-        }
-
-        RECT client {};
-        GetClientRect(_hwnd, &client);
-        _presentHwnd = CreateWindowExW(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE, ReprojPresenterWindowClass, L"",
-                                       WS_CHILD, 0, 0, client.right, client.bottom, _hwnd, nullptr,
-                                       GetModuleHandleW(nullptr), nullptr);
-        if (_presentHwnd == nullptr)
-        {
-            factory->Release();
-            LOG_WARN("Reproj: child presenter window creation failed: {}", GetLastError());
-            return false;
-        }
-
-        desc.Width = static_cast<UINT>(client.right);
-        desc.Height = static_cast<UINT>(client.bottom);
-        // Bitblt (DISCARD) presentation instead of flip-model: a flip-model swapchain on
-        // a child window that wine's compositor never scans out fills its queue and can
-        // block Present() forever, freezing the worker with no error. Bitblt presents
-        // degrade to a no-op copy against occluded/unsupported windows instead.
-        desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        LOG_INFO("Reproj: waitable swapchain unavailable ({:X}), retrying without waitable flag", (UINT) result);
+        desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
         result = realFactory->CreateSwapChainForHwnd(_presentQueue, _presentHwnd, &desc, nullptr, nullptr, &swapChain1);
-        if (SUCCEEDED(result))
-            result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
-        SAFE_RELEASE(swapChain1);
-        if (FAILED(result))
-        {
-            factory->Release();
-            LOG_WARN("Reproj: child-window swapchain creation failed: {:X}", (UINT) result);
-            return false;
-        }
-        // Register before any present so overlay/input hooks never adopt this window
-        State::Instance().reprojPresenterHwnd = _presentHwnd;
-        _presenterUsesComposition = false;
-        LOG_INFO("Reproj: Proton child-window async presenter created ({} buffers, {}x{})", desc.BufferCount,
-                 desc.Width, desc.Height);
     }
+    if (SUCCEEDED(result))
+        result = swapChain1->QueryInterface(IID_PPV_ARGS(&_presentSwapChain));
+    SAFE_RELEASE(swapChain1);
+    if (FAILED(result))
+    {
+        factory->Release();
+        LOG_WARN("Reproj: child-window swapchain creation failed: {:X}", (UINT) result);
+        DestroyWindow(_presentHwnd);
+        _presentHwnd = nullptr;
+        return false;
+    }
+
+    // Register before any present so overlay/input hooks never adopt this window
+    State::Instance().reprojPresenterHwnd = _presentHwnd;
+
+    // Acquire the waitable object and cap latency to 1 so WaitForSingleObject
+    // actually paces the presenter. Non-waitable swapchains leave _presentWaitableObject null
+    // and Present() will fall back to a simple sleep-based pace.
+    {
+        IDXGISwapChain2* sc2 = nullptr;
+        if (SUCCEEDED(_presentSwapChain->QueryInterface(IID_PPV_ARGS(&sc2))))
+        {
+            _presentWaitableObject = sc2->GetFrameLatencyWaitableObject();
+            sc2->SetMaximumFrameLatency(1);
+            sc2->Release();
+            if (_presentWaitableObject != nullptr)
+                LOG_INFO("Reproj: waitable swapchain acquired (handle {:p})", _presentWaitableObject);
+        }
+    }
+
+    _presenterAttached = false;
+    LOG_INFO("Reproj: waitable flip async presenter created ({} buffers, {}x{}, waitable:{})", desc.BufferCount,
+             desc.Width, desc.Height, _presentWaitableObject ? "yes" : "no");
+
     factory->Release();
     return true;
 }
 
-bool AReproj_Dx12::AttachCompositionVisual()
+bool AReproj_Dx12::EnsurePresenterAttached()
 {
-    if (_compositionAttached)
+    if (_presenterAttached)
         return true;
-    if (!_presenterUsesComposition)
-    {
-        if (_presentHwnd == nullptr)
-            return false;
-        ShowWindow(_presentHwnd, SW_SHOWNOACTIVATE);
-        _compositionAttached = true;
-        return true;
-    }
-    if (_compositionTarget == nullptr || _compositionVisual == nullptr || _compositionDevice == nullptr)
+    if (_presentHwnd == nullptr)
         return false;
-
-    if (FAILED(_compositionTarget->SetRoot(_compositionVisual)) || FAILED(_compositionDevice->Commit()))
-        return false;
-
-    _compositionAttached = true;
+    ShowWindow(_presentHwnd, SW_SHOWNOACTIVATE);
+    _presenterAttached = true;
     return true;
 }
 
 void AReproj_Dx12::DestroyAsyncPresenter()
 {
-    if (_compositionAttached && _compositionTarget != nullptr && _compositionDevice != nullptr)
-    {
-        _compositionTarget->SetRoot(nullptr);
-        _compositionDevice->Commit();
-    }
-    _compositionAttached = false;
+    _presenterAttached = false;
+    _presentWaitableObject = nullptr;
     if (_presentHwnd != nullptr)
     {
         if (State::Instance().reprojPresenterHwnd == _presentHwnd)
@@ -1001,11 +974,7 @@ void AReproj_Dx12::DestroyAsyncPresenter()
         DestroyWindow(_presentHwnd);
         _presentHwnd = nullptr;
     }
-    _presenterUsesComposition = false;
 
-    SAFE_RELEASE(_compositionVisual);
-    SAFE_RELEASE(_compositionTarget);
-    SAFE_RELEASE(_compositionDevice);
     SAFE_RELEASE(_presentSwapChain);
     SAFE_RELEASE(_presentQueue);
 }
@@ -1071,13 +1040,18 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     if (_presentSwapChain == nullptr)
         return E_FAIL;
 
-    // The HWND fallback swapchain uses the legacy bitblt model, which does not
-    // support DXGI_PRESENT_ALLOW_TEARING (flip-model only); passing it crashes
-    // vkd3d-proton. Composition swapchains are flip-model and keep tearing so a
-    // worker Present can never block on scanout.
-    UINT presentFlags = flags;
-    if (_presenterUsesComposition)
-        presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
+    // Flip-model waitable swapchain: pace with the waitable object so Present
+    // never blocks on scanout. Fallback swapchains without waitable just present.
+    if (_presentWaitableObject != nullptr)
+    {
+        // Wait up to one refresh interval for the swapchain to be ready.
+        // This keeps warps aligned to vblank without stalling the game thread.
+        const auto refreshHz = TargetRefreshHz();
+        const DWORD timeout = refreshHz > 10.0 ? static_cast<DWORD>(1000.0 / refreshHz + 5.0) : 25;
+        WaitForSingleObject(_presentWaitableObject, timeout);
+    }
+
+    const UINT presentFlags = flags | DXGI_PRESENT_ALLOW_TEARING;
 
     FGHooks::SkipPresent(true);
     const auto result = _presentSwapChain->Present(syncInterval, presentFlags);
@@ -1157,10 +1131,10 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
         if (traceStages)
-            LOG_INFO("Reproj: presenter displayed frame {}, attaching visual", packet.frameId);
-        if (!AttachCompositionVisual())
+            LOG_INFO("Reproj: presenter displayed frame {}, attaching presenter window", packet.frameId);
+        if (!EnsurePresenterAttached())
         {
-            LOG_ERROR("Reproj: presenter failed to attach composition visual");
+            LOG_ERROR("Reproj: presenter failed to attach presenter window");
             packet.state.store(PacketState::Retired);
             _presenterState.store(PresenterState::Failed);
             break;
@@ -1314,7 +1288,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     for (const auto& bin : _calibration)
         calibrationSamples = std::max(calibrationSamples, bin.samples);
     const char* presenter = _runtimeMetrics.asyncPresenter
-                                ? (_presenterUsesComposition ? "async DComp" : "async HWND")
+                                ? (_presentWaitableObject ? "async waitable flip" : "async flip")
                                 : "safe sync";
     LOG_INFO("Reproj: real={:.1f} FPS, warp={:.1f} FPS, dropped={}, maxWarps={}, poseAge={:.1f} ms, queue={} ({}), mouseCal={:.0f}%/{}ms samples={} input=({}, {})",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsDroppedWarps, _metricsMaxWarpsPerReal,

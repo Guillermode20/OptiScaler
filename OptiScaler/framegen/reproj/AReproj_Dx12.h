@@ -9,10 +9,6 @@
 #include <mutex>
 #include <thread>
 
-struct IDCompositionDevice;
-struct IDCompositionTarget;
-struct IDCompositionVisual;
-
 /// Async reprojection (ASW-style) FG output.
 /// See AsyncReprojection.md for the full design.
 ///
@@ -114,12 +110,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
 
     ID3D12CommandQueue* _presentQueue = nullptr;
     IDXGISwapChain3* _presentSwapChain = nullptr;
-    IDCompositionDevice* _compositionDevice = nullptr;
-    IDCompositionTarget* _compositionTarget = nullptr;
-    IDCompositionVisual* _compositionVisual = nullptr;
-    HWND _presentHwnd = nullptr; // Proton fallback: worker-owned child HWND swapchain
-    bool _compositionAttached = false;
-    bool _presenterUsesComposition = false;
+    HWND _presentHwnd = nullptr; // Worker-owned child HWND with waitable flip swapchain (Wine/Proton safe)
+    HANDLE _presentWaitableObject = nullptr;
+    bool _presenterAttached = false;
 
     UINT _bufferCount = 0;
     UINT64 _scFenceValue = 0; // monotonic SC fence value (fence outlives context recreate)
@@ -143,7 +136,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool StartAsyncPresenter();
     void StopAsyncPresenter();
     void PresenterMain();
-    bool AttachCompositionVisual();
+    bool EnsurePresenterAttached();
     bool WaitForPacketDeadline(int packetIndex, double deadlineMs);
     HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated);
     double TargetRefreshHz();
