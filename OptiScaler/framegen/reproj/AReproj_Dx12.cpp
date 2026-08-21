@@ -1169,9 +1169,16 @@ void AReproj_Dx12::PresenterMain()
             }
 
             // Keep the real frame that was already copied to the composition
-            // swapchain, but do not warp it after a focus change or stale pose.
-            if (!OptiInput::IsFocused() || (packet.constants.mode != 0 && !IsPoseFresh(packet.sourcePoseTimestamp)))
+            // swapchain, but do not warp it after a focus change or stale pose
+            // (ignore focus on Wine/Proton where GetForegroundWindow is unreliable).
+            const bool focusLostWarp = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
+            if (focusLostWarp || (packet.constants.mode != 0 && !IsPoseFresh(packet.sourcePoseTimestamp)))
             {
+                if (focusLostWarp && _presentHwnd != nullptr && _presenterAttached)
+                {
+                    ShowWindow(_presentHwnd, SW_HIDE);
+                    _presenterAttached = false;
+                }
                 RecordWarpFrame(false, true, 0.0f);
                 break;
             }
@@ -1399,11 +1406,17 @@ bool AReproj_Dx12::Present()
 
     // Present the newest real frame as the safe unwarped anchor only when the
     // previous warp would have been based on a *stale* pose or the game lost
-    // focus. Missing camera/depth data is NOT a pause reason: both dispatch paths
-    // already fall back to the motion-vector warp (cb.mode=0) for that case, so
-    // the feature keeps producing frames instead of silently looking disabled.
-    if (!focused || (cameraAvailable && !poseFresh))
+    // focus (focus check is unreliable on Wine/Proton, so ignore it there).
+    // Hide the async presenter child HWND when falling back so it does not
+    // occlude the game's swapchain with a stale/black frame.
+    const bool focusLost = !focused && !State::Instance().isRunningOnLinux;
+    if (focusLost || (cameraAvailable && !poseFresh))
     {
+        if (_presentHwnd != nullptr && _presenterAttached)
+        {
+            ShowWindow(_presentHwnd, SW_HIDE);
+            _presenterAttached = false;
+        }
         LOG_DEBUG("Reproj: presenting safe unwarped anchor (focused:{} camera:{} poseAge:{:.1f}ms)", focused,
                   cameraAvailable, poseAge);
         PresentFrame(FGHooks::LastPresentSyncInterval(), FGHooks::LastPresentFlags());
