@@ -3847,6 +3847,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
         ShowHelpMarker("Opt-in depth timewarp output. Disabling it always presents the game frame unchanged.");
 
+        bool reprojAsync = config->ReprojAsync.value_or_default();
+        if (ImGui::Checkbox("Async DirectComposition presenter##reproj", &reprojAsync))
+        {
+            config->ReprojAsync = reprojAsync;
+            state.fgChanged = true;
+        }
+        ShowHelpMarker("Presents from a worker-owned composition swapchain without blocking the game thread.\n"
+                       "Falls back to the safe synchronous presenter when DirectComposition is unavailable.");
+
         static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware", "Camera-only timewarp" };
         int reprojMode = config->ReprojMode.value_or_default();
         if (ImGui::Combo("Mode##reproj", &reprojMode, reprojModes, _countof(reprojModes)))

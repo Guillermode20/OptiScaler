@@ -608,10 +608,11 @@ class Config
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
 
-    // Synchronous depth reprojection (ASW-style, see AsyncReprojection.md)
+    // Async Timewarp / Reprojection (ASW-style, see AsyncReprojection.md)
     // Selecting FGOutput=Reproj is the opt-in; this setting only exists as an
     // explicit off-switch on top of that selection (default resolves to on).
     CustomOptional<bool> ReprojEnabled { true };
+    CustomOptional<bool> ReprojAsync { false };           // DComp presenter; falls back to synchronous on failure
     CustomOptional<int> ReprojMode { 1 };                 // 0 = MV warp, 1 = depth-aware, 2 = camera-only
     CustomOptional<float> ReprojStrength { 1.0f };        // blend of the warp result with the original frame
     CustomOptional<float> ReprojTimeStep { 0.5f };        // warp fraction (0.5 = midpoint between real frames)
