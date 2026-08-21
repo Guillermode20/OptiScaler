@@ -19,14 +19,19 @@ metrics, bounded adaptive warp scheduling, and fakenvapi FG reporting. The
 depth-aware shader also has conservative depth-edge, motion-disagreement, and
 screen-edge confidence tests, plus a rotation-only camera mode.
 
-M5 now has an experimental, opt-in DirectComposition implementation. The game
-continues to own and present its DXGI backbuffers while the render thread publishes
-owned color/depth/velocity/UI packets to a worker. The worker writes only to a
-separate composition swapchain, avoiding the unsafe next-backbuffer race. Creation
-or runtime failure falls back to the existing synchronous presenter. Proton commonly
-returns `E_NOTIMPL` for the composition swapchain; secondary HWND swapchains are not
-used there because Wine can accept and present them while displaying only black.
-The live UI reports the active presenter and actual packet queue depth.
+M5 has experimental, opt-in DirectComposition code, but it is not a completed or
+validated asynchronous milestone. When setup succeeds, the game retains ownership
+of its DXGI backbuffers while the render thread publishes owned
+color/depth/velocity/UI packets to a worker. The worker writes only to a separate
+composition swapchain, avoiding the unsafe next-backbuffer race.
+
+Deep Rock Galactic on Proton is currently validated only on the synchronous path.
+`CreateSwapChainForComposition` returns `E_NOTIMPL`, so `ReprojAsync=true` logs the
+failure and activates the synchronous fallback. Secondary child and top-level HWND
+swapchains are not valid substitutes: Wine can accept their presents while showing
+only black. The synchronous result can still feel smoother and more responsive than
+native 60 Hz, but it is not concurrent timewarp. Real asynchronous Proton
+presentation remains future work.
 
 ## Current baseline
 

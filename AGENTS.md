@@ -67,7 +67,7 @@ Register new files in `OptiScaler/OptiScaler.vcxproj` and `OptiScaler/OptiScaler
 
 ## Async Reprojection (in-progress feature in this repo)
 
-- Design docs: `AsyncReprojection.md` covers the original implementation; `AsyncReprojection_Continuation_Plan.md` covers the true asynchronous timewarp roadmap. M0–M4 and an experimental M5 DirectComposition presenter are implemented.
+- Design docs: `AsyncReprojection.md` covers the original implementation; `AsyncReprojection_Continuation_Plan.md` covers the true asynchronous timewarp roadmap. M0–M4 are implemented. Experimental M5 DirectComposition code exists, but real asynchronous presentation is not yet a validated or completed milestone.
 - Code: `OptiScaler/framegen/reproj/AReproj_Dx12.{h,cpp}` and `OptiScaler/shaders/reprojection/RP_*`.
 - Enabled by `FGOutput::Reproj` (`OptiScaler/State.h`).
 
@@ -77,7 +77,7 @@ Known issues / limitations:
 - `ForceVsync` is applied before `AReproj_Dx12::Present()`, so the internally presented real frame receives the configured interval and tearing flags.
 - The v2 depth-aware warp is sketch-quality; disocclusion confidence and the HUD epsilon need real-footage tuning.
 - `ReprojCapAtHalfRefresh` controls whether the existing `FrameLimit` half-rate behavior is used for reprojection. Reprojection bypasses Reflex/XeLL limiter gating so that the selected cap is applied even when those limiters are inactive.
-- Reproj emits zero to `ReprojMaxWarpFrames` warps per real frame. The synchronous fallback blocks the game present path; `ReprojAsync=true` publishes owned color/depth/velocity/UI packets to a worker-owned DirectComposition swapchain.
+- Reproj emits zero to `ReprojMaxWarpFrames` warps per real frame. The validated synchronous path blocks the game present thread while emitting them. With `ReprojAsync=true`, owned color/depth/velocity/UI packets are published to a worker only when DirectComposition setup succeeds; otherwise activation explicitly reports and uses the synchronous fallback.
 - Never point the worker at the game's DXGI backbuffers. After a real present, the next backbuffer belongs to the game; only the separate composition swapchain makes worker presentation safe.
 - Async packets transition `FREE -> CAPTURING -> READY -> PRESENTING -> RETIRED -> FREE`; reuse requires both capture and presenter fences to complete. Stop/join the presenter before draining and releasing D3D12/DComp objects. `IFGFeature::_cameraTimestamp` records source-pose age when camera data is captured.
 - DirectComposition is experimental and borderless/DWM-dependent. On Proton, `CreateSwapChainForComposition` commonly returns `E_NOTIMPL`; async reprojection then falls back synchronously. Do not use a secondary HWND presenter on Proton: both child and top-level swapchains can report successful presents while displaying only black. Keep `ReprojAsync=false` as the shipped default until Proton implements the composition path.
