@@ -3120,11 +3120,23 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
     outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
 
-    // Async Timewarp requires the DX12 FSR/FFX upscaler input. It intentionally
-    // remains separate from the existing FSR/DLSS/XeSS interpolation selections.
+    // Async Timewarp requires the DX12 FSR/FFX upscaler input. Use the resolved
+    // feature/config directly: currentBackend is only refreshed while its UI is shown.
     auto constexpr reprojOutputIndex = (uint32_t) FGOutput::Reproj;
-    outputOptions[reprojOutputIndex].set_disabled(state.swapchainApi != API::DX12 || !IsFsr(currentBackend),
-                                                  "Requires DX12 FSR/FFX upscaler input");
+    const auto reprojBackend = GetBackendCode(state.api);
+    const bool reprojOutputSupported = state.swapchainApi == API::DX12 && IsFsr(reprojBackend);
+    outputOptions[reprojOutputIndex].set_disabled(!reprojOutputSupported, "Requires DX12 FSR/FFX upscaler input");
+    if (config->FGOutput.value_or_default() == FGOutput::Reproj)
+    {
+        if (state.swapchainApi != API::DX12)
+            state.reprojDisableReason = state.swapchainApi == API::NotSelected
+                                            ? "Waiting for a DX12 swapchain"
+                                            : "Requires a DX12 swapchain";
+        else if (!IsFsr(reprojBackend))
+            state.reprojDisableReason = "Requires the FSR/FFX DX12 upscaler";
+        else
+            state.reprojDisableReason.clear();
+    }
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&
@@ -3140,8 +3152,9 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
 
     // Unsupported FG output selected
     const auto currentOutputIndex = (uint32_t) state.activeFgOutput;
-    if (config->FGOutput != FGOutput::NoFG && outputOptions.size() > currentOutputIndex &&
-        outputOptions[currentOutputIndex].disabled && state.activeFgOutput == config->FGOutput)
+    if (config->FGOutput != FGOutput::NoFG && config->FGOutput != FGOutput::Reproj &&
+        outputOptions.size() > currentOutputIndex && outputOptions[currentOutputIndex].disabled &&
+        state.activeFgOutput == config->FGOutput)
     {
         LOG_WARN("Resetting FGOutput to NoFG: {}", outputOptions[currentOutputIndex].label);
         config->FGOutput = FGOutput::NoFG;
