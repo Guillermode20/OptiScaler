@@ -948,7 +948,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
             (BufferCount == 0 || BufferCount == scDesc.BufferCount) &&
             (Width == 0 || Width == scDesc.BufferDesc.Width) &&
             (Height == 0 || Height == scDesc.BufferDesc.Height) &&
-            (NewFormat == 0 || NewFormat == scDesc.BufferDesc.Format))
+            (Format == 0 || Format == scDesc.BufferDesc.Format))
         {
             LOG_INFO("Reproj: skipping redundant ResizeBuffers on the waitable swapchain");
             State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
