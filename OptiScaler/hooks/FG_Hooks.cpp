@@ -659,10 +659,10 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
         }
     }
 
-    // Async reprojection needs >= 3 buffers (a free slot for the fake frame) and tearing
+    // Only async reprojection needs a third buffer while its worker owns the real swapchain.
     if (State::Instance().activeFgOutput == FGOutput::Reproj)
     {
-        if (BufferCount > 0 && BufferCount < 3)
+        if (Config::Instance()->ReprojAsync.value_or_default() && BufferCount > 0 && BufferCount < 3)
             BufferCount = 3;
 
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
@@ -908,10 +908,10 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
         }
     }
 
-    // Async reprojection needs >= 3 buffers (a free slot for the fake frame) and tearing
+    // Only async reprojection needs a third buffer while its worker owns the real swapchain.
     if (State::Instance().activeFgOutput == FGOutput::Reproj)
     {
-        if (BufferCount > 0 && BufferCount < 3)
+        if (Config::Instance()->ReprojAsync.value_or_default() && BufferCount > 0 && BufferCount < 3)
             BufferCount = 3;
 
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
