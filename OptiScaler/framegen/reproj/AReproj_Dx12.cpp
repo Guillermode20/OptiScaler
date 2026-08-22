@@ -1745,13 +1745,20 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         desc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 
     IDXGISwapChain* rawSwapChain = nullptr;
-    auto result = realFactory->CreateSwapChain(realQueue, desc, &rawSwapChain);
-
-    if (FAILED(result) && asyncRequested)
+    HRESULT result;
     {
-        LOG_WARN("Reproj: waitable main swapchain unavailable ({:X}); using safe synchronous presenter", (UINT) result);
-        desc->Flags = originalFlags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        // This is the private presenter swapchain. Do not let the factory hook wrap it;
+        // async mode adds exactly one wrapper below for the game-visible identity.
+        ScopedSkipParentWrapping skipParentWrapping {};
         result = realFactory->CreateSwapChain(realQueue, desc, &rawSwapChain);
+
+        if (FAILED(result) && asyncRequested)
+        {
+            LOG_WARN("Reproj: waitable main swapchain unavailable ({:X}); using safe synchronous presenter",
+                     (UINT) result);
+            desc->Flags = originalFlags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            result = realFactory->CreateSwapChain(realQueue, desc, &rawSwapChain);
+        }
     }
 
     if (result != S_OK)
@@ -1903,12 +1910,18 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
     }
 
     IDXGISwapChain1* rawSwapChain = nullptr;
-    result = factory2->CreateSwapChainForHwnd(realQueue, hwnd, desc, pFullscreenDesc, nullptr, &rawSwapChain);
-    if (FAILED(result) && asyncRequested)
     {
-        LOG_WARN("Reproj: waitable main swapchain unavailable ({:X}); using safe synchronous presenter", (UINT) result);
-        desc->Flags = originalFlags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        // Keep the private real swapchain unwrapped; the async wrapper below is the
+        // only object the game should see.
+        ScopedSkipParentWrapping skipParentWrapping {};
         result = factory2->CreateSwapChainForHwnd(realQueue, hwnd, desc, pFullscreenDesc, nullptr, &rawSwapChain);
+        if (FAILED(result) && asyncRequested)
+        {
+            LOG_WARN("Reproj: waitable main swapchain unavailable ({:X}); using safe synchronous presenter",
+                     (UINT) result);
+            desc->Flags = originalFlags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            result = factory2->CreateSwapChainForHwnd(realQueue, hwnd, desc, pFullscreenDesc, nullptr, &rawSwapChain);
+        }
     }
     factory2->Release();
 
