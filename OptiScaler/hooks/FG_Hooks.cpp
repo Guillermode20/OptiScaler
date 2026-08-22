@@ -670,6 +670,25 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
             SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     }
 
+    // Wine/vkd3d crashes when a waitable swapchain is resized (KCD2 at startup). A
+    // redundant resize (geometry unchanged) is a no-op anyway, so answer S_OK directly.
+    if (State::Instance().activeFgOutput == FGOutput::Reproj &&
+        Config::Instance()->ReprojAsync.value_or_default())
+    {
+        DXGI_SWAP_CHAIN_DESC scDesc {};
+        if (This->GetDesc(&scDesc) == S_OK &&
+            (BufferCount == 0 || BufferCount == scDesc.BufferCount) &&
+            (Width == 0 || Width == scDesc.BufferDesc.Width) &&
+            (Height == 0 || Height == scDesc.BufferDesc.Height) &&
+            (NewFormat == 0 || NewFormat == scDesc.BufferDesc.Format))
+        {
+            LOG_INFO("Reproj: skipping redundant ResizeBuffers on the waitable swapchain");
+            State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+            State::Instance().SCLastFlags = SwapChainFlags;
+            return S_OK;
+        }
+    }
+
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}", BufferCount, Width, Height,
               (UINT) NewFormat, SwapChainFlags);
 
@@ -917,6 +936,25 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
         if (Config::Instance()->ReprojAsync.value_or_default())
             SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+    }
+
+    // Wine/vkd3d crashes when a waitable swapchain is resized (KCD2 at startup). A
+    // redundant resize (geometry unchanged) is a no-op anyway, so answer S_OK directly.
+    if (State::Instance().activeFgOutput == FGOutput::Reproj &&
+        Config::Instance()->ReprojAsync.value_or_default())
+    {
+        DXGI_SWAP_CHAIN_DESC scDesc {};
+        if (This->GetDesc(&scDesc) == S_OK &&
+            (BufferCount == 0 || BufferCount == scDesc.BufferCount) &&
+            (Width == 0 || Width == scDesc.BufferDesc.Width) &&
+            (Height == 0 || Height == scDesc.BufferDesc.Height) &&
+            (NewFormat == 0 || NewFormat == scDesc.BufferDesc.Format))
+        {
+            LOG_INFO("Reproj: skipping redundant ResizeBuffers on the waitable swapchain");
+            State::Instance().SCAllowTearing = (SwapChainFlags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) > 0;
+            State::Instance().SCLastFlags = SwapChainFlags;
+            return S_OK;
+        }
     }
 
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}, Caller: {}", BufferCount,
