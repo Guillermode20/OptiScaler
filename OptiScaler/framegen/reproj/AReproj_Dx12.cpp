@@ -1785,13 +1785,21 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         }
         else
         {
-            auto* wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false);
+            WrappedIDXGISwapChain4* wrapped = nullptr;
+            const bool alreadyWrapped =
+                SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
+            if (!alreadyWrapped)
+                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false);
+
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();
             *swapChain = wrapped;
             _wrappedSwapChain = wrapped;
             State::Instance().currentWrappedSwapchain = wrapped;
             State::Instance().currentRealSwapchain = rawSwapChain;
+
+            if (alreadyWrapped)
+                wrapped->Release();
 
             ID3D12Device* device = nullptr;
             if (SUCCEEDED(realQueue->GetDevice(IID_PPV_ARGS(&device))))
@@ -1949,13 +1957,21 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
         }
         else
         {
-            auto* wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false);
+            WrappedIDXGISwapChain4* wrapped = nullptr;
+            const bool alreadyWrapped =
+                SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
+            if (!alreadyWrapped)
+                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false);
+
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();
             *swapChain = static_cast<IDXGISwapChain1*>(wrapped);
             _wrappedSwapChain = wrapped;
             State::Instance().currentWrappedSwapchain = wrapped;
             State::Instance().currentRealSwapchain = rawSwapChain;
+
+            if (alreadyWrapped)
+                wrapped->Release();
 
             ID3D12Device* device = nullptr;
             if (SUCCEEDED(realQueue->GetDevice(IID_PPV_ARGS(&device))))
