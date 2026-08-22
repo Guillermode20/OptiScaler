@@ -444,7 +444,7 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 }
 
 void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse,
-                                     double sourcePoseTimestamp) const
+                                     double sourcePoseTimestamp, double additionalLeadMs) const
 {
     auto config = Config::Instance();
     // Focus tracking relies on Win32 focus messages, which Wine/Proton does not
@@ -462,7 +462,8 @@ void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawM
     const auto current = OptiInput::GetRawMouseMotion();
     double dx = static_cast<double>(current.TotalX - sourceMouse.TotalX);
     double dy = static_cast<double>(current.TotalY - sourceMouse.TotalY);
-    const auto predictionMs = std::clamp<double>(config->ReprojPredictionMs.value_or_default(), 0.0, 20.0);
+    const auto predictionMs =
+        std::clamp<double>(config->ReprojPredictionMs.value_or_default() + additionalLeadMs, 0.0, 20.0);
     if (current.TimestampMs != 0 && now - current.TimestampMs <= 25)
     {
         dx += current.VelocityX * predictionMs;
@@ -717,7 +718,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi)
     return true;
 }
 
-bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep)
+bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs)
 {
     auto& packet = _packets[packetIndex];
     if (_swapChain == nullptr || _warp == nullptr || !_warp->IsInit() || packet.velocity == nullptr ||
@@ -746,7 +747,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep)
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
     auto constants = packet.constants;
     constants.timeStep = timeStep;
-    ApplyLateLatch(constants, packet.sourceMouse, packet.sourcePoseTimestamp);
+    const auto leadMs = scanoutDeadlineMs > 0.0 ? std::max(0.0, scanoutDeadlineMs - Util::MillisecondsNow()) : 0.0;
+    ApplyLateLatch(constants, packet.sourceMouse, packet.sourcePoseTimestamp, leadMs);
     const bool ok = _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
                                     packet.hasDepth ? packet.depth : nullptr, packet.depthState,
                                     _warpOutput[outputIndex], constants);
@@ -1134,63 +1136,75 @@ void AReproj_Dx12::PresenterMain()
         }
 
         const auto refreshHz = TargetRefreshHz();
-        const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : packet.frameDelta * 0.5;
+        const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : std::max(packet.frameDelta * 0.5, 4.0);
         const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs * 2.0);
-        const auto warpCount = packet.warpAllowed ? WarpCountForPeriod(packet.frameDelta, refreshHz) : 0;
+
+        // Display-anchored timewarp: fill EVERY refresh slot after the real frame
+        // with a warp until a newer packet preempts us. The warp count is whatever
+        // the display needs - never bounded by the render rate or
+        // ReprojMaxWarpFrames (which only bounds the synchronous fallback) - so
+        // aiming feels identical at 15 FPS and 60 FPS.
+        if (packet.warpAllowed)
         {
-            std::scoped_lock metricsLock(_metricsMutex);
-            _metricsMaxWarpsPerReal = std::max(_metricsMaxWarpsPerReal, warpCount);
-        }
-
-        for (uint32_t warp = 1; warp <= warpCount; ++warp)
-        {
-            if (!WaitForPacketDeadline(packetIndex, packet.renderTimestamp + refreshPeriodMs * warp))
+            auto slotDeadline = Util::MillisecondsNow(); // the real frame was just presented
+            for (uint32_t warp = 1;; ++warp)
             {
-                RecordWarpFrame(false, true, 0.0f);
-                break;
-            }
+                slotDeadline += refreshPeriodMs;
+                if (!WaitForPacketDeadline(packetIndex, slotDeadline))
+                    break; // newer packet is ready (or presenter stopping): not a drop
 
-            // Keep the real frame that was already copied to the composition
-            // swapchain, but do not warp it after a focus change or stale pose
-            // (ignore focus on Wine/Proton where GetForegroundWindow is unreliable).
-            const bool focusLostWarp = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
-            if (focusLostWarp || (packet.constants.mode != 0 && !IsPoseFresh(packet.sourcePoseTimestamp)))
-            {
-                RecordWarpFrame(false, true, 0.0f);
-                break;
-            }
+                // Keep the real frame that was already copied to the composition
+                // swapchain, but do not warp it after a focus change (ignore focus
+                // on Wine/Proton where GetForegroundWindow is unreliable).
+                const bool focusLostWarp = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
+                if (focusLostWarp)
+                {
+                    RecordWarpFrame(false, true, 0.0f);
+                    break;
+                }
 
-            const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
-            const auto timeStep = std::clamp(
-                static_cast<float>((refreshPeriodMs * warp) / realPeriodMs) * configuredStep * 2.0f, 0.0f, 1.0f);
-            if (!DispatchPacketWarp(packetIndex, timeStep))
-            {
-                RecordWarpFrame(false, true, 0.0f);
-                continue;
-            }
+                const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
+                const auto timeStep =
+                    std::clamp(static_cast<float>(((slotDeadline - packet.renderTimestamp) / realPeriodMs) *
+                                                  configuredStep * 2.0f),
+                               0.0f, 1.0f);
+                if (!DispatchPacketWarp(packetIndex, timeStep, slotDeadline))
+                {
+                    RecordWarpFrame(false, true, 0.0f);
+                    continue;
+                }
 
-            if (_gameCommandQueue == nullptr || FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
-            {
-                _presenterState.store(PresenterState::Failed);
-                RecordWarpFrame(false, true, 0.0f);
-                break;
-            }
+                if (_gameCommandQueue == nullptr ||
+                    FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
+                {
+                    _presenterState.store(PresenterState::Failed);
+                    RecordWarpFrame(false, true, 0.0f);
+                    break;
+                }
 
-            const UINT generatedFlags = State::Instance().SCAllowTearing && !State::Instance().realExclusiveFullscreen
-                                            ? DXGI_PRESENT_ALLOW_TEARING
-                                            : 0;
-            const auto result = PresentCompositorFrame(0, generatedFlags, true);
-            const auto poseTimestamp =
-                packet.sourcePoseTimestamp > 0.0 ? packet.sourcePoseTimestamp : packet.renderTimestamp;
-            const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - poseTimestamp));
-            RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
-            if (result == DXGI_ERROR_WAS_STILL_DRAWING)
-                break;
-            if (result != S_OK)
-            {
-                LOG_ERROR("Reproj: presenter generated-frame present failed: {:X}", (UINT) result);
-                _presenterState.store(PresenterState::Failed);
-                break;
+                const UINT generatedFlags = State::Instance().SCAllowTearing && !State::Instance().realExclusiveFullscreen
+                                                ? DXGI_PRESENT_ALLOW_TEARING
+                                                : 0;
+                const auto result = PresentCompositorFrame(0, generatedFlags, true);
+                const auto poseTimestamp =
+                    packet.sourcePoseTimestamp > 0.0 ? packet.sourcePoseTimestamp : packet.renderTimestamp;
+                const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - poseTimestamp));
+                RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
+                if (result != S_OK)
+                {
+                    if (result == DXGI_ERROR_WAS_STILL_DRAWING)
+                        LOG_INFO("Reproj: presenter not ready for warp {}; dropping without blocking", packet.frameId);
+                    else
+                    {
+                        LOG_ERROR("Reproj: presenter generated-frame present failed: {:X}", (UINT) result);
+                        _presenterState.store(PresenterState::Failed);
+                    }
+                    break;
+                }
+
+                // If a present overran its slot, resume from now instead of
+                // bursting catch-up warps.
+                slotDeadline = std::max(slotDeadline, Util::MillisecondsNow());
             }
         }
 
@@ -1492,11 +1506,14 @@ bool AReproj_Dx12::Present()
     _fgFramePresentId++;
 
     // Present the newest real frame as an unwarped anchor for reset, missing
-    // velocity, stale pose, or focus loss (the focus check is unreliable on Proton).
+    // velocity, or focus loss (the focus check is unreliable on Proton). Pose
+    // staleness deliberately does NOT disable warping: late latch owns
+    // [anchor -> scanout] rotation from continuously integrated raw input, so
+    // an old anchor warps exactly like ATW over a stalled renderer - the point
+    // of timewarp is that aim feel is independent of the render rate.
     const bool focusLost = !focused && !State::Instance().isRunningOnLinux;
     const bool hasVelocity = _resourceReady[fIndex].contains(FG_ResourceType::Velocity);
-    const bool warpAllowed =
-        !stalled && !_reset[fIndex] && hasVelocity && !focusLost && !(cameraAvailable && !poseFresh);
+    const bool warpAllowed = !stalled && !_reset[fIndex] && hasVelocity && !focusLost;
     if (!warpAllowed)
         LOG_DEBUG("Reproj: publishing unwarped anchor (reset:{} velocity:{} focused:{} poseAge:{:.1f}ms)",
                   _reset[fIndex], hasVelocity, focused, poseAge);

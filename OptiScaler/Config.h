@@ -621,7 +621,7 @@ class Config
     CustomOptional<bool> ReprojCapAtHalfRefresh { true }; // apply FrameLimit only in synchronous fallback mode
     CustomOptional<int> ReprojMaxWarpFrames {
         1
-    }; // worker warps in async mode; blocking warps in synchronous mode
+    }; // bounds blocking warps in synchronous mode; async mode fills every refresh slot instead
     CustomOptional<float> ReprojTargetRefresh { 0.0f }; // 0 = FramerateLimit, then active display refresh
     CustomOptional<bool> ReprojUseDepth { true };       // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { false };  // suppress camera translation in depth-aware modes

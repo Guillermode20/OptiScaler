@@ -131,7 +131,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] + MV (+depth) -> current backbuffer
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
-    bool DispatchPacketWarp(int packetIndex, float timeStep);
+    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0);
     bool DisplayPacket(int packetIndex, bool composeUi);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
@@ -139,7 +139,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void FillConstants(int fIndex, RP_Constants& constants);
     void UpdateMouseCalibration(int fIndex);
     void ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse,
-                        double sourcePoseTimestamp) const;
+                        double sourcePoseTimestamp, double additionalLeadMs = 0.0) const;
     int AcquirePacket();
     void RetirePackets();
     uint32_t PacketQueueDepth() const;
