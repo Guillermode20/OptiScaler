@@ -34,6 +34,7 @@ Notes:
 - The `Build` (signed) workflow needs a `SIGNPATH_API_TOKEN` secret. Use **"Build (No Signing)"** on forks.
 - `gh` must be authed with `repo` + `workflow` scopes to trigger runs and download artifacts.
 - Compile errors are not caught locally; read them with `gh run view <run_id> --log-failed`.
+- **Required reprojection workflow:** commit every change, push it, run and wait for **Build (No Signing)**, then install the successful artifact into Deep Rock Galactic for live validation. Do not claim a reprojection change is validated before that game test; ask for its install path if it is not known.
 
 ## Shaders
 
