@@ -1767,15 +1767,25 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         _gameCommandQueue = realQueue;
         _hwnd = desc->OutputWindow;
         _bufferCount = desc->BufferCount;
-        auto* wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false);
-        _swapChain = wrapped->RealSwapChain3();
-        _swapChain->AddRef();
-        *swapChain = wrapped;
-        _wrappedSwapChain = wrapped;
-        State::Instance().currentWrappedSwapchain = wrapped;
-        State::Instance().currentRealSwapchain = rawSwapChain;
-        if (asyncRequested)
+        if (!asyncRequested)
         {
+            // The synchronous presenter owns the real swapchain directly. Wrapping it
+            // makes ResizeBuffers re-enter FGHooks through the detoured real vtable.
+            _swapChain = rawSwapChain;
+            *swapChain = rawSwapChain;
+            _wrappedSwapChain = nullptr;
+            State::Instance().currentWrappedSwapchain = nullptr;
+        }
+        else
+        {
+            auto* wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false);
+            _swapChain = wrapped->RealSwapChain3();
+            _swapChain->AddRef();
+            *swapChain = wrapped;
+            _wrappedSwapChain = wrapped;
+            State::Instance().currentWrappedSwapchain = wrapped;
+            State::Instance().currentRealSwapchain = rawSwapChain;
+
             ID3D12Device* device = nullptr;
             if (SUCCEEDED(realQueue->GetDevice(IID_PPV_ARGS(&device))))
             {
@@ -1915,15 +1925,25 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
         _gameCommandQueue = realQueue;
         _hwnd = hwnd;
         _bufferCount = desc->BufferCount;
-        auto* wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false);
-        _swapChain = wrapped->RealSwapChain3();
-        _swapChain->AddRef();
-        *swapChain = static_cast<IDXGISwapChain1*>(wrapped);
-        _wrappedSwapChain = wrapped;
-        State::Instance().currentWrappedSwapchain = wrapped;
-        State::Instance().currentRealSwapchain = rawSwapChain;
-        if (asyncRequested)
+        if (!asyncRequested)
         {
+            // The synchronous presenter owns the real swapchain directly. Wrapping it
+            // makes ResizeBuffers re-enter FGHooks through the detoured real vtable.
+            _swapChain = rawSwapChain;
+            *swapChain = rawSwapChain;
+            _wrappedSwapChain = nullptr;
+            State::Instance().currentWrappedSwapchain = nullptr;
+        }
+        else
+        {
+            auto* wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false);
+            _swapChain = wrapped->RealSwapChain3();
+            _swapChain->AddRef();
+            *swapChain = static_cast<IDXGISwapChain1*>(wrapped);
+            _wrappedSwapChain = wrapped;
+            State::Instance().currentWrappedSwapchain = wrapped;
+            State::Instance().currentRealSwapchain = rawSwapChain;
+
             ID3D12Device* device = nullptr;
             if (SUCCEEDED(realQueue->GetDevice(IID_PPV_ARGS(&device))))
             {
