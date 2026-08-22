@@ -4,7 +4,7 @@
 
 Convert OptiScaler's DX12 reprojection from its validated synchronous presentation path into genuine asynchronous timewarp that returns the game's `Present()` promptly while a dedicated presenter repeatedly warps the newest completed frame at display cadence. The implementation must remain native to OptiScaler, preserve safe swapchain/resource ownership on Windows and Proton, use rotational late-latching first, and fall back synchronously rather than showing black or racing game backbuffers when required presentation capabilities are unavailable.
 
-**Implementation status (2026-08-22):** Implemented, statically checked, and awaiting Windows CI plus live game validation. The validation matrix is intentionally reset; Deep Rock Galactic on Proton remains validated only on the synchronous fallback.
+**Implementation status (2026-08-22):** Implemented, statically checked, and live-validated in Deep Rock Galactic on Proton. The async virtual-swapchain path created three game-visible virtual buffers, delivered ~60 real plus ~60 warp FPS through the worker, and held the game-facing enqueue path to ~0.1 ms. The validation matrix otherwise remains sparse; keep `ReprojAsync=false` as the shipped default until more games validate it.
 
 Two implementation clarifications were required during review:
 
@@ -79,7 +79,7 @@ Two implementation clarifications were required during review:
 - Update `OptiScaler/menu/menu_common.cpp` async help/status strings to describe virtual game backbuffers plus worker-owned main swapchain, and display game-present block time beside queue depth. Remove all claims about DirectComposition.
 - Update the behavior-defining comments for `Config::ReprojAsync` and `ReprojMaxWarpFrames` in `OptiScaler/Config.h` plus `[FrameGen] FGOutput=asynctimewarp`/`[Reproj] Async` text in `OptiScaler.ini`: `Async=true` requests main-swapchain virtualization and falls back synchronously when unavailable; `MaxWarpFrames` caps worker warps in async mode and blocking warps in synchronous mode.
 - Update the design docs that currently forbid this architecture: the `AGENTS.md` invariant ("Never point the worker at the game's DXGI backbuffers") must be rewritten around the new one — the worker owns real backbuffers precisely because the game no longer renders into them — and `AsyncReprojection.md` / `AsyncReprojection_Continuation_Plan.md` need a superseding note describing virtualized-backbuffer presentation instead of DirectComposition.
-- Reset the validation matrix: no game is validated on this path until tested; carry "Deep Rock Galactic on Proton validated only on the synchronous path" forward explicitly as applying to the new synchronous fallback.
+- Record the initial validation result: Deep Rock Galactic on Proton live-validated the async path on 2026-08-22. Keep the matrix otherwise sparse until more games are tested.
 
 ## Amendment notes (review round 1)
 

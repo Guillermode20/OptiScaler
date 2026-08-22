@@ -1,6 +1,6 @@
 # Async Reprojection Continuation Plan
 
-> Superseded presentation architecture (2026-08-22): `docs/NativeAsyncTimewarpPlan.md` replaces M5's DirectComposition presenter with game-visible virtual backbuffers and worker-exclusive presentation on the real main swapchain. The implementation is experimental and the validation matrix is reset; Deep Rock Galactic on Proton is validated only on the synchronous fallback.
+> Superseded presentation architecture (2026-08-22): `docs/NativeAsyncTimewarpPlan.md` replaces M5's DirectComposition presenter with game-visible virtual backbuffers and worker-exclusive presentation on the real main swapchain. The implementation remains experimental, but Deep Rock Galactic on Proton live-validated the async path on 2026-08-22 (~60 real + ~60 warp FPS and ~0.1 ms game-present blocking).
 
 ## Purpose
 
@@ -27,13 +27,12 @@ of its DXGI backbuffers while the render thread publishes owned
 color/depth/velocity/UI packets to a worker. The worker writes only to a separate
 composition swapchain, avoiding the unsafe next-backbuffer race.
 
-Deep Rock Galactic on Proton is currently validated only on the synchronous path.
-`CreateSwapChainForComposition` returns `E_NOTIMPL`, so `ReprojAsync=true` logs the
-failure and activates the synchronous fallback. Secondary child and top-level HWND
-swapchains are not valid substitutes: Wine can accept their presents while showing
-only black. The synchronous result can still feel smoother and more responsive than
-native 60 Hz, but it is not concurrent timewarp. Real asynchronous Proton
-presentation remains future work.
+The older DirectComposition path described below is not usable on Proton:
+`CreateSwapChainForComposition` returns `E_NOTIMPL`, and secondary HWND swapchains
+can present only black. It has been superseded by the virtualized-main-swapchain
+path, which live-validated genuine asynchronous presentation in Deep Rock Galactic
+on Proton on 2026-08-22. Do not treat the older DirectComposition discussion as a
+fallback option.
 
 ## Current baseline
 
