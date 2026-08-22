@@ -1693,7 +1693,9 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         {
             LOG_WARN("Reproj swapchain already created for the same output window!");
 
-            auto bufferCount = (desc->BufferCount < 3) ? 3 : desc->BufferCount;
+            auto bufferCount = Config::Instance()->ReprojAsync.value_or_default() && desc->BufferCount < 3
+                                   ? 3
+                                   : desc->BufferCount;
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               bufferCount, desc->BufferDesc.Width, desc->BufferDesc.Height, desc->BufferDesc.Format,
                               desc->Flags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == S_OK;
@@ -1742,17 +1744,16 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
     if (!CheckForRealObject(__FUNCTION__, cmdQueue, (IUnknown**) &realQueue))
         realQueue = cmdQueue;
 
-    // A free backbuffer slot is required for the reprojected frame: force >= 3 buffers.
-    // Remember the caller's values so a failed creation does not leak our
-    // requirements into the game-visible fallback swapchain the DXGI hook creates.
+    // Async presentation needs a free game buffer while the worker owns the real
+    // swapchain. The synchronous presenter blocks the game thread, so preserve the
+    // game's buffer count (some engines require its original count during startup).
+    const bool asyncRequested = Config::Instance()->ReprojAsync.value_or_default();
     const auto originalBufferCount = desc->BufferCount;
     const auto originalFlags = desc->Flags;
     const auto originalSwapEffect = desc->SwapEffect;
 
-    if (desc->BufferCount < 3)
+    if (asyncRequested && desc->BufferCount < 3)
         desc->BufferCount = 3;
-
-    const bool asyncRequested = Config::Instance()->ReprojAsync.value_or_default();
     desc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     if (asyncRequested)
         desc->Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
@@ -1852,7 +1853,9 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
         {
             LOG_WARN("Reproj swapchain already created for the same output window!");
 
-            auto bufferCount = (desc->BufferCount < 3) ? 3 : desc->BufferCount;
+            auto bufferCount = Config::Instance()->ReprojAsync.value_or_default() && desc->BufferCount < 3
+                                   ? 3
+                                   : desc->BufferCount;
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               bufferCount, desc->Width, desc->Height, desc->Format,
                               desc->Flags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == S_OK;
@@ -1901,17 +1904,16 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
     if (!CheckForRealObject(__FUNCTION__, cmdQueue, (IUnknown**) &realQueue))
         realQueue = cmdQueue;
 
-    // A free backbuffer slot is required for the reprojected frame: force >= 3 buffers.
-    // Remember the caller's values so a failed creation does not leak our
-    // requirements into the game-visible fallback swapchain the DXGI hook creates.
+    // Async presentation needs a free game buffer while the worker owns the real
+    // swapchain. The synchronous presenter blocks the game thread, so preserve the
+    // game's buffer count (some engines require its original count during startup).
+    const bool asyncRequested = Config::Instance()->ReprojAsync.value_or_default();
     const auto originalBufferCount = desc->BufferCount;
     const auto originalFlags = desc->Flags;
     const auto originalSwapEffect = desc->SwapEffect;
 
-    if (desc->BufferCount < 3)
+    if (asyncRequested && desc->BufferCount < 3)
         desc->BufferCount = 3;
-
-    const bool asyncRequested = Config::Instance()->ReprojAsync.value_or_default();
     desc->Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     if (asyncRequested)
         desc->Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
