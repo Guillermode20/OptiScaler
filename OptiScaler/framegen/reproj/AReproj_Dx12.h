@@ -99,6 +99,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::unique_ptr<RP_Dx12> _warp;                // the reprojection pass (v1/v2 PSOs)
     ID3D12Resource* _lastColor[BUFFER_COUNT] = {}; // copy of the last presented real frame
     D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
+    ID3D12Resource* _uiColor[BUFFER_COUNT] = {};   // sync-path UI capture composited after warping
+    D3D12_RESOURCE_STATES _uiColorState[BUFFER_COUNT] = {};
+    bool _syncHasUi[BUFFER_COUNT] = {};
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
     bool _forceBorderless = false;
 
@@ -121,6 +124,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT64 _scFenceValue = 0; // monotonic SC fence value (fence outlives context recreate)
 
     bool CopyLastFrame(int fIndex, ID3D12Resource* source);
+    static DXGI_FORMAT NormalizeReprojFormat(DXGI_FORMAT format);
     bool VirtualAnchorReady() const;
     HRESULT PresentVirtualFrameSync(int fIndex, ID3D12Resource* source, UINT virtualBufferIndex, UINT syncInterval,
                                     UINT flags, bool allowWarps);

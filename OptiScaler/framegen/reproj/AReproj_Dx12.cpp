@@ -130,6 +130,16 @@ bool AReproj_Dx12::WaitForSCAllocator(int fIndex)
     return true;
 }
 
+DXGI_FORMAT AReproj_Dx12::NormalizeReprojFormat(DXGI_FORMAT format)
+{
+    format = WrappedIDXGISwapChain4::ReprojectionResourceFormat(format);
+    if (format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    return format;
+}
+
 bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
 {
     if (source == nullptr)
@@ -149,6 +159,9 @@ bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
     if (cmdList == nullptr)
         return false;
 
+    // CreateBufferResource reuses _uiColor when format/size match; a new one starts in COPY_DEST.
+    ID3D12Resource* oldUiColor = _uiColor[fIndex];
+
     // The backbuffer is expected to be in PRESENT state at present time (RUI_Dx12 does the same)
     ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
@@ -159,6 +172,41 @@ bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
 
     ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
     _lastColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+
+    // HUD composition (sync path): warp the HUD-less frame instead of the composed
+    // backbuffer so the baked-in HUD is not timewarped; UI is composited after the warp.
+    _syncHasUi[fIndex] = false;
+    if (Config::Instance()->FGDrawUIOverFG.value_or_default())
+    {
+        auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
+        auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
+        if (hudless && ui && IsResourceReady(FG_ResourceType::HudlessColor, fIndex) &&
+            IsResourceReady(FG_ResourceType::UIColor, fIndex))
+        {
+            const auto& hudlessDesc = hudless->GetResource()->GetDesc();
+            const auto sourceDesc = source->GetDesc();
+            if (hudlessDesc.Width == sourceDesc.Width && hudlessDesc.Height == sourceDesc.Height &&
+                NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(sourceDesc.Format))
+            {
+                ResourceBarrier(cmdList, hudless->GetResource(), hudless->state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                cmdList->CopyResource(_lastColor[fIndex], hudless->GetResource());
+                ResourceBarrier(cmdList, hudless->GetResource(), D3D12_RESOURCE_STATE_COPY_SOURCE, hudless->state);
+
+                if (CreateBufferResource(_device, ui->GetResource(), D3D12_RESOURCE_STATE_COPY_DEST, &_uiColor[fIndex],
+                                         false, false))
+                {
+                    if (_uiColor[fIndex] != oldUiColor)
+                        _uiColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+                    ResourceBarrier(cmdList, ui->GetResource(), ui->state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    ResourceBarrier(cmdList, _uiColor[fIndex], _uiColorState[fIndex], D3D12_RESOURCE_STATE_COPY_DEST);
+                    cmdList->CopyResource(_uiColor[fIndex], ui->GetResource());
+                    ResourceBarrier(cmdList, ui->GetResource(), D3D12_RESOURCE_STATE_COPY_SOURCE, ui->state);
+                    _uiColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+                    _syncHasUi[fIndex] = true;
+                }
+            }
+        }
+    }
 
     // Submit now: the copy must be queued before the real present so the warp (submitted
     // after the present) runs on the same queue after it.
@@ -564,17 +612,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     {
         const auto hudlessDesc = hudless->GetResource()->GetDesc();
         const auto backBufferDesc = gameBackBuffer->GetDesc();
-        const auto normalizeFormat = [](DXGI_FORMAT format)
-        {
-            format = WrappedIDXGISwapChain4::ReprojectionResourceFormat(format);
-            if (format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
-                return DXGI_FORMAT_R8G8B8A8_UNORM;
-            if (format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
-                return DXGI_FORMAT_B8G8R8A8_UNORM;
-            return format;
-        };
         if (hudlessDesc.Width == backBufferDesc.Width && hudlessDesc.Height == backBufferDesc.Height &&
-            normalizeFormat(hudlessDesc.Format) == normalizeFormat(backBufferDesc.Format))
+            NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(backBufferDesc.Format))
         {
             color = hudless->GetResource();
             colorState = hudless->state;
@@ -804,6 +843,10 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     cmdList->CopyResource(bb, _warpOutput[fIndex]);
     ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     ResourceBarrier(cmdList, _warpOutput[fIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+
+    // Composite the captured UI unwarped on top of the warped HUD-less frame
+    if (_syncHasUi[fIndex] && _uiColor[fIndex] != nullptr && _renderUI != nullptr && _renderUI->IsInit())
+        _renderUI->Dispatch(sc, cmdList, _uiColor[fIndex], _uiColorState[fIndex]);
 
     bb->Release();
 
@@ -1615,6 +1658,9 @@ void AReproj_Dx12::Activate()
     _cachedRefreshHz = 0.0;
     _lastRefreshQueryMs = 0.0;
     _lastRealFrameTimestamp = 0.0;
+    if (Config::Instance()->FGDrawUIOverFG.value_or_default() && _renderUI == nullptr)
+        _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
+                                               Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
     std::memset(_calibration, 0, sizeof(_calibration));
     std::memset(_calibrationMatrix, 0, sizeof(_calibrationMatrix));
     _lastCalibrationTimestamp = 0.0;
@@ -2323,6 +2369,7 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_scCommandList[i]);
 
         SAFE_RELEASE(_lastColor[i]);
+        SAFE_RELEASE(_uiColor[i]);
         SAFE_RELEASE(_warpOutput[i]);
         SAFE_RELEASE(_packets[i].color);
         SAFE_RELEASE(_packets[i].depth);
@@ -2330,6 +2377,8 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_packets[i].ui);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
+        _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
+        _syncHasUi[i] = false;
         _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].depthState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].velocityState = D3D12_RESOURCE_STATE_COMMON;
