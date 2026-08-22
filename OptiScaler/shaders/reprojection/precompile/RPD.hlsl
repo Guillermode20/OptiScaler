@@ -11,6 +11,7 @@ cbuffer RP_Constants : register(b0)
     uint   InvertedDepth;
     uint   Mode;
     uint   DebugView;
+    uint   Extrapolate;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -95,12 +96,15 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                                   CameraNear, CameraFar, InvertedDepth);
     float3 worldPos = ReconstructWorld(ndc, depthZ, camPos, right, up, forward, tanHalf, CameraAspect);
 
-    // Extrapolate the camera pose to the fake-frame time (TimeStep after frame N)
-    float t = TimeStep;
-    float3 midPos     = lerp(PrevCameraPos.xyz, camPos, 1.0f + t);
-    float3 midRight   = normalize(lerp(PrevCameraRight.xyz, right, 1.0f + t));
-    float3 midUp      = normalize(lerp(PrevCameraUp.xyz, up, 1.0f + t));
-    float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, 1.0f + t));
+    // Warp target pose (single-prediction ATW): the current camera basis rotated
+    // only by the late-latched input received since the source pose was captured.
+    // When late latch is disabled (Extrapolate=1), fall back to linearly
+    // projecting the previous->current pose delta forward by TimeStep instead.
+    float s = Extrapolate != 0 ? 1.0f + TimeStep : 1.0f;
+    float3 midPos     = lerp(PrevCameraPos.xyz, camPos, s);
+    float3 midRight   = normalize(lerp(PrevCameraRight.xyz, right, s));
+    float3 midUp      = normalize(lerp(PrevCameraUp.xyz, up, s));
+    float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
 
     // Late latch is sampled immediately before dispatch. Apply yaw around the
     // camera up axis, then pitch around the yawed right axis.

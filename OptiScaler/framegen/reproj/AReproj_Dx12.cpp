@@ -414,6 +414,10 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.jitterCancelled = (config->ReprojUseJitterCancel.value_or_default() && IsJitteredMVs()) ? 1 : 0;
     cb.invertedDepth = IsInvertedDepth() ? 1 : 0;
     cb.mode = config->ReprojMode.value_or_default();
+    // Single-prediction ATW: when late latch is on, measured post-render input
+    // solely defines [source pose -> display time]; pose extrapolation would
+    // double-predict that same interval and jitter (overshoot/snap-back).
+    cb.extrapolate = config->ReprojLateLatch.value_or_default() ? 0u : 1u;
     cb.debugView = config->ReprojDebugView.value_or_default() ? 1 : 0;
     cb.cameraNear = _cameraNear[fIndex];
     cb.cameraFar = _cameraFar[fIndex];

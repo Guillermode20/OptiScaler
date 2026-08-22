@@ -11,6 +11,7 @@ cbuffer RP_Constants : register(b0)
     uint   InvertedDepth;
     uint   Mode;
     uint   DebugView;
+    uint   Extrapolate;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
