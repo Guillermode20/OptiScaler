@@ -1320,8 +1320,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             auto* wrapped = static_cast<WrappedIDXGISwapChain4*>(state.currentWrappedSwapchain);
             if (wrapped->IsReprojectionVirtualized())
             {
+                LOG_INFO("Reproj diag: FGPresent pre-activation virtualized present");
                 reprojPresentAttempted = true;
                 reprojPresentSucceeded = fg->Present();
+                LOG_INFO("Reproj diag: FGPresent pre-activation result {}", reprojPresentSucceeded);
             }
         }
     }

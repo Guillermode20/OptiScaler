@@ -1324,22 +1324,31 @@ HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source
                                               UINT syncInterval, UINT flags, bool allowWarps)
 {
     (void) allowWarps;
+    LOG_INFO("Reproj diag: PresentVirtualFrameSync fIdx={} vb={} interval={} flags={:X}", fIndex, virtualBufferIndex,
+             syncInterval, flags);
     if (_wrappedSwapChain == nullptr || source == nullptr || _presentThread.joinable() ||
         _presenterState.load() == PresenterState::Running)
         return DXGI_ERROR_INVALID_CALL;
 
     if (!CopyLastFrame(fIndex, source))
+    {
+        LOG_INFO("Reproj diag: PresentVirtualFrameSync CopyLastFrame failed");
         return E_FAIL;
+    }
 
     auto* realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto realIndex = realSwapChain->GetCurrentBackBufferIndex();
     ID3D12Resource* realBuffer = nullptr;
     if (FAILED(realSwapChain->GetBuffer(realIndex, IID_PPV_ARGS(&realBuffer))))
+    {
+        LOG_INFO("Reproj diag: PresentVirtualFrameSync real GetBuffer({}) failed", realIndex);
         return E_FAIL;
+    }
 
     auto* cmdList = GetUICommandList(fIndex);
     if (cmdList == nullptr)
     {
+        LOG_INFO("Reproj diag: PresentVirtualFrameSync no UI command list");
         realBuffer->Release();
         return E_FAIL;
     }
@@ -1351,19 +1360,30 @@ HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source
     realBuffer->Release();
 
     if (!SubmitUICommandList(static_cast<UINT>(fIndex)))
+    {
+        LOG_INFO("Reproj diag: PresentVirtualFrameSync submit failed");
         return E_FAIL;
+    }
     const auto captureValue = _uiAllocatorFenceValues[fIndex];
     if (FAILED(_wrappedSwapChain->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, captureValue)))
+    {
+        LOG_INFO("Reproj diag: PresentVirtualFrameSync SubmitReprojectionBuffer failed");
         return E_FAIL;
+    }
     const auto advanceResult = _wrappedSwapChain->AdvanceReprojectionBuffer();
     if (FAILED(advanceResult))
+    {
+        LOG_INFO("Reproj diag: PresentVirtualFrameSync Advance failed {:X}", (UINT) advanceResult);
         return advanceResult;
+    }
+    LOG_INFO("Reproj diag: PresentVirtualFrameSync presenting real frame");
     return PresentFrame(syncInterval, flags);
 }
 
 bool AReproj_Dx12::Present()
 {
     LOG_FUNC();
+    LOG_INFO("Reproj diag: Present() entry");
     if (_swapChain == nullptr)
         return false;
 
