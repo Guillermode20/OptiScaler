@@ -1647,9 +1647,9 @@ void AReproj_Dx12::DestroyFGContext()
 
     Deactivate();
 
-    if (_wrappedSwapChain != nullptr)
-        _wrappedSwapChain->ShutdownReprojectionVirtualization();
-
+    // Virtual buffers belong to the swapchain, not the FG context. Keep them alive
+    // across an FG context reset; the game can retain references to them until the
+    // swapchain is resized or released.
     ReleaseObjects();
 }
 
@@ -2045,29 +2045,6 @@ void AReproj_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants
     LOG_DEBUG("");
 
     CreateObjects(device);
-
-    // A context reset destroys the async presenter and its virtual buffers, but the
-    // game may keep the same swapchain. Rebuild that swapchain-owned virtualization
-    // before Activate() tries to start the presenter again.
-    if (Config::Instance()->ReprojAsync.value_or_default() && _swapChain != nullptr)
-    {
-        auto* wrapped = State::Instance().currentWrappedSwapchain != nullptr &&
-                                State::Instance().currentWrappedSwapchain == State::Instance().currentFGSwapchain
-                            ? static_cast<WrappedIDXGISwapChain4*>(State::Instance().currentWrappedSwapchain)
-                            : nullptr;
-        if (wrapped != nullptr && wrapped->RealSwapChain3() == _swapChain)
-        {
-            _wrappedSwapChain = wrapped;
-            if (!wrapped->IsReprojectionVirtualized())
-            {
-                _asyncDowngraded = false;
-                if (!VirtualAnchorReady() || !wrapped->InitializeReprojectionVirtualization())
-                    LOG_WARN("Reproj: async virtualization unavailable after context reset");
-                else
-                    LOG_INFO("Reproj: async virtualization restored after context reset");
-            }
-        }
-    }
 
     if (_warp == nullptr)
         _warp = std::make_unique<RP_Dx12>("ReprojWarp", device);
