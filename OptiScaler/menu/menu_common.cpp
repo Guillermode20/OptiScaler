@@ -3128,7 +3128,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     outputOptions[reprojOutputIndex].set_disabled(!reprojOutputSupported, "Requires DX12 FSR/FFX upscaler input");
     if (config->FGOutput.value_or_default() == FGOutput::Reproj)
     {
-        if (state.swapchainApi != API::DX12)
+        // The Vulkan overlay can report its own presentation API while the DX12
+        // reprojection feature is running through VKD3D. The feature state wins.
+        if (state.currentFG != nullptr && state.currentFG->IsActive())
+            state.reprojDisableReason.clear();
+        else if (state.swapchainApi != API::DX12)
             state.reprojDisableReason = state.swapchainApi == API::NotSelected
                                             ? "Waiting for a DX12 swapchain"
                                             : "Requires a DX12 swapchain";
