@@ -3,6 +3,8 @@
 
 #include <detours/detours.h>
 
+#include <cmath>
+
 namespace OptiInput
 {
 namespace
@@ -42,6 +44,26 @@ void FillNeutralXInputState(XINPUT_STATE* state)
     const DWORD packetNumber = state->dwPacketNumber;
     *state = {};
     state->dwPacketNumber = packetNumber;
+}
+
+void RecordGamepadMotionLocked(DWORD userIndex, const XINPUT_STATE& state)
+{
+    const auto normalize = [](SHORT value)
+    {
+        constexpr float maximum = 32767.0f;
+        constexpr float deadzone = static_cast<float>(XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE);
+        const float magnitude = std::abs(static_cast<float>(value));
+        if (magnitude <= deadzone)
+            return 0.0f;
+        return std::copysign((magnitude - deadzone) / (maximum - deadzone), static_cast<float>(value));
+    };
+
+    LARGE_INTEGER counter {}, frequency {};
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    _state.GamepadMotionState = { normalize(state.Gamepad.sThumbRX), normalize(state.Gamepad.sThumbRY),
+                                  1000.0 * static_cast<double>(counter.QuadPart) / frequency.QuadPart };
+    _state.GamepadUserIndex = userIndex;
 }
 
 void ClearXInputHookPointersLocked()
@@ -136,6 +158,31 @@ void UpdateXInputIntegrationLocked()
              _state.XInputSetStateHookInstalled ? 1 : 0);
 }
 
+void RefreshGamepadMotion()
+{
+    XInputGetState_t getState = nullptr;
+    DWORD userIndex = 0;
+    {
+        std::unique_lock lock(_state.Mutex);
+        getState = o_XInputGetState;
+        userIndex = _state.GamepadUserIndex;
+    }
+    if (getState == nullptr)
+        return;
+
+    XINPUT_STATE state {};
+    DWORD result;
+    {
+        ScopedHookBypass bypass;
+        result = getState(userIndex, &state);
+    }
+    if (result == ERROR_SUCCESS)
+    {
+        std::unique_lock lock(_state.Mutex);
+        RecordGamepadMotionLocked(userIndex, state);
+    }
+}
+
 void RemoveXInputHooksLocked()
 {
     if (!_state.XInputGetStateHookInstalled && !_state.XInputGetStateExHookInstalled &&
@@ -198,7 +245,13 @@ DWORD WINAPI hkXInputGetState(DWORD userIndex, XINPUT_STATE* state)
     if (!shouldBlock)
     {
         ScopedHookBypass bypass;
-        return o_XInputGetState(userIndex, state);
+        const auto result = o_XInputGetState(userIndex, state);
+        if (result == ERROR_SUCCESS)
+        {
+            std::unique_lock lock(_state.Mutex);
+            RecordGamepadMotionLocked(userIndex, *state);
+        }
+        return result;
     }
 
     XINPUT_STATE realState {};
@@ -220,6 +273,10 @@ DWORD WINAPI hkXInputGetState(DWORD userIndex, XINPUT_STATE* state)
         return result;
     }
 
+    {
+        std::unique_lock lock(_state.Mutex);
+        RecordGamepadMotionLocked(userIndex, realState);
+    }
     *state = realState;
     state->Gamepad = {}; // neutral connected controller only if it really exists
 
@@ -256,7 +313,13 @@ DWORD WINAPI hkXInputGetStateEx(DWORD userIndex, XINPUT_STATE* state)
     if (!shouldBlock)
     {
         ScopedHookBypass bypass;
-        return o_XInputGetStateEx(userIndex, state);
+        const auto result = o_XInputGetStateEx(userIndex, state);
+        if (result == ERROR_SUCCESS)
+        {
+            std::unique_lock lock(_state.Mutex);
+            RecordGamepadMotionLocked(userIndex, *state);
+        }
+        return result;
     }
 
     XINPUT_STATE realState {};
@@ -278,6 +341,10 @@ DWORD WINAPI hkXInputGetStateEx(DWORD userIndex, XINPUT_STATE* state)
         return result;
     }
 
+    {
+        std::unique_lock lock(_state.Mutex);
+        RecordGamepadMotionLocked(userIndex, realState);
+    }
     *state = realState;
     state->Gamepad = {}; // neutral connected controller only if it really exists
 

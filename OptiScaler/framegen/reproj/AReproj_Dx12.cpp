@@ -391,7 +391,8 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
         cb.mode = 2;
 }
 
-void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse) const
+void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse,
+                                     double sourcePoseTimestamp) const
 {
     auto config = Config::Instance();
     if (!config->ReprojLateLatch.value_or_default() || !OptiInput::IsFocused())
@@ -401,11 +402,10 @@ void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawM
     if (constants.cameraVFov <= 0.0f || constants.cameraAspect <= 0.0f)
         return;
 
+    const auto now = Util::MillisecondsNow();
     const auto current = OptiInput::GetRawMouseMotion();
     double dx = static_cast<double>(current.TotalX - sourceMouse.TotalX);
     double dy = static_cast<double>(current.TotalY - sourceMouse.TotalY);
-
-    const auto now = Util::MillisecondsNow();
     const auto predictionMs = std::clamp<double>(config->ReprojPredictionMs.value_or_default(), 0.0, 20.0);
     if (current.TimestampMs != 0 && now - current.TimestampMs <= 25)
     {
@@ -428,15 +428,25 @@ void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawM
     }
     else if (config->ReprojMouseDegreesX.has_value() && config->ReprojMouseDegreesY.has_value())
     {
-        // Retain explicit legacy overrides, but never silently estimate pose from
-        // the default sensitivity. A calibration or user-supplied value is required.
         yaw = dx * config->ReprojMouseDegreesX.value() * radiansPerDegree;
         pitch = dy * config->ReprojMouseDegreesY.value() * radiansPerDegree;
     }
-    else
+
+    // Mouse deltas are already integrated; a right stick is a rotation rate.  The
+    // game's latest XInput sample lets a generated frame include aim input received
+    // after the source camera pose, rather than waiting for the next real frame.
+    OptiInput::RefreshGamepadMotion();
+    const auto gamepad = OptiInput::GetGamepadMotion();
+    if (gamepad.TimestampMs != 0.0 && now - gamepad.TimestampMs <= 100.0 && sourcePoseTimestamp > 0.0)
     {
-        return;
+        const auto elapsedMs = std::clamp(now - sourcePoseTimestamp + predictionMs, 0.0, 100.0);
+        yaw += gamepad.RightX * config->ReprojGamepadDegreesPerSecondX.value_or_default() * radiansPerDegree *
+               elapsedMs / 1000.0;
+        // XInput's positive Y is up; screen-space pitch is positive down.
+        pitch -= gamepad.RightY * config->ReprojGamepadDegreesPerSecondY.value_or_default() * radiansPerDegree *
+                 elapsedMs / 1000.0;
     }
+
     const auto maximum = std::clamp<double>(config->ReprojMaxRotation.value_or_default(), 0.0, 45.0) * radiansPerDegree;
     const auto length = std::hypot(yaw, pitch);
     if (length > maximum && length > 0.0)
@@ -554,8 +564,17 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     {
         const auto hudlessDesc = hudless->GetResource()->GetDesc();
         const auto backBufferDesc = gameBackBuffer->GetDesc();
+        const auto normalizeFormat = [](DXGI_FORMAT format)
+        {
+            format = WrappedIDXGISwapChain4::ReprojectionResourceFormat(format);
+            if (format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB)
+                return DXGI_FORMAT_R8G8B8A8_UNORM;
+            if (format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
+                return DXGI_FORMAT_B8G8R8A8_UNORM;
+            return format;
+        };
         if (hudlessDesc.Width == backBufferDesc.Width && hudlessDesc.Height == backBufferDesc.Height &&
-            WrappedIDXGISwapChain4::ReprojectionResourceFormat(hudlessDesc.Format) == backBufferDesc.Format)
+            normalizeFormat(hudlessDesc.Format) == normalizeFormat(backBufferDesc.Format))
         {
             color = hudless->GetResource();
             colorState = hudless->state;
@@ -680,7 +699,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep)
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
     auto constants = packet.constants;
     constants.timeStep = timeStep;
-    ApplyLateLatch(constants, packet.sourceMouse);
+    ApplyLateLatch(constants, packet.sourceMouse, packet.sourcePoseTimestamp);
     const bool ok = _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
                                     packet.hasDepth ? packet.depth : nullptr, packet.depthState,
                                     _warpOutput[outputIndex], constants);
@@ -759,7 +778,7 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     RP_Constants cb {};
     FillConstants(fIndex, cb);
     cb.timeStep = timeStep;
-    ApplyLateLatch(cb, _syncSourceMouse);
+    ApplyLateLatch(cb, _syncSourceMouse, _cameraTimestamp[fIndex]);
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;

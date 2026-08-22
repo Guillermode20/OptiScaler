@@ -134,7 +134,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
     void FillConstants(int fIndex, RP_Constants& constants);
     void UpdateMouseCalibration(int fIndex);
-    void ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse) const;
+    void ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse,
+                        double sourcePoseTimestamp) const;
     int AcquirePacket();
     void RetirePackets();
     uint32_t PacketQueueDepth() const;

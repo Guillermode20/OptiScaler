@@ -1373,6 +1373,12 @@ RawMouseMotion GetRawMouseMotionAt(double timestampMs)
     return result.TimestampMs > 0.0 ? result : oldest;
 }
 
+GamepadMotion GetGamepadMotion()
+{
+    std::unique_lock lock(_state.Mutex);
+    return _state.GamepadMotionState;
+}
+
 bool ShouldBlockMouse()
 {
     std::unique_lock lock(_state.Mutex);

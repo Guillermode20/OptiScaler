@@ -61,12 +61,18 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                         ? float2(LateYaw / (2.0f * lateTanHalfH), LatePitch / (2.0f * lateTanHalfV))
                         : float2(0.0f, 0.0f);
 
-    float2 srcUV = clamp(uv - deltaUV * TimeStep + lateUV, 0.0f, 1.0f);
+    // Clamping an off-screen source stretches the last edge texel across the
+    // viewport. Keep the real-frame pixels instead and feather the transition.
+    float2 unboundedSrcUV = uv - deltaUV * TimeStep + lateUV;
+    float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
+                             min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
+    float coverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;
+    float2 srcUV = clamp(unboundedSrcUV, 0.0f, 1.0f);
 
     float4 warped = LastColor.SampleLevel(Bilinear, srcUV, 0);
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
 
-    float4 result = lerp(original, warped, Strength);
+    float4 result = lerp(original, warped, Strength * coverage);
 
     if (DebugView)
         Output[dtid.xy] = float4(length(delta) > 0.5f ? 1.0f : 0.0f, 0.0f, 0.0f, 1.0f);

@@ -105,12 +105,18 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                         ? float2(LateYaw / (2.0f * lateTanHalfH), LatePitch / (2.0f * lateTanHalfV))
                         : float2(0.0f, 0.0f);
 
-    float2 srcUV = clamp(uv - deltaUV * TimeStep + lateUV, 0.0f, 1.0f);
+    // Clamping an off-screen source stretches the last edge texel across the
+    // viewport. Keep the real-frame pixels instead and feather the transition.
+    float2 unboundedSrcUV = uv - deltaUV * TimeStep + lateUV;
+    float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
+                             min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
+    float coverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;
+    float2 srcUV = clamp(unboundedSrcUV, 0.0f, 1.0f);
 
     float4 warped = LastColor.SampleLevel(Bilinear, srcUV, 0);
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
 
-    float4 result = lerp(original, warped, Strength);
+    float4 result = lerp(original, warped, Strength * coverage);
 
     if (DebugView)
         Output[dtid.xy] = float4(length(delta) > 0.5f ? 1.0f : 0.0f, 0.0f, 0.0f, 1.0f);
@@ -199,7 +205,11 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
     // MV-warp fallback sample (also the v1 result)
     float2 deltaUV = delta / float2(MVSize);
-    float2 srcUV = clamp(uv - deltaUV * TimeStep, 0.0f, 1.0f);
+    float2 unboundedSrcUV = uv - deltaUV * TimeStep;
+    float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
+                             min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
+    float mvCoverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;
+    float2 srcUV = clamp(unboundedSrcUV, 0.0f, 1.0f);
     float4 mvWarp = LastColor.SampleLevel(Bilinear, srcUV, 0);
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
 
@@ -278,8 +288,8 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         float mvDisagreement = length(targetMv - delta) / max(max(length(delta), length(targetMv)), 1.0f);
         conf *= saturate(1.0f - mvDisagreement * 0.5f);
 
-        float edgeDistance = min(min(reprojUV.x, reprojUV.y), min(1.0f - reprojUV.x, 1.0f - reprojUV.y));
-        conf *= saturate(edgeDistance * 32.0f);
+        float reprojEdgeDistance = min(min(reprojUV.x, reprojUV.y), min(1.0f - reprojUV.x, 1.0f - reprojUV.y));
+        conf *= saturate(reprojEdgeDistance * 32.0f);
     }
 
     // Preserve static UI in screen space. Camera-only mode still reads motion
@@ -288,7 +298,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
     float2 clampedUV = clamp(reprojUV, 0.0f, 1.0f);
     float4 warped = LastColor.SampleLevel(Bilinear, clampedUV, 0);
-    float4 fallback = Mode == 2 ? original : mvWarp;
+    float4 fallback = Mode == 2 ? original : lerp(original, mvWarp, mvCoverage);
     float4 result = lerp(fallback, warped, conf);
     result = lerp(original, result, Strength);
 

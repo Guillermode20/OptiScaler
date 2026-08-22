@@ -24,6 +24,13 @@ struct RawMouseMotion
     double TimestampMs = 0.0;
 };
 
+struct GamepadMotion
+{
+    float RightX = 0.0f; // normalized after XInput's built-in radial deadzone
+    float RightY = 0.0f;
+    double TimestampMs = 0.0;
+};
+
 struct InitializeOptions
 {
     // Target/game window. Can be foreign-process in external overlay mode.
@@ -232,6 +239,8 @@ float GetMouseWheel();
 POINT GetMouseScreenPos();
 RawMouseMotion GetRawMouseMotion();
 RawMouseMotion GetRawMouseMotionAt(double timestampMs);
+GamepadMotion GetGamepadMotion();
+void RefreshGamepadMotion();
 
 bool ShouldBlockMouse();
 bool ShouldBlockKeyboard();

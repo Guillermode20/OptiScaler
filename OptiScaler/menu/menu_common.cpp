@@ -3937,9 +3937,10 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Keep camera position fixed in depth-aware modes to avoid translation disocclusions");
 
         bool reprojLateLatch = config->ReprojLateLatch.value_or_default();
-        if (ImGui::Checkbox("Late-latch mouse camera##reproj", &reprojLateLatch))
+        if (ImGui::Checkbox("Late-latch camera input##reproj", &reprojLateLatch))
             config->ReprojLateLatch = reprojLateLatch;
-        ShowHelpMarker("Apply mouse movement received after the real camera pose immediately before each camera warp");
+        ShowHelpMarker("Apply mouse movement or the current XInput right-stick rate after the real camera pose immediately "
+                       "before each camera warp");
 
         bool reprojAutoCalibrate = config->ReprojAutoCalibrate.value_or_default();
         if (ImGui::Checkbox("Auto-calibrate camera input##reproj", &reprojAutoCalibrate))
@@ -3956,6 +3957,17 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ImGui::PopItemWidth();
         ShowHelpMarker("Optional explicit fallback for rotation-only mouse timewarp. Both axes are required when "
                        "calibration is unavailable.");
+
+        ImGui::PushItemWidth(135.0f * menuResScale);
+        float gamepadYaw = config->ReprojGamepadDegreesPerSecondX.value_or_default();
+        float gamepadPitch = config->ReprojGamepadDegreesPerSecondY.value_or_default();
+        if (ImGui::InputFloat("Gamepad yaw deg/s##reproj", &gamepadYaw, 5.0f, 20.0f, "%.0f"))
+            config->ReprojGamepadDegreesPerSecondX = gamepadYaw;
+        if (ImGui::InputFloat("Gamepad pitch deg/s##reproj", &gamepadPitch, 5.0f, 20.0f, "%.0f"))
+            config->ReprojGamepadDegreesPerSecondY = gamepadPitch;
+        ImGui::PopItemWidth();
+        ShowHelpMarker("Right-stick late latching uses these rotation rates. Adjust to match the game's controller "
+                       "sensitivity; signs control direction.");
 
         bool reprojDebugView = config->ReprojDebugView.value_or_default();
         if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))

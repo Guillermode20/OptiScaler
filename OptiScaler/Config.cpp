@@ -202,6 +202,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojAutoCalibrate.set_from_config(readBool("Reproj", "AutoCalibrate"));
             ReprojMouseDegreesX.set_from_config(readFloat("Reproj", "MouseDegreesX"));
             ReprojMouseDegreesY.set_from_config(readFloat("Reproj", "MouseDegreesY"));
+            ReprojGamepadDegreesPerSecondX.set_from_config(readFloat("Reproj", "GamepadDegreesPerSecondX"));
+            ReprojGamepadDegreesPerSecondY.set_from_config(readFloat("Reproj", "GamepadDegreesPerSecondY"));
             ReprojPredictionMs.set_from_config(readFloat("Reproj", "PredictionMs"));
             ReprojMaxRotation.set_from_config(readFloat("Reproj", "MaxRotation"));
             ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
@@ -1054,6 +1056,10 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojMouseDegreesX.value_for_config()).c_str());
         ini.SetValue("Reproj", "MouseDegreesY",
                      GetFloatValue(Instance()->ReprojMouseDegreesY.value_for_config()).c_str());
+        ini.SetValue("Reproj", "GamepadDegreesPerSecondX",
+                     GetFloatValue(Instance()->ReprojGamepadDegreesPerSecondX.value_for_config()).c_str());
+        ini.SetValue("Reproj", "GamepadDegreesPerSecondY",
+                     GetFloatValue(Instance()->ReprojGamepadDegreesPerSecondY.value_for_config()).c_str());
         ini.SetValue("Reproj", "PredictionMs",
                      GetFloatValue(Instance()->ReprojPredictionMs.value_for_config()).c_str());
         ini.SetValue("Reproj", "MaxRotation",

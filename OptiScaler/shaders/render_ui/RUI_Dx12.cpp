@@ -179,14 +179,13 @@ bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList,
         return false;
     }
 
-    scBuffer->Release();
-
     // Check Hudless Buffer
     D3D12_RESOURCE_DESC hudlessDesc = hudless->GetDesc();
 
     if (/*hudlessDesc.Format != scDesc.BufferDesc.Format ||*/ hudlessDesc.Width != scDesc.BufferDesc.Width ||
         hudlessDesc.Height != scDesc.BufferDesc.Height)
     {
+        scBuffer->Release();
         return false;
     }
 
@@ -196,6 +195,7 @@ bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList,
     if (!CreateBufferResource(_counter, _device, scBuffer, D3D12_RESOURCE_STATE_COPY_DEST))
     {
         LOG_ERROR("CreateBufferResource error!");
+        scBuffer->Release();
         return false;
     }
 
@@ -256,6 +256,7 @@ bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList,
     if (state != D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE)
         ResourceBarrier(cmdList, hudless, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, state);
 
+    scBuffer->Release();
     return true;
 }
 
