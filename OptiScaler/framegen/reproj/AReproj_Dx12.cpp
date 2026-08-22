@@ -443,7 +443,11 @@ void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawM
                                      double sourcePoseTimestamp) const
 {
     auto config = Config::Instance();
-    if (!config->ReprojLateLatch.value_or_default() || !OptiInput::IsFocused())
+    // Focus tracking relies on Win32 focus messages, which Wine/Proton does not
+    // always deliver to the wrapped window; skip the gate there (same exemption
+    // the presenter loop uses) so late latch stays live during DRG sessions.
+    if (!config->ReprojLateLatch.value_or_default() ||
+        (!OptiInput::IsFocused() && !State::Instance().isRunningOnLinux))
         return;
     // The MV-only path approximates the late rotation as a screen-space offset, so
     // it needs a valid FOV/aspect; the depth path always has one when mode != 0.

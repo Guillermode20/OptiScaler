@@ -625,7 +625,7 @@ class Config
     CustomOptional<float> ReprojTargetRefresh { 0.0f }; // 0 = FramerateLimit, then active display refresh
     CustomOptional<bool> ReprojUseDepth { true };       // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { false };  // suppress camera translation in depth-aware modes
-    CustomOptional<bool> ReprojLateLatch { false };     // add post-render mouse/right-stick rotation immediately before warp
+    CustomOptional<bool> ReprojLateLatch { true };      // add post-render mouse/right-stick rotation immediately before warp
     CustomOptional<bool> ReprojAutoCalibrate { true };  // learn mouse-to-camera mapping and delay from real poses
     CustomOptional<float, NoDefault> ReprojManualYawDegrees;
     CustomOptional<float, NoDefault> ReprojManualPitchDegrees;
@@ -633,7 +633,7 @@ class Config
     CustomOptional<float> ReprojMouseDegreesY { 0.022f }; // pitch degrees per raw mouse count; sign controls direction
     CustomOptional<float> ReprojGamepadDegreesPerSecondX { 180.0f }; // right-stick yaw; sign controls direction
     CustomOptional<float> ReprojGamepadDegreesPerSecondY { 180.0f }; // right-stick pitch; sign controls direction
-    CustomOptional<float> ReprojMaxPoseAgeMs { 50.0f };   // do not warp anchors with an old source pose
+    CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose
     CustomOptional<float> ReprojPredictionMs { 2.0f };    // extrapolate recent raw input toward scanout
     CustomOptional<float> ReprojMaxRotation { 15.0f };    // clamp late rotation to limit edge artifacts
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output

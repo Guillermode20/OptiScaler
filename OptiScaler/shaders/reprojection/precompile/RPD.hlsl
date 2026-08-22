@@ -163,7 +163,10 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
     // Preserve static UI in screen space. Camera-only mode still reads motion
     // vectors solely for this HUD exclusion; it never uses them to move world colour.
-    conf *= saturate(length(delta) * 4.0f);
+    // Use a knee instead of a linear ramp from zero: far geometry under slow aim
+    // moves well under 0.25 px/frame and must stay depth-warped, while true static
+    // HUD sits at ~0 px. Zero below 0.02 px, full warp above ~0.15 px.
+    conf *= saturate((length(delta) - 0.02f) * 8.0f);
 
     float2 clampedUV = clamp(reprojUV, 0.0f, 1.0f);
     float4 warped = LastColor.SampleLevel(Bilinear, clampedUV, 0);
