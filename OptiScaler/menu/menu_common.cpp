@@ -3848,13 +3848,14 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Opt-in depth timewarp output. Disabling it always presents the game frame unchanged.");
 
         bool reprojAsync = config->ReprojAsync.value_or_default();
-        if (ImGui::Checkbox("Async DirectComposition presenter##reproj", &reprojAsync))
+        if (ImGui::Checkbox("Async virtual swapchain##reproj", &reprojAsync))
         {
             config->ReprojAsync = reprojAsync;
             state.fgChanged = true;
+            state.scChanged = true;
         }
-        ShowHelpMarker("Presents from a worker-owned composition swapchain without blocking the game thread.\n"
-                       "Falls back to the safe synchronous presenter when DirectComposition is unavailable.");
+        ShowHelpMarker("The game renders into private virtual backbuffers while a worker owns all presents on the "
+                       "main swapchain.\nRequires swapchain recreation and falls back safely when unavailable.");
 
         static const char* reprojModes[] = { "Motion Vector warp", "Depth-aware", "Camera-only timewarp" };
         int reprojMode = config->ReprojMode.value_or_default();
@@ -3956,8 +3957,10 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ImGui::TextDisabled("Real %.1f FPS | warp %.1f FPS | target %.0f Hz | warps %u | dropped %u",
                                 metrics.realFps, metrics.warpFps, metrics.targetRefreshHz, metrics.warpsPerReal,
                                 metrics.droppedWarps);
-            ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s)%s%s", metrics.poseAgeMs, metrics.queueDepth,
-                                metrics.asyncPresenter ? "async DComp" : "safe synchronous",
+            ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s%s", metrics.poseAgeMs,
+                                metrics.queueDepth,
+                                metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",
+                                metrics.gamePresentBlockMs,
                                 metrics.depthReady ? " | depth ready" : "",
                                 metrics.latePoseEstimated ? " | pose extrapolated" : "");
             if (metrics.focusLost || metrics.anchorStale || !metrics.depthReady)

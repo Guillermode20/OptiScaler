@@ -3,7 +3,6 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
 #include <menu/input/input_system.h>
-#include <dcomp.h>
 
 #include <atomic>
 #include <condition_variable>
@@ -13,9 +12,9 @@
 /// Async reprojection (ASW-style) FG output.
 /// See AsyncReprojection.md for the full design.
 ///
-/// Owns the game's real DXGI swapchain plus, when enabled, a worker-only
-/// DirectComposition swapchain. The synchronous fallback emits bounded warps before
-/// returning; the async path publishes owned packets and never writes game backbuffers.
+/// Virtualizes the game-visible backbuffers when async mode is available.  The game
+/// renders only into private textures while the worker exclusively presents the real
+/// DXGI swapchain.  The synchronous fallback retains the same ownership boundary.
 class AReproj_Dx12 : public virtual IFGFeature_Dx12
 {
   public:
@@ -37,6 +36,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool latePoseEstimated = false;
         bool calibrationReady = false;
         float mouseCalibrationConfidence = 0.0f;
+        float gamePresentBlockMs = 0.0f;
         int mouseCalibrationLagMs = 0;
     };
 
@@ -86,9 +86,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         double renderTimestamp = 0.0;
         double sourcePoseTimestamp = 0.0;
         double frameDelta = 0.0;
+        UINT syncInterval = 0;
+        UINT presentFlags = 0;
         bool hasDepth = false;
         bool hasCamera = false;
         bool hasUi = false;
+        bool warpAllowed = false;
         OptiInput::RawMouseMotion sourceMouse {};
         std::atomic<PacketState> state { PacketState::Free };
     };
@@ -110,21 +113,20 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::atomic<uint32_t> _stageTraceCount { 0 };
 
     ID3D12CommandQueue* _presentQueue = nullptr;
-    IDXGISwapChain3* _presentSwapChain = nullptr;
-    IDCompositionDevice* _compositionDevice = nullptr;
-    IDCompositionTarget* _compositionTarget = nullptr;
-    IDCompositionVisual* _compositionVisual = nullptr;
-    HWND _presentHwnd = nullptr;
+    class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use
     HANDLE _presentWaitableObject = nullptr;
-    bool _presenterUsesComposition = false;
-    bool _presenterAttached = false;
+    bool _asyncDowngraded = false;
 
     UINT _bufferCount = 0;
     UINT64 _scFenceValue = 0; // monotonic SC fence value (fence outlives context recreate)
 
-    bool CopyLastFrame(int fIndex);                // backbuffer -> _lastColor[fIndex], submitted before present
+    bool CopyLastFrame(int fIndex, ID3D12Resource* source);
+    bool VirtualAnchorReady() const;
+    HRESULT PresentVirtualFrameSync(int fIndex, ID3D12Resource* source, UINT virtualBufferIndex, UINT syncInterval,
+                                    UINT flags, bool allowWarps);
     bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] + MV (+depth) -> current backbuffer
-    bool CaptureFramePacket(int sourceIndex, int packetIndex);
+    bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
+                            bool warpAllowed);
     bool DispatchPacketWarp(int packetIndex, float timeStep);
     bool DisplayPacket(int packetIndex, bool composeUi);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
@@ -141,7 +143,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool StartAsyncPresenter();
     void StopAsyncPresenter();
     void PresenterMain();
-    bool EnsurePresenterAttached();
     bool WaitForPacketDeadline(int packetIndex, double deadlineMs);
     HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated);
     double TargetRefreshHz();
@@ -179,6 +180,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::mutex _refreshMutex;
     double _cachedRefreshHz = 0.0;
     double _lastRefreshQueryMs = 0.0;
+    double _lastRealFrameTimestamp = 0.0;
 
   protected:
     void ReleaseObjects() override final;

@@ -1,5 +1,7 @@
 # Async Reprojection Continuation Plan
 
+> Superseded presentation architecture (2026-08-22): `docs/NativeAsyncTimewarpPlan.md` replaces M5's DirectComposition presenter with game-visible virtual backbuffers and worker-exclusive presentation on the real main swapchain. The implementation is experimental and the validation matrix is reset; Deep Rock Galactic on Proton is validated only on the synchronous fallback.
+
 ## Purpose
 
 This document defines the next stages of OptiScaler's DX12 async reprojection work.

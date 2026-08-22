@@ -612,16 +612,16 @@ class Config
     // Selecting FGOutput=Reproj is the opt-in; this setting only exists as an
     // explicit off-switch on top of that selection (default resolves to on).
     CustomOptional<bool> ReprojEnabled { true };
-    CustomOptional<bool> ReprojAsync { false };           // DComp presenter; falls back to synchronous on failure
+    CustomOptional<bool> ReprojAsync { false };           // virtual game buffers + worker-owned real presents
     CustomOptional<int> ReprojMode { 1 };                 // 0 = MV warp, 1 = depth-aware, 2 = camera-only
     CustomOptional<float> ReprojStrength { 1.0f };        // blend of the warp result with the original frame
     CustomOptional<float> ReprojTimeStep { 0.5f };        // warp fraction (0.5 = midpoint between real frames)
     CustomOptional<bool> ReprojInvertMV { false };        // per-game MV sign convention
     CustomOptional<bool> ReprojUseJitterCancel { true };  // subtract jitter from the sample position
-    CustomOptional<bool> ReprojCapAtHalfRefresh { true }; // apply the existing FrameLimit half-rate behavior
+    CustomOptional<bool> ReprojCapAtHalfRefresh { true }; // apply FrameLimit only in synchronous fallback mode
     CustomOptional<int> ReprojMaxWarpFrames {
         1
-    }; // synchronous warps per real frame (1 = midpoint)
+    }; // worker warps in async mode; blocking warps in synchronous mode
     CustomOptional<float> ReprojTargetRefresh { 0.0f }; // 0 = FramerateLimit, then active display refresh
     CustomOptional<bool> ReprojUseDepth { true };       // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { false };  // suppress camera translation in depth-aware modes

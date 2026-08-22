@@ -1,6 +1,8 @@
 # Async Reprojection for OptiScaler — Implementation Plan
 
-**Status:** Proposed
+> Superseded presentation architecture (2026-08-22): `docs/NativeAsyncTimewarpPlan.md` replaces the experimental DirectComposition/secondary-swapchain design. The game now renders into wrapper-owned virtual backbuffers while the worker exclusively owns the real main swapchain. This new async path has not yet been validated in a game; Deep Rock Galactic on Proton remains validated only on the synchronous fallback.
+
+**Status:** Superseded by `docs/NativeAsyncTimewarpPlan.md`
 **Scope:** DX12 (matches OptiFG's constraint), 2x reprojection (one fake frame per real frame)
 **Audience:** anyone implementing this feature
 

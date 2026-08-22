@@ -277,9 +277,6 @@ class State
     bool vulkanSkipHooks = false;
     VkInstance VulkanInstance = nullptr;
 
-    // Reproj async presenter child window; overlay/input hooks must not adopt it
-    HWND reprojPresenterHwnd = nullptr;
-
     // Framegraph
     std::deque<double> upscaleTimes;
     std::deque<double> frameTimes;

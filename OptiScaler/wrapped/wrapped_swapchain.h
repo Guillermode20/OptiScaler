@@ -7,6 +7,11 @@
 #include "dxgi1_6.h"
 #include "d3d12.h"
 
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
+#include <vector>
+
 #define USE_LOCAL_MUTEX
 
 class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChain4 final : public IDXGISwapChain4
@@ -77,7 +82,37 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     // implement IDXGISwapChain4
     HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
 
+    // Reprojection-only virtual backbuffer interface.  While enabled the game renders
+    // into this private ring and the reprojection presenter exclusively owns _real.
+    bool InitializeReprojectionVirtualization();
+    bool IsReprojectionVirtualized() const;
+    bool IsReprojectionVirtualizationDegraded() const;
+    HRESULT GetReprojectionBuffer(UINT index, REFIID riid, void** resource);
+    HRESULT SubmitReprojectionBuffer(UINT index, ID3D12Fence* captureFence, UINT64 captureFenceValue);
+    HRESULT AdvanceReprojectionBuffer();
+    void AbortReprojectionBuffer(UINT index);
+    IDXGISwapChain3* RealSwapChain3() const { return _real3; }
+    void ShutdownReprojectionVirtualization();
+    static DXGI_FORMAT ReprojectionResourceFormat(DXGI_FORMAT format);
+
   private:
+    enum class VirtualBufferState : uint8_t
+    {
+        Available,
+        Rendering,
+        Capturing,
+    };
+
+    struct VirtualBackBuffer
+    {
+        ID3D12Resource* resource = nullptr;
+        ID3D12Fence* captureFence = nullptr;
+        UINT64 captureFenceValue = 0;
+        VirtualBufferState state = VirtualBufferState::Available;
+    };
+
+    bool PopulateSwapchainBuffers(bool virtualized);
+    bool VirtualBuffersHaveExternalReferences() const;
     IDXGISwapChain* _real = nullptr;
     IDXGISwapChain1* _real1 = nullptr;
     IDXGISwapChain2* _real2 = nullptr;
@@ -93,6 +128,17 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     IUnknown* _device2 = nullptr;
 
     HWND _handle = nullptr;
+
+    mutable std::mutex _reprojectionMutex;
+    std::condition_variable _reprojectionCv;
+    std::vector<VirtualBackBuffer> _reprojectionBuffers;
+    UINT _reprojectionIndex = 0;
+    uint64_t _reprojectionGeneration = 0;
+    uint32_t _reprojectionAdvancesInFlight = 0;
+    bool _reprojectionVirtualized = false;
+    bool _reprojectionDegraded = false;
+    bool _reprojectionShuttingDown = false;
+    HANDLE _reprojectionWaitableObject = nullptr; // borrowed from the real swapchain
 
 #ifdef USE_LOCAL_MUTEX
     OwnedMutex _localMutex;

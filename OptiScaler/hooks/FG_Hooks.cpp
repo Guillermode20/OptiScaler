@@ -20,6 +20,7 @@
 #include <misc/IdentifyGpu.h>
 #include <hooks/Reflex_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+#include <wrapped/wrapped_swapchain.h>
 
 #include <d3d12.h>
 #include <detours/detours.h>
@@ -415,21 +416,21 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
         if (o_FGSCResizeBuffers1 != nullptr)
             DetourAttach(&(PVOID&) o_FGSCResizeBuffers1, hkResizeBuffers1);
 
-        if (State::Instance().activeFgOutput == FGOutput::XeFG)
+        // The handler forwards for ordinary swapchains. Hook this unconditionally so
+        // a later ReprojAsync toggle plus swapchain recreation cannot leave the game
+        // competing with the presenter for the real auto-reset latency event.
+        if (o_FGSCGetFrameLatencyWaitableObject != nullptr)
+            DetourAttach(&(PVOID&) o_FGSCGetFrameLatencyWaitableObject, hkGetFrameLatencyWaitableObject);
+
+        if (State::Instance().activeFgOutput == FGOutput::XeFG ||
+            (State::Instance().activeFgOutput == FGOutput::Reproj &&
+             Config::Instance()->ReprojAsync.value_or_default()))
         {
             if (o_FGSCGetFullscreenState != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenState, hkGetFullscreenState);
 
             if (o_FGSCGetFullscreenDesc != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenDesc, hkGetFullscreenDesc);
-
-            if ((Config::Instance()->SimulateWaitableObject.value_or_default() ||
-                 (State::Instance().gameEngine == GameEngineType::Unity &&
-                  State::Instance().activeFgOutput == FGOutput::XeFG)) &&
-                o_FGSCGetFrameLatencyWaitableObject != nullptr)
-            {
-                DetourAttach(&(PVOID&) o_FGSCGetFrameLatencyWaitableObject, hkGetFrameLatencyWaitableObject);
-            }
         }
 
         auto detourResult = DetourTransactionCommit();
@@ -543,8 +544,19 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
 HANDLE FGHooks::hkGetFrameLatencyWaitableObject(IDXGISwapChain2* This)
 {
-    if (State::Instance().activeFgOutput != FGOutput::XeFG)
+    if (State::Instance().activeFgOutput != FGOutput::XeFG && State::Instance().activeFgOutput != FGOutput::Reproj)
         return o_FGSCGetFrameLatencyWaitableObject(This);
+    if (State::Instance().activeFgOutput == FGOutput::XeFG &&
+        !Config::Instance()->SimulateWaitableObject.value_or_default() &&
+        State::Instance().gameEngine != GameEngineType::Unity)
+        return o_FGSCGetFrameLatencyWaitableObject(This);
+    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    {
+        auto& state = State::Instance();
+        if (state.currentWrappedSwapchain != This ||
+            !static_cast<WrappedIDXGISwapChain4*>(state.currentWrappedSwapchain)->IsReprojectionVirtualized())
+            return o_FGSCGetFrameLatencyWaitableObject(This);
+    }
 
     if (_semaphore == nullptr)
     {
@@ -654,6 +666,8 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
             BufferCount = 3;
 
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        if (Config::Instance()->ReprojAsync.value_or_default())
+            SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     }
 
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}", BufferCount, Width, Height,
@@ -901,6 +915,8 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
             BufferCount = 3;
 
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        if (Config::Instance()->ReprojAsync.value_or_default())
+            SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     }
 
     LOG_DEBUG("BufferCount: {}, Width: {}, Height: {}, NewFormat:{}, SwapChainFlags: {:X}, Caller: {}", BufferCount,
@@ -1242,6 +1258,8 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         _lastPresentSyncInterval = SyncInterval;
     }
 
+    bool reprojPresentAttempted = false;
+    bool reprojPresentSucceeded = false;
     if (willPresent && fgFeatureActive)
     {
         if (state.activeFgInput == FGInput::FSRFG)
@@ -1249,11 +1267,25 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         else if (state.activeFgInput == FGInput::FSRFG30)
             FSR3FG::ffxPresentCallback();
 
-        fg->Present();
+        const bool presentSucceeded = fg->Present();
+        if (state.activeFgOutput == FGOutput::Reproj)
+        {
+            reprojPresentAttempted = true;
+            reprojPresentSucceeded = presentSucceeded;
+        }
     }
     else if (willPresent && fg != nullptr)
     {
         LOG_TRACE("FGHooks::FGPresent: FG feature exists but is inactive/paused; pass-through present only");
+        if (state.activeFgOutput == FGOutput::Reproj && state.currentWrappedSwapchain == This)
+        {
+            auto* wrapped = static_cast<WrappedIDXGISwapChain4*>(state.currentWrappedSwapchain);
+            if (wrapped->IsReprojectionVirtualized())
+            {
+                reprojPresentAttempted = true;
+                reprojPresentSucceeded = fg->Present();
+            }
+        }
     }
 
     if (willPresent && state.swapchainInteropApi == SwapchainInteropApi::None)
@@ -1267,11 +1299,13 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         state.fgPresentIsCalled = true;
 
     HRESULT result;
-    if (willPresent && state.activeFgOutput == FGOutput::Reproj && fgFeatureActive)
+    const bool reprojVirtualized = state.activeFgOutput == FGOutput::Reproj && state.currentWrappedSwapchain == This &&
+                                   static_cast<WrappedIDXGISwapChain4*>(This)->IsReprojectionVirtualized();
+    if (willPresent && state.activeFgOutput == FGOutput::Reproj && (fgFeatureActive || reprojVirtualized))
     {
         // AReproj_Dx12::Present() already presented the real frame
         // (and will present the reprojected frame once frame gen lands)
-        result = S_OK;
+        result = reprojPresentAttempted && reprojPresentSucceeded ? S_OK : DXGI_ERROR_WAS_STILL_DRAWING;
     }
     else if (pPresentParameters == nullptr)
         result = o_FGSCPresent(This, SyncInterval, Flags);
@@ -1308,7 +1342,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (willPresent && state.activeFgOutput == FGOutput::Reproj)
     {
         const bool reprojActive = fg != nullptr && fg->IsActive() && !fg->IsPaused();
-        FrameLimit::sleep(reprojActive && config->ReprojCapAtHalfRefresh.value_or_default());
+        FrameLimit::sleep(reprojActive && !reprojVirtualized && config->ReprojCapAtHalfRefresh.value_or_default());
     }
     else if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
              !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
@@ -1316,7 +1350,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
     }
 
-    if ((config->SimulateWaitableObject.value_or_default() ||
+    if ((reprojVirtualized || config->SimulateWaitableObject.value_or_default() ||
          (state.gameEngine == GameEngineType::Unity && state.activeFgOutput == FGOutput::XeFG)) &&
         _semaphore != nullptr)
     {
@@ -1391,7 +1425,11 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
             DXGI_SWAP_CHAIN_DESC scDesc {};
             ((IDXGISwapChain*) This)->GetDesc(&scDesc);
 
-            // Release swapchain backbuffers to prevent errors when releasing FG swapchain
+            // Virtual backbuffers are wrapper-owned and must follow normal COM lifetime.
+            const bool reprojVirtualized = State::Instance().activeFgOutput == FGOutput::Reproj &&
+                                           State::Instance().currentWrappedSwapchain == This &&
+                                           static_cast<WrappedIDXGISwapChain4*>(This)->IsReprojectionVirtualized();
+            if (!reprojVirtualized)
             {
                 for (UINT i = 0; i < scDesc.BufferCount; i++)
                 {

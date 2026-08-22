@@ -418,7 +418,313 @@ WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* p
     LOG_INFO("{} created, real: {:X}, refCount: {}", _id, (UINT64) real, refCount);
 }
 
-WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() {}
+WrappedIDXGISwapChain4::~WrappedIDXGISwapChain4() { ShutdownReprojectionVirtualization(); }
+
+DXGI_FORMAT WrappedIDXGISwapChain4::ReprojectionResourceFormat(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+        return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8X8_UNORM;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    default:
+        return format;
+    }
+}
+
+bool WrappedIDXGISwapChain4::PopulateSwapchainBuffers(bool virtualized)
+{
+    State::Instance().scBuffers.clear();
+    if (virtualized)
+    {
+        for (const auto& entry : _reprojectionBuffers)
+            State::Instance().scBuffers.push_back(entry.resource);
+        return !_reprojectionBuffers.empty();
+    }
+
+    DXGI_SWAP_CHAIN_DESC desc {};
+    if (FAILED(_real->GetDesc(&desc)))
+        return false;
+    for (UINT i = 0; i < desc.BufferCount; ++i)
+    {
+        IUnknown* buffer = nullptr;
+        if (SUCCEEDED(_real->GetBuffer(i, IID_PPV_ARGS(&buffer))))
+        {
+            State::Instance().scBuffers.push_back(buffer);
+            buffer->Release();
+        }
+    }
+    return State::Instance().scBuffers.size() == desc.BufferCount;
+}
+
+bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
+{
+    std::scoped_lock lock(_reprojectionMutex);
+    if (_reprojectionVirtualized)
+        return true;
+    if (_reprojectionShuttingDown || !Config::Instance()->ReprojAsync.value_or_default() || _real2 == nullptr ||
+        _real3 == nullptr)
+        return false;
+
+    DXGI_SWAP_CHAIN_DESC desc {};
+    if (FAILED(_real->GetDesc(&desc)) ||
+        (desc.SwapEffect != DXGI_SWAP_EFFECT_FLIP_DISCARD && desc.SwapEffect != DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL))
+        return false;
+
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12Device* device = nullptr;
+    if (_device == nullptr || FAILED(_device->QueryInterface(IID_PPV_ARGS(&queue))) ||
+        FAILED(queue->GetDevice(IID_PPV_ARGS(&device))))
+    {
+        SAFE_RELEASE(queue);
+        return false;
+    }
+
+    _reprojectionWaitableObject = _real2->GetFrameLatencyWaitableObject();
+    if (_reprojectionWaitableObject == nullptr)
+    {
+        device->Release();
+        queue->Release();
+        return false;
+    }
+
+    std::vector<VirtualBackBuffer> buffers(desc.BufferCount);
+    HRESULT result = S_OK;
+    for (UINT i = 0; i < desc.BufferCount; ++i)
+    {
+        ID3D12Resource* realBuffer = nullptr;
+        result = _real->GetBuffer(i, IID_PPV_ARGS(&realBuffer));
+        if (FAILED(result))
+            break;
+        auto resourceDesc = realBuffer->GetDesc();
+        resourceDesc.Format = ReprojectionResourceFormat(resourceDesc.Format);
+        realBuffer->Release();
+
+        const auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
+        result =
+            device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &resourceDesc, D3D12_RESOURCE_STATE_PRESENT,
+                                            nullptr, IID_PPV_ARGS(&buffers[i].resource));
+        if (FAILED(result))
+            break;
+        buffers[i].resource->SetName(L"Reproj_VirtualBackBuffer");
+    }
+    device->Release();
+    queue->Release();
+
+    if (FAILED(result))
+    {
+        for (auto& entry : buffers)
+            SAFE_RELEASE(entry.resource);
+        LOG_WARN("Reproj: virtual backbuffer creation failed: {:X}", (UINT) result);
+        return false;
+    }
+
+    _reprojectionBuffers = std::move(buffers);
+    _reprojectionIndex = 0;
+    _reprojectionBuffers[0].state = VirtualBufferState::Rendering;
+    _reprojectionDegraded = false;
+    _reprojectionVirtualized = true;
+    ++_reprojectionGeneration;
+    PopulateSwapchainBuffers(true);
+    LOG_INFO("Reproj: virtualized {} game backbuffers", _reprojectionBuffers.size());
+    return true;
+}
+
+bool WrappedIDXGISwapChain4::IsReprojectionVirtualized() const
+{
+    std::scoped_lock lock(_reprojectionMutex);
+    return _reprojectionVirtualized;
+}
+
+bool WrappedIDXGISwapChain4::IsReprojectionVirtualizationDegraded() const
+{
+    std::scoped_lock lock(_reprojectionMutex);
+    return _reprojectionDegraded;
+}
+
+HRESULT WrappedIDXGISwapChain4::GetReprojectionBuffer(UINT index, REFIID riid, void** resource)
+{
+    if (resource == nullptr)
+        return E_POINTER;
+    *resource = nullptr;
+    std::scoped_lock lock(_reprojectionMutex);
+    if (!_reprojectionVirtualized || index >= _reprojectionBuffers.size())
+        return DXGI_ERROR_INVALID_CALL;
+    return _reprojectionBuffers[index].resource->QueryInterface(riid, resource);
+}
+
+HRESULT WrappedIDXGISwapChain4::SubmitReprojectionBuffer(UINT index, ID3D12Fence* captureFence,
+                                                         UINT64 captureFenceValue)
+{
+    if (captureFence == nullptr || captureFenceValue == 0)
+        return E_INVALIDARG;
+    std::scoped_lock lock(_reprojectionMutex);
+    if (_reprojectionShuttingDown || !_reprojectionVirtualized || index != _reprojectionIndex ||
+        index >= _reprojectionBuffers.size() || _reprojectionBuffers[index].state != VirtualBufferState::Rendering)
+        return DXGI_ERROR_INVALID_CALL;
+    auto& entry = _reprojectionBuffers[index];
+    captureFence->AddRef();
+    entry.captureFence = captureFence;
+    entry.captureFenceValue = captureFenceValue;
+    entry.state = VirtualBufferState::Capturing;
+    return S_OK;
+}
+
+HRESULT WrappedIDXGISwapChain4::AdvanceReprojectionBuffer()
+{
+    ID3D12Fence* fence = nullptr;
+    UINT64 fenceValue = 0;
+    UINT next = 0;
+    uint64_t generation = 0;
+    {
+        std::scoped_lock lock(_reprojectionMutex);
+        if (_reprojectionShuttingDown || !_reprojectionVirtualized || _reprojectionBuffers.empty() ||
+            _reprojectionIndex >= _reprojectionBuffers.size() ||
+            _reprojectionBuffers[_reprojectionIndex].state != VirtualBufferState::Capturing)
+            return DXGI_ERROR_INVALID_CALL;
+        generation = _reprojectionGeneration;
+        ++_reprojectionAdvancesInFlight;
+        next = (_reprojectionIndex + 1) % static_cast<UINT>(_reprojectionBuffers.size());
+        auto& entry = _reprojectionBuffers[next];
+        fence = entry.captureFence;
+        fenceValue = entry.captureFenceValue;
+        if (fence != nullptr)
+            fence->AddRef();
+    }
+
+    HRESULT result = S_OK;
+    const auto completedValue = fence != nullptr ? fence->GetCompletedValue() : 0;
+    if (fence != nullptr && completedValue == UINT64_MAX)
+    {
+        result = DXGI_ERROR_DEVICE_REMOVED;
+        fence->Release();
+    }
+    else if (fence != nullptr && completedValue < fenceValue)
+    {
+        HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (event == nullptr || FAILED(fence->SetEventOnCompletion(fenceValue, event)) ||
+            WaitForSingleObject(event, 5000) != WAIT_OBJECT_0)
+            result = DXGI_ERROR_WAS_STILL_DRAWING;
+        SAFE_CLOSE_HANDLE(event);
+        fence->Release();
+    }
+    else
+        SAFE_RELEASE(fence);
+
+    std::scoped_lock lock(_reprojectionMutex);
+    const auto finishAdvance = [this]()
+    {
+        --_reprojectionAdvancesInFlight;
+        _reprojectionCv.notify_all();
+    };
+    if (_reprojectionShuttingDown || !_reprojectionVirtualized || generation != _reprojectionGeneration ||
+        _reprojectionBuffers.empty() || next >= _reprojectionBuffers.size() ||
+        _reprojectionIndex >= _reprojectionBuffers.size())
+    {
+        finishAdvance();
+        return DXGI_ERROR_INVALID_CALL;
+    }
+    if (FAILED(result))
+    {
+        _reprojectionDegraded = true;
+        LOG_ERROR("Reproj: virtual backbuffer {} did not retire: {:X}", next, (UINT) result);
+        finishAdvance();
+        return result;
+    }
+    auto& current = _reprojectionBuffers[_reprojectionIndex];
+    auto& entry = _reprojectionBuffers[next];
+    current.state = VirtualBufferState::Available;
+    SAFE_RELEASE(entry.captureFence);
+    entry.captureFenceValue = 0;
+    entry.state = VirtualBufferState::Rendering;
+    _reprojectionIndex = next;
+    finishAdvance();
+    return S_OK;
+}
+
+void WrappedIDXGISwapChain4::AbortReprojectionBuffer(UINT index)
+{
+    std::scoped_lock lock(_reprojectionMutex);
+    if (_reprojectionVirtualized && index == _reprojectionIndex && index < _reprojectionBuffers.size() &&
+        _reprojectionBuffers[index].state == VirtualBufferState::Rendering)
+        _reprojectionBuffers[index].state = VirtualBufferState::Rendering;
+}
+
+bool WrappedIDXGISwapChain4::VirtualBuffersHaveExternalReferences() const
+{
+    for (const auto& entry : _reprojectionBuffers)
+    {
+        entry.resource->AddRef();
+        if (entry.resource->Release() > 1)
+            return true;
+    }
+    return false;
+}
+
+void WrappedIDXGISwapChain4::ShutdownReprojectionVirtualization()
+{
+    std::vector<VirtualBackBuffer> buffers;
+    {
+        std::unique_lock lock(_reprojectionMutex);
+        if (_reprojectionShuttingDown)
+        {
+            _reprojectionCv.wait(lock, [this]() { return !_reprojectionShuttingDown; });
+            return;
+        }
+        if (!_reprojectionVirtualized && _reprojectionBuffers.empty() && _reprojectionAdvancesInFlight == 0)
+            return;
+        _reprojectionShuttingDown = true;
+        _reprojectionVirtualized = false;
+        _reprojectionDegraded = false;
+        _reprojectionWaitableObject = nullptr;
+        ++_reprojectionGeneration;
+        _reprojectionCv.wait(lock, [this]() { return _reprojectionAdvancesInFlight == 0; });
+        buffers.swap(_reprojectionBuffers);
+        _reprojectionIndex = 0;
+    }
+
+    uint32_t leakedBuffers = 0;
+    for (auto& entry : buffers)
+    {
+        bool safeToRelease = true;
+        if (entry.captureFence != nullptr && entry.captureFenceValue != 0)
+        {
+            const auto completedValue = entry.captureFence->GetCompletedValue();
+            if (completedValue != UINT64_MAX && completedValue < entry.captureFenceValue)
+            {
+                HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                safeToRelease = event != nullptr &&
+                                SUCCEEDED(entry.captureFence->SetEventOnCompletion(entry.captureFenceValue, event)) &&
+                                WaitForSingleObject(event, 5000) == WAIT_OBJECT_0;
+                SAFE_CLOSE_HANDLE(event);
+            }
+        }
+        if (safeToRelease)
+        {
+            SAFE_RELEASE(entry.captureFence);
+            SAFE_RELEASE(entry.resource);
+        }
+        else
+        {
+            ++leakedBuffers;
+            LOG_ERROR(
+                "Reproj: virtual backbuffer fence did not retire; preserving GPU resources to avoid use-after-free");
+        }
+    }
+    PopulateSwapchainBuffers(false);
+    {
+        std::scoped_lock lock(_reprojectionMutex);
+        _reprojectionShuttingDown = false;
+        _reprojectionCv.notify_all();
+    }
+    if (leakedBuffers != 0)
+        LOG_ERROR("Reproj: intentionally retained {} unsafe virtual backbuffer allocation(s)", leakedBuffers);
+}
 
 //
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::QueryInterface(REFIID riid, void** ppvObject)
@@ -549,6 +855,7 @@ ULONG STDMETHODCALLTYPE WrappedIDXGISwapChain4::Release()
                 State::Instance().currentFGSwapchain = nullptr;
         }
 
+        ShutdownReprojectionVirtualization();
         auto refCount = _real->Release();
 
         // Disabled for now, cause issues with some games
@@ -637,6 +944,15 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::Present(UINT SyncInterval, UIN
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetBuffer(UINT Buffer, REFIID riid, void** ppSurface)
 {
+    {
+        std::scoped_lock lock(_reprojectionMutex);
+        if (_reprojectionVirtualized)
+        {
+            if (Buffer >= _reprojectionBuffers.size())
+                return DXGI_ERROR_INVALID_CALL;
+            return _reprojectionBuffers[Buffer].resource->QueryInterface(riid, ppSurface);
+        }
+    }
     auto result = _real->GetBuffer(Buffer, riid, ppSurface);
     return result;
 }
@@ -706,6 +1022,20 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
                                                                 DXGI_FORMAT NewFormat, UINT SwapChainFlags)
 {
     LOG_DEBUG("");
+    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+
+    const bool recreateVirtualization = IsReprojectionVirtualized();
+    if (recreateVirtualization)
+    {
+        std::scoped_lock reprojectionLock(_reprojectionMutex);
+        if (VirtualBuffersHaveExternalReferences())
+        {
+            LOG_WARN("Reproj: ResizeBuffers rejected while virtual backbuffers are referenced");
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+    if (recreateVirtualization)
+        ShutdownReprojectionVirtualization();
 
 #ifdef USE_LOCAL_MUTEX
     // dlssg calls this from present it seems
@@ -913,6 +1243,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         }
     }
 
+    if (result == S_OK && recreateVirtualization && !InitializeReprojectionVirtualization())
+        LOG_WARN("Reproj: virtualization unavailable after ResizeBuffers; synchronous fallback required");
+
     LOG_DEBUG("result: {0:X}", (UINT) result);
 
     if (State::Instance().currentFG != nullptr && Config::Instance()->FGUseMutexForSwapchain.value_or_default())
@@ -1059,6 +1392,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetMatrixTransform(DXGI_MATRIX
 
 UINT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetCurrentBackBufferIndex(void)
 {
+    {
+        std::scoped_lock lock(_reprojectionMutex);
+        if (_reprojectionVirtualized)
+            return _reprojectionIndex;
+    }
     auto index = _real3->GetCurrentBackBufferIndex();
     // LOG_TRACE("index: {}", index);
     return index;
@@ -1086,6 +1424,20 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
                                                                  IUnknown* const* ppPresentQueue)
 {
     LOG_DEBUG("");
+    MenuOverlayDx::CleanupRenderTarget(true, _handle);
+
+    const bool recreateVirtualization = IsReprojectionVirtualized();
+    if (recreateVirtualization)
+    {
+        std::scoped_lock reprojectionLock(_reprojectionMutex);
+        if (VirtualBuffersHaveExternalReferences())
+        {
+            LOG_WARN("Reproj: ResizeBuffers1 rejected while virtual backbuffers are referenced");
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+    if (recreateVirtualization)
+        ShutdownReprojectionVirtualization();
 
 #ifdef USE_LOCAL_MUTEX
     // dlssg calls this from present it seems
@@ -1313,6 +1665,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
             buffer->Release();
         }
     }
+
+    if (result == S_OK && recreateVirtualization && !InitializeReprojectionVirtualization())
+        LOG_WARN("Reproj: virtualization unavailable after ResizeBuffers1; synchronous fallback required");
 
     LOG_DEBUG("result: {0:X}", (UINT) result);
 
