@@ -248,7 +248,11 @@ static VkResult hkvkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPres
 
     // ??? TODO: if we are hooking dxvk's vulkan calls then this present call could be either coming from dxvk or from a
     // native vk game
-    if (!IdentifyGpu::getPrimaryGpu().usesDxvk)
+    // VKD3D-Proton exposes a Vulkan queue for a D3D12 game. Once the wrapped
+    // D3D12 swapchain/device is known, the overlay's Vulkan present must not
+    // relabel the game API and disable DX12-only UI options.
+    if (!IdentifyGpu::getPrimaryGpu().usesDxvk && State::Instance().currentD3D12Device == nullptr &&
+        State::Instance().currentFGSwapchain == nullptr)
         State::Instance().swapchainApi = Vulkan;
 
     // Tick feature to let it know if it's frozen
