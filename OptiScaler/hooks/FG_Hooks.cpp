@@ -676,7 +676,11 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
         Config::Instance()->ReprojAsync.value_or_default())
     {
         DXGI_SWAP_CHAIN_DESC scDesc {};
-        if (This->GetDesc(&scDesc) == S_OK &&
+        // Compare against the real chain: wrapped GetDesc() reports the game-visible count.
+        IDXGISwapChain* realSc = This;
+        if (State::Instance().currentWrappedSwapchain == This)
+            realSc = static_cast<WrappedIDXGISwapChain4*>(This)->RealSwapChain3();
+        if (realSc != nullptr && realSc->GetDesc(&scDesc) == S_OK &&
             (BufferCount == 0 || BufferCount == scDesc.BufferCount) &&
             (Width == 0 || Width == scDesc.BufferDesc.Width) &&
             (Height == 0 || Height == scDesc.BufferDesc.Height) &&
@@ -944,7 +948,11 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
         Config::Instance()->ReprojAsync.value_or_default())
     {
         DXGI_SWAP_CHAIN_DESC scDesc {};
-        if (This->GetDesc(&scDesc) == S_OK &&
+        // Compare against the real chain: wrapped GetDesc() reports the game-visible count.
+        IDXGISwapChain* realSc = This;
+        if (State::Instance().currentWrappedSwapchain == This)
+            realSc = static_cast<WrappedIDXGISwapChain4*>(This)->RealSwapChain3();
+        if (realSc != nullptr && realSc->GetDesc(&scDesc) == S_OK &&
             (BufferCount == 0 || BufferCount == scDesc.BufferCount) &&
             (Width == 0 || Width == scDesc.BufferDesc.Width) &&
             (Height == 0 || Height == scDesc.BufferDesc.Height) &&

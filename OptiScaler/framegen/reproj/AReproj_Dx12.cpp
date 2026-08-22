@@ -1843,6 +1843,7 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
             LOG_WARN("Reproj: waitable main swapchain unavailable ({:X}); using safe synchronous presenter",
                      (UINT) result);
             desc->Flags = originalFlags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            desc->BufferCount = originalBufferCount; // keep the engine's expected buffer count
             result = realFactory->CreateSwapChain(realQueue, desc, &rawSwapChain);
         }
     }
@@ -1875,7 +1876,8 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
             const bool alreadyWrapped =
                 SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
             if (!alreadyWrapped)
-                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false);
+                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false,
+                                                     originalBufferCount);
 
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();
@@ -2015,6 +2017,7 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
             LOG_WARN("Reproj: waitable main swapchain unavailable ({:X}); using safe synchronous presenter",
                      (UINT) result);
             desc->Flags = originalFlags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            desc->BufferCount = originalBufferCount; // keep the engine's expected buffer count
             result = factory2->CreateSwapChainForHwnd(realQueue, hwnd, desc, pFullscreenDesc, nullptr, &rawSwapChain);
         }
     }
@@ -2048,7 +2051,8 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
             const bool alreadyWrapped =
                 SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
             if (!alreadyWrapped)
-                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false);
+                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false,
+                                                     originalBufferCount);
 
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();

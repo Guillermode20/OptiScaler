@@ -17,7 +17,8 @@
 class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChain4 final : public IDXGISwapChain4
 {
   public:
-    WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP);
+    WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags, bool isUWP,
+                           UINT gameBufferCount = 0);
     virtual ~WrappedIDXGISwapChain4();
 
     // implement IUnknown
@@ -136,6 +137,7 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     uint64_t _reprojectionGeneration = 0;
     uint32_t _reprojectionAdvancesInFlight = 0;
     bool _reprojectionVirtualized = false;
+    UINT _gameBufferCount = 0; // buffer count the game expects (may be lower than the real chain's)
     bool _reprojectionDegraded = false;
     bool _reprojectionShuttingDown = false;
     HANDLE _reprojectionWaitableObject = nullptr; // borrowed from the real swapchain

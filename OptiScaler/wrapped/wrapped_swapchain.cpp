@@ -389,8 +389,8 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 }
 
 WrappedIDXGISwapChain4::WrappedIDXGISwapChain4(IDXGISwapChain* real, IUnknown* pDevice, HWND hWnd, UINT flags,
-                                               bool isUWP)
-    : _real(real), _device(pDevice), _handle(hWnd), _refcount(1), _uwp(isUWP)
+                                               bool isUWP, UINT gameBufferCount)
+    : _real(real), _device(pDevice), _handle(hWnd), _refcount(1), _uwp(isUWP), _gameBufferCount(gameBufferCount)
 {
     _id = ++scCount;
     _lastFlags = flags;
@@ -494,7 +494,12 @@ bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
         return false;
     }
 
-    std::vector<VirtualBackBuffer> buffers(desc.BufferCount);
+    // The game only ever sees (and caches) this many buffers; async keeps an extra real
+    // buffer as the worker's free present slot. Mismatching these makes engines that
+    // enumerate by GetDesc() read past their own arrays (KCD2 crash).
+    const auto visibleCount =
+        _gameBufferCount != 0 && _gameBufferCount < desc.BufferCount ? _gameBufferCount : desc.BufferCount;
+    std::vector<VirtualBackBuffer> buffers(visibleCount);
     HRESULT result = S_OK;
     for (UINT i = 0; i < desc.BufferCount; ++i)
     {
@@ -532,7 +537,8 @@ bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
     _reprojectionVirtualized = true;
     ++_reprojectionGeneration;
     PopulateSwapchainBuffers(true);
-    LOG_INFO("Reproj: virtualized {} game backbuffers", _reprojectionBuffers.size());
+    LOG_INFO("Reproj: virtualized {} game backbuffers (real chain has {})", _reprojectionBuffers.size(),
+             desc.BufferCount);
     return true;
 }
 
@@ -1025,7 +1031,14 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetFullscreenState(BOOL* pFull
     return _real->GetFullscreenState(pFullscreen, ppTarget);
 }
 
-HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc) { return _real->GetDesc(pDesc); }
+HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc)
+{
+    auto result = _real->GetDesc(pDesc);
+    // Async reprojection may own more real buffers than the game expects; keep its view consistent.
+    if (result == S_OK && _gameBufferCount != 0 && pDesc->BufferCount > _gameBufferCount)
+        pDesc->BufferCount = _gameBufferCount;
+    return result;
+}
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount, UINT Width, UINT Height,
                                                                 DXGI_FORMAT NewFormat, UINT SwapChainFlags)
@@ -1293,7 +1306,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetLastPresentCount(UINT* pLas
 //
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc1(DXGI_SWAP_CHAIN_DESC1* pDesc)
 {
-    return _real1->GetDesc1(pDesc);
+    auto result = _real1->GetDesc1(pDesc);
+    if (result == S_OK && _gameBufferCount != 0 && pDesc->BufferCount > _gameBufferCount)
+        pDesc->BufferCount = _gameBufferCount;
+    return result;
 }
 
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc)
