@@ -7,6 +7,7 @@
 #include <nvapi/fakenvapi.h>
 #include <hooks/Reflex_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
+#include <hooks/FG_Hooks.h>
 
 #include <menu/menu_overlay_dx.h>
 
@@ -1144,6 +1145,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
 #endif
 #endif
 
+    // The real swapchain shares the vtable detoured by FGHooks. Bypass that hook while
+    // forwarding the internal resize or it re-enters this wrapper indefinitely.
+    FGHooks::SkipResize(true);
     if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
     {
         ScopedSkipHeapCapture skipHeapCapture {};
@@ -1156,6 +1160,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers(UINT BufferCount
         _lastFlags = SwapChainFlags;
         result = _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
     }
+    FGHooks::SkipResize(false);
 
     if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)
         Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);
@@ -1568,6 +1573,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
 #endif
 #endif
 
+    // ResizeBuffers1 can itself fall through to ResizeBuffers on some DXGI
+    // implementations, so bypass both detours for the internal real call.
+    FGHooks::SkipResize(true);
+    FGHooks::SkipResize1(true);
     if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
     {
         ScopedSkipHeapCapture skipHeapCapture {};
@@ -1582,6 +1591,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::ResizeBuffers1(UINT BufferCoun
         result = _real3->ResizeBuffers1(BufferCount, Width, Height, Format, SwapChainFlags, pCreationNodeMask,
                                         ppPresentQueue);
     }
+    FGHooks::SkipResize1(false);
+    FGHooks::SkipResize(false);
 
     if (result == DXGI_ERROR_DEVICE_REMOVED && State::Instance().currentD3D12Device != nullptr)
         Util::GetDeviceRemovedReason(State::Instance().currentD3D12Device);

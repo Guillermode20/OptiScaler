@@ -28,6 +28,8 @@ class FGHooks
     // hooked vtable without re-entering FGPresent (hkFGPresent passes straight through).
     static void SkipPresent(bool skip) { _skipPresent = skip; }
     static void SkipPresent1(bool skip) { _skipPresent1 = skip; }
+    static void SkipResize(bool skip) { _skipResize = skip; }
+    static void SkipResize1(bool skip) { _skipResize1 = skip; }
 
     // Last SyncInterval/Flags seen by FGPresent, so a feature that presents itself
     // can reproduce the game's present behavior.
@@ -60,8 +62,8 @@ class FGHooks
     inline static HWND _hwnd = nullptr;
     inline static IDXGISwapChain* _dx12InteropPresentSC = nullptr;
     inline static HWND _dx12InteropPresentHwnd = nullptr;
-    inline static bool _skipResize = false;
-    inline static bool _skipResize1 = false;
+    inline static thread_local bool _skipResize = false;
+    inline static thread_local bool _skipResize1 = false;
     inline static thread_local bool _skipPresent = false;
     inline static thread_local bool _skipPresent1 = false;
     inline static UINT _lastPresentFlags = 0;
