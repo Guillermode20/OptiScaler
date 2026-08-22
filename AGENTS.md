@@ -57,6 +57,8 @@ Register new files in `OptiScaler/OptiScaler.vcxproj` and `OptiScaler/OptiScaler
 
 ## Installing into a game (Linux/Proton)
 
+- **Deep Rock Galactic live-validation target:** `/var/home/whick/.local/share/Steam/steamapps/common/Deep Rock Galactic/FSD/Binaries/Win64/` next to `FSD-Win64-Shipping.exe`. Use this after every successful reprojection build unless told otherwise; do not install beside the root `FSD.exe` launcher.
+
 1. For **Unreal Engine** games, install next to the *real* executable — usually `<game>/<Project>/Binaries/Win64/` — not the root launcher `.exe`.
 2. Copy `OptiScaler.dll` -> `dxgi.dll` (default injection name), plus `OptiScaler.ini`, `OptiScaler/`, and `Licenses/` into that folder.
 3. Add to Steam launch options: `WINEDLLOVERRIDES=dxgi=n,b %COMMAND%`.
