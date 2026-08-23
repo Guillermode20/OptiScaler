@@ -363,6 +363,7 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.invertedDepth = IsInvertedDepth() ? 1 : 0;
     cb.mode = config->ReprojMode.value_or_default();
     cb.debugView = config->ReprojDebugView.value_or_default() ? 1 : 0;
+    cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
 
@@ -534,6 +535,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     _lastRealFrameTimestamp = now;
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
+    packet.constants.hudlessSource = packet.hasUi ? 1u : 0u;
     const auto cameraTimestamp = _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.
@@ -742,6 +744,7 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     RP_Constants cb {};
     FillConstants(fIndex, cb);
     cb.timeStep = timeStep;
+    cb.hudlessSource = _syncHasUi[fIndex] ? 1u : 0u;
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;

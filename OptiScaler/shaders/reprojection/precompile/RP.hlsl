@@ -11,6 +11,7 @@ cbuffer RP_Constants : register(b0)
     uint   InvertedDepth;
     uint   Mode;
     uint   DebugView;
+    uint   HudlessSource;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -54,9 +55,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     // Clamping an off-screen source stretches the last edge texel across the
     // viewport. Keep the real-frame pixels instead and feather the transition.
     float2 unboundedSrcUV = uv - deltaUV * TimeStep;
-    float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
-                             min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
-    float coverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;
+    bool covered = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f);
+    float2 edgePixels = min(unboundedSrcUV, 1.0f - unboundedSrcUV) * float2(DisplaySize);
+    float coverage = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
     float2 srcUV = clamp(unboundedSrcUV, 0.0f, 1.0f);
 
     float4 warped = LastColor.SampleLevel(Bilinear, srcUV, 0);

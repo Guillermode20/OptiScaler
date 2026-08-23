@@ -62,6 +62,18 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("PresentCompositorFrame(1, 0, !newAnchor, false)", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
+    def test_runtime_and_precompiled_shader_sources_match(self):
+        root = Path(__file__).resolve().parents[2]
+        common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")
+        pairs = {
+            "RPMV_ShaderCode": root / "OptiScaler/shaders/reprojection/precompile/RP.hlsl",
+            "RPD_ShaderCode": root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl",
+        }
+        for symbol, source_path in pairs.items():
+            marker = f'{symbol} = R"(\n'
+            embedded = common.split(marker, 1)[1].split('\n)";', 1)[0]
+            self.assertEqual(embedded.strip(), source_path.read_text(encoding="utf-8").strip())
+
 
 if __name__ == "__main__":
     unittest.main()

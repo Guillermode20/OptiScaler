@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SysUtils.h"
+#include <cstddef>
 
 // Constant buffer shared by the reprojection compute shaders (mirrored in
 // RP.hlsl / RPD.hlsl). Aligned to 256 bytes for D3D12 CBV requirements.
@@ -21,6 +22,7 @@ struct alignas(256) RP_Constants
     uint32_t invertedDepth;
     uint32_t mode; // 0 = MV, 1 = depth, 2 = basis rotation
     uint32_t debugView;
+    uint32_t hudlessSource; // source excludes UI; skip MV-based HUD rejection
     // --- Mode 1 (depth-aware) camera block, current frame ---
     float cameraPosition[4];
     float cameraUp[4];
@@ -37,6 +39,8 @@ struct alignas(256) RP_Constants
     float cameraAspect;
 };
 
+static_assert(offsetof(RP_Constants, cameraPosition) == 64, "RP_Constants must match HLSL cbuffer packing");
+
 // v1: motion-vector warp. Sample _lastColor at (p - MV * TimeStep).
 inline static std::string RPMV_ShaderCode = R"(
 cbuffer RP_Constants : register(b0)
@@ -50,7 +54,9 @@ cbuffer RP_Constants : register(b0)
     uint   InvertMV;
     uint   JitterCancelled;
     uint   InvertedDepth;
+    uint   Mode;
     uint   DebugView;
+    uint   HudlessSource;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -72,13 +78,6 @@ RWTexture2D<float4> Output  : register(u0);
 
 SamplerState Bilinear : register(s0);
 
-float3 RotateAxis(float3 v, float3 axis, float angle)
-{
-    float s, c;
-    sincos(angle, s, c);
-    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0f - c);
-}
-
 [numthreads(16, 16, 1)]
 void CSMain(uint3 dtid : SV_DispatchThreadID)
 {
@@ -98,10 +97,12 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     // Texel displacement -> normalized UV offset, then move BACKWARD along the flow
     float2 deltaUV = delta / float2(MVSize);
 
+    // Clamping an off-screen source stretches the last edge texel across the
+    // viewport. Keep the real-frame pixels instead and feather the transition.
     float2 unboundedSrcUV = uv - deltaUV * TimeStep;
-    float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
-                             min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
-    float coverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;
+    bool covered = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f);
+    float2 edgePixels = min(unboundedSrcUV, 1.0f - unboundedSrcUV) * float2(DisplaySize);
+    float coverage = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
     float2 srcUV = clamp(unboundedSrcUV, 0.0f, 1.0f);
 
     float4 warped = LastColor.SampleLevel(Bilinear, srcUV, 0);
@@ -133,6 +134,7 @@ cbuffer RP_Constants : register(b0)
     uint   InvertedDepth;
     uint   Mode;
     uint   DebugView;
+    uint   HudlessSource;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -151,6 +153,8 @@ Texture2D<float4> LastColor : register(t0);
 Texture2D<float4> Velocity  : register(t1);
 Texture2D<float4> Depth     : register(t2);
 RWTexture2D<float4> Output  : register(u0);
+
+SamplerState Bilinear : register(s0);
 
 // Standard perspective depth -> view-space Z (positive distance from camera plane).
 // Invalid far planes/depth values are handled by the confidence test below.
@@ -179,73 +183,96 @@ float3 RotateAxis(float3 v, float3 axis, float angle)
 void CSMain(uint3 dtid : SV_DispatchThreadID)
 {
     float2 uv = (dtid.xy + 0.5f) / float2(DisplaySize);
-
-    // The MV texture covers the full frame (possibly at render resolution), so its UV maps 1:1
     float2 mvUV = uv;
-    float2 mv = Velocity.SampleLevel(Bilinear, mvUV, 0).xy;
+    float2 delta = 0.0f;
 
-    float2 delta = mv * float2(MVScaleX, MVScaleY);
-    if (JitterCancelled)
-        delta -= float2(JitterX, JitterY);
-    if (InvertMV)
-        delta = -delta;
+    // Rotation-only warps with a separately composited UI do not need motion
+    // vectors. Keep the sample only when it is required for HUD rejection or
+    // by the depth/MV paths.
+    if (Mode != 2 || !HudlessSource)
+    {
+        delta = Velocity.SampleLevel(Bilinear, mvUV, 0).xy * float2(MVScaleX, MVScaleY);
+        if (JitterCancelled)
+            delta -= float2(JitterX, JitterY);
+        if (InvertMV)
+            delta = -delta;
+    }
 
-    // MV-warp fallback sample (also the v1 result)
-    float2 deltaUV = delta / float2(MVSize);
-    float2 unboundedSrcUV = uv - deltaUV * TimeStep;
-    float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
-                             min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
-    float mvCoverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;
-    float2 srcUV = clamp(unboundedSrcUV, 0.0f, 1.0f);
-    float4 mvWarp = LastColor.SampleLevel(Bilinear, srcUV, 0);
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
-
-    // ---- depth-aware reprojection ----
     float tanHalf = tan(CameraVFov * 0.5f);
     float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-
-    float3 camPos    = CameraPos.xyz;
-    float3 right     = normalize(CameraRight.xyz);
-    float3 up        = normalize(CameraUp.xyz);
-    float3 forward   = normalize(CameraForward.xyz);
-
-    float depthZ = LinearizeDepth(Depth.SampleLevel(Bilinear, mvUV, 0).r,
-                                  CameraNear, CameraFar, InvertedDepth);
-    float3 worldPos = ReconstructWorld(ndc, depthZ, camPos, right, up, forward, tanHalf, CameraAspect);
-
-    // Warp target pose: linearly project the previous->current pose delta
-    // forward by TimeStep.
+    float3 right = normalize(CameraRight.xyz);
+    float3 up = normalize(CameraUp.xyz);
+    float3 forward = normalize(CameraForward.xyz);
     const float s = 1.0f + TimeStep;
-    float3 midPos     = lerp(PrevCameraPos.xyz, camPos, s);
-    float3 midRight   = normalize(lerp(PrevCameraRight.xyz, right, s));
-    float3 midUp      = normalize(lerp(PrevCameraUp.xyz, up, s));
+    float3 midRight = normalize(lerp(PrevCameraRight.xyz, right, s));
+    float3 midUp = normalize(lerp(PrevCameraUp.xyz, up, s));
     float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
 
-    // Mode 2 is rotation-only timewarp. Keep the source position so the warp
-    // cannot reveal geometry through a translation that we cannot synthesize.
     if (Mode == 2)
-        midPos = camPos;
+    {
+        // Translation cancels for a rotation-only warp. Project the view ray
+        // directly instead of reconstructing world positions and sampling
+        // depth six times per output pixel.
+        float3 viewDir =
+            normalize(right * ndc.x * CameraAspect * tanHalf + up * ndc.y * tanHalf + forward);
+        float3 pMid =
+            float3(dot(midRight, viewDir), dot(midUp, viewDir), dot(midForward, viewDir));
+        float2 ndcMid =
+            float2(pMid.x / (pMid.z * CameraAspect * tanHalf), pMid.y / (pMid.z * tanHalf));
+        float2 reprojUV = float2(ndcMid.x * 0.5f + 0.5f, 0.5f - ndcMid.y * 0.5f);
 
-    float3 pMid = float3(dot(midRight, worldPos - midPos),
-                         dot(midUp, worldPos - midPos),
+        bool covered = pMid.z > 0.0f && all(reprojUV >= 0.0f) && all(reprojUV <= 1.0f);
+        float2 edgePixels = min(reprojUV, 1.0f - reprojUV) * float2(DisplaySize);
+        float conf = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
+        if (!HudlessSource)
+            conf *= saturate((length(delta) - 0.02f) * 8.0f);
+
+        float4 warped = LastColor.SampleLevel(Bilinear, clamp(reprojUV, 0.0f, 1.0f), 0);
+        float4 result = lerp(original, warped, Strength * conf);
+
+        if (DebugView)
+            Output[dtid.xy] = float4(0.0f, conf, 1.0f, 1.0f);
+        else
+            Output[dtid.xy] = float4(result.rgb, 1.0f);
+        return;
+    }
+
+    // MV-warp fallback sample (also the v1 result).
+    float2 deltaUV = delta / float2(MVSize);
+    float2 unboundedSrcUV = uv - deltaUV * TimeStep;
+    bool mvCovered = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f);
+    float2 mvEdgePixels = min(unboundedSrcUV, 1.0f - unboundedSrcUV) * float2(DisplaySize);
+    float mvCoverage = mvCovered ? saturate(min(mvEdgePixels.x, mvEdgePixels.y) * 0.5f) : 0.0f;
+    float4 mvWarp = LastColor.SampleLevel(Bilinear, clamp(unboundedSrcUV, 0.0f, 1.0f), 0);
+
+    // Depth-aware reprojection.
+    float3 camPos = CameraPos.xyz;
+    float depthZ =
+        LinearizeDepth(Depth.SampleLevel(Bilinear, mvUV, 0).r, CameraNear, CameraFar, InvertedDepth);
+    float3 worldPos = ReconstructWorld(ndc, depthZ, camPos, right, up, forward, tanHalf, CameraAspect);
+    float3 midPos = lerp(PrevCameraPos.xyz, camPos, s);
+    float3 pMid = float3(dot(midRight, worldPos - midPos), dot(midUp, worldPos - midPos),
                          dot(midForward, worldPos - midPos));
-
-    float2 ndcMid = float2(pMid.x / (pMid.z * CameraAspect * tanHalf),
-                           pMid.y / (pMid.z * tanHalf));
+    float2 ndcMid =
+        float2(pMid.x / (pMid.z * CameraAspect * tanHalf), pMid.y / (pMid.z * tanHalf));
     float2 reprojUV = float2(ndcMid.x * 0.5f + 0.5f, 0.5f - ndcMid.y * 0.5f);
 
-    // Confidence: compare the reprojected surface against the depth buffer at the target.
-    // Behind-camera or off-screen targets get the MV-warp fallback.
+    // Confidence: compare the reprojected surface against the depth buffer at
+    // the target and reject depth discontinuities.
     float conf = 0.0f;
     if (pMid.z > 0.0f && all(reprojUV >= 0.0f) && all(reprojUV <= 1.0f))
     {
         float2 targetNdc = float2(reprojUV.x * 2.0f - 1.0f, 1.0f - reprojUV.y * 2.0f);
-        float targetZ = LinearizeDepth(Depth.SampleLevel(Bilinear, reprojUV, 0).r,
-                                       CameraNear, CameraFar, InvertedDepth);
-        float3 targetWorld = ReconstructWorld(targetNdc, targetZ, camPos, right, up, forward, tanHalf, CameraAspect);
+        float targetZ =
+            LinearizeDepth(Depth.SampleLevel(Bilinear, reprojUV, 0).r, CameraNear, CameraFar, InvertedDepth);
+        float3 targetWorld =
+            ReconstructWorld(targetNdc, targetZ, camPos, right, up, forward, tanHalf, CameraAspect);
+
+        float relErr = length(worldPos - targetWorld) / max(depthZ, 0.01f);
+        conf = saturate(1.0f - relErr);
 
         float2 depthTexel = 1.0f / float2(DisplaySize);
-        float d0 = targetZ;
         float d1 = LinearizeDepth(Depth.SampleLevel(Bilinear, reprojUV + float2(depthTexel.x, 0), 0).r,
                                   CameraNear, CameraFar, InvertedDepth);
         float d2 = LinearizeDepth(Depth.SampleLevel(Bilinear, reprojUV - float2(depthTexel.x, 0), 0).r,
@@ -254,10 +281,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                                   CameraNear, CameraFar, InvertedDepth);
         float d4 = LinearizeDepth(Depth.SampleLevel(Bilinear, reprojUV - float2(0, depthTexel.y), 0).r,
                                   CameraNear, CameraFar, InvertedDepth);
-        float relErr = length(worldPos - targetWorld) / max(depthZ, 0.01f);
-        conf = saturate(1.0f - relErr);
-
-        float depthSpread = max(max(abs(d1 - d0), abs(d2 - d0)), max(abs(d3 - d0), abs(d4 - d0))) / max(d0, 0.01f);
+        float depthSpread =
+            max(max(abs(d1 - targetZ), abs(d2 - targetZ)), max(abs(d3 - targetZ), abs(d4 - targetZ))) /
+            max(targetZ, 0.01f);
         conf *= saturate(1.0f - depthSpread * 8.0f);
 
         float2 targetMv = Velocity.SampleLevel(Bilinear, reprojUV, 0).xy * float2(MVScaleX, MVScaleY);
@@ -266,25 +292,19 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         float mvDisagreement = length(targetMv - delta) / max(max(length(delta), length(targetMv)), 1.0f);
         conf *= saturate(1.0f - mvDisagreement * 0.5f);
 
-        float reprojEdgeDistance = min(min(reprojUV.x, reprojUV.y), min(1.0f - reprojUV.x, 1.0f - reprojUV.y));
-        conf *= saturate(reprojEdgeDistance * 32.0f);
+        float2 edgePixels = min(reprojUV, 1.0f - reprojUV) * float2(DisplaySize);
+        conf *= saturate(min(edgePixels.x, edgePixels.y) * 0.5f);
     }
 
-    // Preserve static UI in screen space. Camera-only mode still reads motion
-    // vectors solely for this HUD exclusion; it never uses them to move world colour.
-    // Knee instead of linear ramp: far geometry under slow aim moves < 0.25 px/frame
-    // and must stay depth-warped; true static HUD sits at ~0 px.
-    conf *= saturate((length(delta) - 0.02f) * 8.0f);
+    if (!HudlessSource)
+        conf *= saturate((length(delta) - 0.02f) * 8.0f);
 
-    float2 clampedUV = clamp(reprojUV, 0.0f, 1.0f);
-    float4 warped = LastColor.SampleLevel(Bilinear, clampedUV, 0);
-    float4 fallback = Mode == 2 ? original : lerp(original, mvWarp, mvCoverage);
-    float4 result = lerp(fallback, warped, conf);
-    result = lerp(original, result, Strength);
+    float4 warped = LastColor.SampleLevel(Bilinear, clamp(reprojUV, 0.0f, 1.0f), 0);
+    float4 fallback = lerp(original, mvWarp, mvCoverage);
+    float4 result = lerp(original, lerp(fallback, warped, conf), Strength);
 
     if (DebugView)
-        Output[dtid.xy] = float4(Mode == 2 ? 0.0f : (length(delta) > 0.5f ? 1.0f : 0.0f), conf,
-                                 Mode == 2 ? 1.0f : 0.0f, 1.0f);
+        Output[dtid.xy] = float4(length(delta) > 0.5f ? 1.0f : 0.0f, conf, 0.0f, 1.0f);
     else
         Output[dtid.xy] = float4(result.rgb, 1.0f);
 }
