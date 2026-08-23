@@ -311,6 +311,7 @@ void LogInputHealthSnapshotLocked(const char* origin)
     lastExternalVirtualMouseActive = _state.ExternalVirtualMouseActive;
     lastExternalVirtualMouseAuthoritative = _state.ExternalVirtualMouseAuthoritative;
     lastExternalLowLevelMouseHookInstalled = _state.ExternalLowLevelMouseHookInstalled;
+    lastAcquisitionMode = _state.AcquisitionMode;
     lastTargetProcessId = _state.TargetProcessId;
     lastInputProcessId = _state.InputProcessId;
 }

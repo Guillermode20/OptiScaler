@@ -1150,7 +1150,15 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         return false;
     _presentWaitableObject = realSwapChain2->GetFrameLatencyWaitableObject();
     if (_presentWaitableObject != nullptr)
-        realSwapChain2->SetMaximumFrameLatency(1);
+    {
+        // VKD3D/Proton can hold a latency-1 signal until the queued frame reaches
+        // scanout, leaving no time for a just-in-time warp before that refresh.
+        // The software display clock prevents overproduction, so permit one
+        // queued frame while the presenter prepares the next one on Proton.
+        const UINT maximumFrameLatency = state.isRunningOnLinux ? 2u : 1u;
+        if (FAILED(realSwapChain2->SetMaximumFrameLatency(maximumFrameLatency)))
+            LOG_WARN("Reproj: failed to set maximum frame latency {}", maximumFrameLatency);
+    }
     realSwapChain2->Release();
     if (_presentWaitableObject == nullptr)
         return false;
