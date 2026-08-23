@@ -18,6 +18,7 @@
 #include <misc/FrameLimit.h>
 #include <nvapi/fakenvapi.h>
 #include <wrapped/wrapped_swapchain.h>
+#include <menu/input/input_system.h>
 
 #include <magic_enum.hpp>
 
