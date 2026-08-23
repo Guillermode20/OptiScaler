@@ -90,6 +90,18 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("_displayClockAnchorMs", presenter)
         self.assertIn("_measuredRefreshPeriodMs", presenter)
 
+    def test_vblank_lock_cannot_run_away_earlier(self):
+        # Per-slot bounds do not stop a sustained backwards walk when the grid
+        # phase estimate is biased early; only a cumulative budget does. Without
+        # it the deadline drifts far ahead of scanout and latency-1 presents
+        # block progressively until the pipeline wedges.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
+            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        self.assertIn("MAX_TOTAL_EARLY_CORRECTION_MS", presenter)
+        self.assertIn("totalEarlyCorrectionMs += appliedDeltaMs", presenter)
+
     def test_runtime_and_precompiled_shader_sources_match(self):
         root = Path(__file__).resolve().parents[2]
         common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")

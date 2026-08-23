@@ -1364,6 +1364,12 @@ void AReproj_Dx12::PresenterMain()
     // Presents must land ahead of the true scanout grid: submitting after a
     // vblank slips that output a full refresh, which reads as judder.
     constexpr double VBLANK_SAFETY_LEAD_MS = 2.0;
+    // Hard cap on TOTAL early displacement from the free-running clock. Without
+    // this, a grid phase estimate biased early of true scanout makes the deadline
+    // walk backwards one correction at a time; with MaximumFrameLatency=1 each
+    // then-present blocks ever longer inside DXGI until the pipeline wedges.
+    constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 4.0;
+    double totalEarlyCorrectionMs = 0.0;
 
     while (!_stopPresenter.load())
     {
@@ -1374,9 +1380,10 @@ void AReproj_Dx12::PresenterMain()
         // Lock the software display clock to the measured vblank grid when DXGI
         // reports one: BufferDesc.RefreshRate drifts against fractional or VRR
         // scanout rates and against Proton's waitable signalling. The correction
-        // only ever pulls the deadline EARLIER (bounded to half a slot per frame):
-        // presenting early simply blocks inside Present(1), while presenting late
-        // drops the output into the next refresh.
+        // only ever pulls the deadline EARLIER (presenting early simply blocks
+        // inside Present(1), while presenting late drops the output into the next
+        // refresh), and only within the total budget above so a mis-estimated
+        // grid phase can never run away.
         if (SampleDisplayClock(Util::MillisecondsNow()) && nextDeadlineMs > 0.0)
         {
             refreshPeriodMs = _measuredRefreshPeriodMs;
@@ -1385,7 +1392,16 @@ void AReproj_Dx12::PresenterMain()
                 std::round((nextDeadlineMs - _displayClockAnchorMs) / refreshPeriodMs) * refreshPeriodMs;
             const auto correctedMs = nearestVblankMs - VBLANK_SAFETY_LEAD_MS;
             if (correctedMs < nextDeadlineMs)
-                nextDeadlineMs += std::max(correctedMs - nextDeadlineMs, -refreshPeriodMs * 0.5);
+            {
+                const auto remainingBudgetMs = MAX_TOTAL_EARLY_CORRECTION_MS + totalEarlyCorrectionMs;
+                const auto appliedDeltaMs =
+                    std::max(std::max(correctedMs - nextDeadlineMs, -refreshPeriodMs * 0.5), -remainingBudgetMs);
+                if (appliedDeltaMs < 0.0)
+                {
+                    nextDeadlineMs += appliedDeltaMs;
+                    totalEarlyCorrectionMs += appliedDeltaMs;
+                }
+            }
         }
 
         // Publication never drives cadence. Keep a monotonic software display
