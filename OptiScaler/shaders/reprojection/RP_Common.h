@@ -199,18 +199,16 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     }
 
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
-    float tanHalf = tan(CameraVFov * 0.5f);
     float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
 
     if (Mode == 2)
     {
-        // C++ normalizes the source basis and extrapolates the predicted basis
-        // once per dispatch. Build each output ray in the predicted camera,
-        // then project it into the source camera, matching compositor ATW.
-        float3 viewDir = PrevCameraRight.xyz * ndc.x * CameraAspect * tanHalf +
-                         PrevCameraUp.xyz * ndc.y * tanHalf + PrevCameraForward.xyz;
-        float3 pSource = float3(dot(CameraRight.xyz, viewDir), dot(CameraUp.xyz, viewDir),
-                               dot(CameraForward.xyz, viewDir));
+        // C++ builds source-to-predicted rotation rows and tan(vfov / 2)
+        // once per dispatch. Per pixel, only apply that homography.
+        float tanHalf = CameraVFov;
+        float3 predictedRay = float3(ndc.x * CameraAspect * tanHalf, ndc.y * tanHalf, 1.0f);
+        float3 pSource = float3(dot(PrevCameraRight.xyz, predictedRay), dot(PrevCameraUp.xyz, predictedRay),
+                               dot(PrevCameraForward.xyz, predictedRay));
         float2 sourceNdc =
             float2(pSource.x / (pSource.z * CameraAspect * tanHalf), pSource.y / (pSource.z * tanHalf));
         float2 reprojUV = float2(sourceNdc.x * 0.5f + 0.5f, 0.5f - sourceNdc.y * 0.5f);
@@ -230,6 +228,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
             Output[dtid.xy] = float4(result.rgb, 1.0f);
         return;
     }
+    float tanHalf = tan(CameraVFov * 0.5f);
 
     float3 right = normalize(CameraRight.xyz);
     float3 up = normalize(CameraUp.xyz);

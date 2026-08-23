@@ -360,6 +360,18 @@ ReprojVec3 NormalizeReprojVec3(ReprojVec3 value)
     return { value.x * inverseLength, value.y * inverseLength, value.z * inverseLength };
 }
 
+float DotReprojVec3(ReprojVec3 left, ReprojVec3 right)
+{
+    return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+ReprojVec3 ReprojTransformRow(ReprojVec3 sourceAxis, ReprojVec3 predictedRight, ReprojVec3 predictedUp,
+                              ReprojVec3 predictedForward)
+{
+    return { DotReprojVec3(sourceAxis, predictedRight), DotReprojVec3(sourceAxis, predictedUp),
+             DotReprojVec3(sourceAxis, predictedForward) };
+}
+
 ReprojVec3 ExtrapolateReprojVec3(ReprojVec3 previous, ReprojVec3 current, float scale)
 {
     return NormalizeReprojVec3({ previous.x + (current.x - previous.x) * scale,
@@ -388,12 +400,12 @@ void PrepareRotationConstants(RP_Constants& constants)
     const auto predictedUp = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraUp), up, scale);
     const auto predictedForward = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraForward), forward, scale);
 
-    StoreReprojVec3(constants.cameraRight, right);
-    StoreReprojVec3(constants.cameraUp, up);
-    StoreReprojVec3(constants.cameraForward, forward);
-    StoreReprojVec3(constants.prevCameraRight, predictedRight);
-    StoreReprojVec3(constants.prevCameraUp, predictedUp);
-    StoreReprojVec3(constants.prevCameraForward, predictedForward);
+    StoreReprojVec3(constants.prevCameraRight,
+                    ReprojTransformRow(right, predictedRight, predictedUp, predictedForward));
+    StoreReprojVec3(constants.prevCameraUp, ReprojTransformRow(up, predictedRight, predictedUp, predictedForward));
+    StoreReprojVec3(constants.prevCameraForward,
+                    ReprojTransformRow(forward, predictedRight, predictedUp, predictedForward));
+    constants.cameraVFov = std::tan(constants.cameraVFov * 0.5f);
 }
 } // namespace
 
