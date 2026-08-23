@@ -994,6 +994,24 @@ void AReproj_Dx12::StopAsyncPresenter()
     _presenterState.store(PresenterState::Stopped);
 }
 
+bool AReproj_Dx12::WaitForPacketDeadline(int packetIndex, double deadlineMs)
+{
+    auto& packet = _packets[packetIndex];
+    std::unique_lock lock(_presentMutex);
+    const auto remaining = deadlineMs - Util::MillisecondsNow();
+    if (remaining > 0.25)
+    {
+        _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(remaining - 0.2),
+                            [&] { return _stopPresenter.load() || _readyFrameId.load() > packet.frameId; });
+    }
+    lock.unlock();
+
+    while (!_stopPresenter.load() && _readyFrameId.load() <= packet.frameId && Util::MillisecondsNow() < deadlineMs)
+        YieldProcessor();
+
+    return !_stopPresenter.load() && _readyFrameId.load() <= packet.frameId;
+}
+
 HRESULT AReproj_Dx12::WaitForPresentSlot()
 {
     if (_presentWaitableObject == nullptr)
@@ -1132,15 +1150,21 @@ void AReproj_Dx12::PresenterMain()
         const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : std::max(packet.frameDelta * 0.5, 4.0);
         const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs * 2.0);
 
-        // Display-anchored timewarp: DXGI's frame-latency waitable object is the
-        // sole refresh heartbeat. Wait BEFORE late latch and GPU dispatch, then
-        // present without waiting again. The old deadline wait started compute at
-        // scanout time and Present waited a second time, causing missed slots and
-        // up to one refresh of avoidable input latency.
+        // Proton's frame-latency object signals queue capacity, not necessarily
+        // vblank cadence for Present(0, ALLOW_TEARING). Keep software refresh
+        // deadlines as the heartbeat, but wake early enough to submit GPU work
+        // before scanout. Consume the waitable once before dispatch and never wait
+        // again in PresentCompositorFrame.
         if (packet.warpAllowed)
         {
+            auto slotDeadline = Util::MillisecondsNow();
+            const auto dispatchLeadMs = std::min(3.0, refreshPeriodMs * 0.5);
             for (;;)
             {
+                slotDeadline += refreshPeriodMs;
+                if (!WaitForPacketDeadline(packetIndex, slotDeadline - dispatchLeadMs))
+                    break;
+
                 const auto slotResult = WaitForPresentSlot();
                 if (slotResult != S_OK)
                 {
@@ -1167,8 +1191,7 @@ void AReproj_Dx12::PresenterMain()
                     std::clamp(static_cast<float>(((now - packet.renderTimestamp) / realPeriodMs) *
                                                   configuredStep * 2.0f),
                                0.0f, 1.0f);
-                // Capacity is available now; predict toward the upcoming scanout.
-                if (!DispatchPacketWarp(packetIndex, timeStep, now + refreshPeriodMs))
+                if (!DispatchPacketWarp(packetIndex, timeStep, slotDeadline))
                 {
                     RecordWarpFrame(false, true, 0.0f);
                     continue;
@@ -1202,6 +1225,9 @@ void AReproj_Dx12::PresenterMain()
                     break;
                 }
 
+                // Never burst catch-up warps after an overrun.
+                if (Util::MillisecondsNow() > slotDeadline)
+                    slotDeadline = Util::MillisecondsNow();
             }
         }
 
