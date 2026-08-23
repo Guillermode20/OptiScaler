@@ -385,9 +385,11 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
     }
 
     double bestConfidence = 0.0;
+    uint32_t maximumSamples = 0;
     for (int i = 0; i < MOUSE_CALIBRATION_LAG_BINS; ++i)
     {
         const auto& bin = _mouseCalibration[i];
+        maximumSamples = std::max(maximumSamples, bin.samples);
         const double determinant = bin.xx * bin.yy - bin.xy * bin.xy;
         const double poseEnergy = bin.yaw2 + bin.pitch2;
         if (bin.samples < 24 || determinant < 1.0 || poseEnergy < 1.0e-6)
@@ -413,6 +415,7 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
         }
     }
     _mouseCalibrationConfidence = static_cast<float>(bestConfidence);
+    _mouseCalibrationSamples = maximumSamples;
 }
 
 void AReproj_Dx12::CaptureLateInput(ReprojFramePacket& packet, double sourcePoseTimestamp)
@@ -426,8 +429,7 @@ void AReproj_Dx12::CaptureLateInput(ReprojFramePacket& packet, double sourcePose
         lagMs = _mouseCalibrationLagMs;
         std::memcpy(packet.mouseToPose, _mouseToPose, sizeof(packet.mouseToPose));
     }
-    if (confidence < 0.8f || sourcePoseTimestamp <= 0.0 ||
-        OptiInput::GetInputAcquisitionMode() != OptiInput::InputAcquisitionMode::PolledAbsolute)
+    if (confidence < 0.8f || sourcePoseTimestamp <= 0.0)
         return;
 
     const double inputPoseTimestamp = sourcePoseTimestamp - lagMs;
@@ -1534,6 +1536,7 @@ void AReproj_Dx12::LogMetricsIfDue()
         std::scoped_lock calibrationLock(_mouseCalibrationMutex);
         _runtimeMetrics.inputLatchConfidence = _mouseCalibrationConfidence;
         _runtimeMetrics.inputLatchLagMs = _mouseCalibrationLagMs;
+        _runtimeMetrics.inputCalibrationSamples = _mouseCalibrationSamples;
         _runtimeMetrics.inputLatchActive = _mouseCalibrationConfidence >= 0.8f;
     }
     if (_presentIntervalCount > 0)
@@ -1547,12 +1550,13 @@ void AReproj_Dx12::LogMetricsIfDue()
     }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} interval={:.2f}/{:.2f}ms "
-             "lead={:.2f}ms poseAge={:.1f}ms queue={} input={}({:.0f}% @ {}ms) ({}, block={:.2f}ms)",
+             "lead={:.2f}ms poseAge={:.1f}ms queue={} input={}({:.0f}% @ {}ms, {} samples) ({}, block={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              _runtimeMetrics.inputLatchActive ? "latched" : "learning", _runtimeMetrics.inputLatchConfidence * 100.0f,
-             _runtimeMetrics.inputLatchLagMs, presenter, _runtimeMetrics.gamePresentBlockMs);
+             _runtimeMetrics.inputLatchLagMs, _runtimeMetrics.inputCalibrationSamples, presenter,
+             _runtimeMetrics.gamePresentBlockMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;

@@ -189,13 +189,14 @@ DWORD PackCursorMessagePos(const POINT& point)
 
 void RecordPolledMouseMotionLocked(const POINT& point)
 {
-    if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid ||
-        _state.AcquisitionMode != InputAcquisitionMode::PolledAbsolute)
+    if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid)
         return;
 
     const POINT offset { point.x - _state.CursorPollCenter.x, point.y - _state.CursorPollCenter.y };
-    AccumulateRelativeMouseMotionLocked(offset.x - _state.CursorPollLastOffset.x,
-                                        offset.y - _state.CursorPollLastOffset.y);
+    const LONG x = offset.x - _state.CursorPollLastOffset.x;
+    const LONG y = offset.y - _state.CursorPollLastOffset.y;
+    AccumulateRelativeMouseMotionLocked(x, y);
+    AccumulatePolledMouseMotionLocked(x, y);
     _state.CursorPollLastOffset = offset;
 }
 
@@ -232,8 +233,7 @@ void RefreshMouseMotion()
     std::uint64_t pollGeneration = 0;
     {
         std::unique_lock lock(_state.Mutex);
-        if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid ||
-            _state.AcquisitionMode != InputAcquisitionMode::PolledAbsolute)
+        if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid)
             return;
         pollGeneration = _state.CursorPollGeneration;
     }

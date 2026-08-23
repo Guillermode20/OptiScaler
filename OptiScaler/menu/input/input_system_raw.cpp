@@ -542,7 +542,11 @@ void AccumulateRelativeMouseMotionLocked(LONG x, LONG y)
         return;
 
     _state.ReceivedAnyInputThisFrame = true;
-    if (_state.MenuVisible)
+}
+
+void AccumulatePolledMouseMotionLocked(LONG x, LONG y)
+{
+    if ((x == 0 && y == 0) || _state.MenuVisible)
         return;
 
     static const double ticksToMilliseconds = []

@@ -40,6 +40,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         float dispatchLeadMs = 3.0f;
         float inputLatchConfidence = 0.0f;
         int inputLatchLagMs = 0;
+        uint32_t inputCalibrationSamples = 0;
         bool inputLatchActive = false;
         uint32_t newAnchorDisplays = 0;
         uint32_t repeatedAnchorDisplays = 0;
@@ -217,6 +218,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _lastMouseCalibrationTimestamp = 0.0;
     float _mouseCalibrationConfidence = 0.0f;
     int _mouseCalibrationLagMs = 0;
+    uint32_t _mouseCalibrationSamples = 0;
 
   protected:
     void ReleaseObjects() override final;

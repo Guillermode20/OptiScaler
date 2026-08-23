@@ -591,6 +591,7 @@ void SanitizeRawKeyboardLocked(RAWINPUT& input);
 int NormalizeRawKeyboardVirtualKey(const RAWKEYBOARD& keyboard);
 void HandleRawInputLocked(HRAWINPUT rawInputHandle);
 void AccumulateRelativeMouseMotionLocked(LONG x, LONG y);
+void AccumulatePolledMouseMotionLocked(LONG x, LONG y);
 
 // Win32 hook tracking
 bool IsTrackedWindowsHookType(int hookType);
