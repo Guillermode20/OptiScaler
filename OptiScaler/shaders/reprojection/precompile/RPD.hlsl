@@ -78,28 +78,21 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
     float tanHalf = tan(CameraVFov * 0.5f);
     float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float3 right = normalize(CameraRight.xyz);
-    float3 up = normalize(CameraUp.xyz);
-    float3 forward = normalize(CameraForward.xyz);
-    const float s = 1.0f + TimeStep;
-    float3 midRight = normalize(lerp(PrevCameraRight.xyz, right, s));
-    float3 midUp = normalize(lerp(PrevCameraUp.xyz, up, s));
-    float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
 
     if (Mode == 2)
     {
-        // Translation cancels for a rotation-only warp. Project the view ray
-        // directly instead of reconstructing world positions and sampling
-        // depth six times per output pixel.
-        float3 viewDir =
-            normalize(right * ndc.x * CameraAspect * tanHalf + up * ndc.y * tanHalf + forward);
-        float3 pMid =
-            float3(dot(midRight, viewDir), dot(midUp, viewDir), dot(midForward, viewDir));
-        float2 ndcMid =
-            float2(pMid.x / (pMid.z * CameraAspect * tanHalf), pMid.y / (pMid.z * tanHalf));
-        float2 reprojUV = float2(ndcMid.x * 0.5f + 0.5f, 0.5f - ndcMid.y * 0.5f);
+        // C++ normalizes the source basis and extrapolates the predicted basis
+        // once per dispatch. Build each output ray in the predicted camera,
+        // then project it into the source camera, matching compositor ATW.
+        float3 viewDir = PrevCameraRight.xyz * ndc.x * CameraAspect * tanHalf +
+                         PrevCameraUp.xyz * ndc.y * tanHalf + PrevCameraForward.xyz;
+        float3 pSource = float3(dot(CameraRight.xyz, viewDir), dot(CameraUp.xyz, viewDir),
+                               dot(CameraForward.xyz, viewDir));
+        float2 sourceNdc =
+            float2(pSource.x / (pSource.z * CameraAspect * tanHalf), pSource.y / (pSource.z * tanHalf));
+        float2 reprojUV = float2(sourceNdc.x * 0.5f + 0.5f, 0.5f - sourceNdc.y * 0.5f);
 
-        bool covered = pMid.z > 0.0f && all(reprojUV >= 0.0f) && all(reprojUV <= 1.0f);
+        bool covered = pSource.z > 0.0f && all(reprojUV >= 0.0f) && all(reprojUV <= 1.0f);
         float2 edgePixels = min(reprojUV, 1.0f - reprojUV) * float2(DisplaySize);
         float conf = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
         if (!HudlessSource)
@@ -114,6 +107,14 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
             Output[dtid.xy] = float4(result.rgb, 1.0f);
         return;
     }
+
+    float3 right = normalize(CameraRight.xyz);
+    float3 up = normalize(CameraUp.xyz);
+    float3 forward = normalize(CameraForward.xyz);
+    const float s = 1.0f + TimeStep;
+    float3 midRight = normalize(lerp(PrevCameraRight.xyz, right, s));
+    float3 midUp = normalize(lerp(PrevCameraUp.xyz, up, s));
+    float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
 
     // MV-warp fallback sample (also the v1 result).
     float2 deltaUV = delta / float2(MVSize);

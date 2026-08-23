@@ -340,6 +340,61 @@ float ReprojHalfToFloat(uint16_t value)
         bits = sign | (exponent + 112u) << 23 | mantissa << 13;
     return std::bit_cast<float>(bits);
 }
+
+struct ReprojVec3
+{
+    float x;
+    float y;
+    float z;
+};
+
+ReprojVec3 LoadReprojVec3(const float* value) { return { value[0], value[1], value[2] }; }
+
+ReprojVec3 NormalizeReprojVec3(ReprojVec3 value)
+{
+    const float lengthSquared = value.x * value.x + value.y * value.y + value.z * value.z;
+    if (lengthSquared <= 1.0e-12f)
+        return {};
+
+    const float inverseLength = 1.0f / std::sqrt(lengthSquared);
+    return { value.x * inverseLength, value.y * inverseLength, value.z * inverseLength };
+}
+
+ReprojVec3 ExtrapolateReprojVec3(ReprojVec3 previous, ReprojVec3 current, float scale)
+{
+    return NormalizeReprojVec3({ previous.x + (current.x - previous.x) * scale,
+                                 previous.y + (current.y - previous.y) * scale,
+                                 previous.z + (current.z - previous.z) * scale });
+}
+
+void StoreReprojVec3(float* target, ReprojVec3 value)
+{
+    target[0] = value.x;
+    target[1] = value.y;
+    target[2] = value.z;
+}
+
+void PrepareRotationConstants(RP_Constants& constants)
+{
+    if (constants.mode != 2)
+        return;
+
+    const auto right = NormalizeReprojVec3(LoadReprojVec3(constants.cameraRight));
+    const auto up = NormalizeReprojVec3(LoadReprojVec3(constants.cameraUp));
+    const auto forward = NormalizeReprojVec3(LoadReprojVec3(constants.cameraForward));
+    const float scale = 1.0f + constants.timeStep;
+
+    const auto predictedRight = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraRight), right, scale);
+    const auto predictedUp = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraUp), up, scale);
+    const auto predictedForward = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraForward), forward, scale);
+
+    StoreReprojVec3(constants.cameraRight, right);
+    StoreReprojVec3(constants.cameraUp, up);
+    StoreReprojVec3(constants.cameraForward, forward);
+    StoreReprojVec3(constants.prevCameraRight, predictedRight);
+    StoreReprojVec3(constants.prevCameraUp, predictedUp);
+    StoreReprojVec3(constants.prevCameraForward, predictedForward);
+}
 } // namespace
 
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
@@ -627,6 +682,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
+    PrepareRotationConstants(constants);
     const bool useDepth = packet.hasDepth;
     const bool ok =
         _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
@@ -750,6 +806,7 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
     if (!hasDepth)
         cb.mode = 0;
+    PrepareRotationConstants(cb);
 
     bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], velocity->GetResource(),
                               velocity->state, hasDepth ? depth->GetResource() : nullptr,
