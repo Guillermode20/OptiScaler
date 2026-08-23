@@ -542,23 +542,6 @@ void AccumulateRelativeMouseMotionLocked(LONG x, LONG y)
         return;
 
     _state.ReceivedAnyInputThisFrame = true;
-    LARGE_INTEGER counter {};
-    LARGE_INTEGER frequency {};
-    QueryPerformanceCounter(&counter);
-    QueryPerformanceFrequency(&frequency);
-    const auto now = 1000.0 * static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart);
-    auto& motion = _state.RawMouseMotionState;
-    if (motion.TimestampMs > 0.0 && now > motion.TimestampMs)
-    {
-        const auto dt = now - motion.TimestampMs;
-        motion.VelocityX = motion.VelocityX * 0.5 + static_cast<double>(x) / dt * 0.5;
-        motion.VelocityY = motion.VelocityY * 0.5 + static_cast<double>(y) / dt * 0.5;
-    }
-    motion.TotalX += x;
-    motion.TotalY += y;
-    motion.TimestampMs = now;
-    _state.RawMouseHistory[_state.RawMouseHistoryWriteIndex] = motion;
-    _state.RawMouseHistoryWriteIndex = (_state.RawMouseHistoryWriteIndex + 1) % _state.RawMouseHistory.size();
 }
 
 bool ShouldRecordRawMotionHandleLocked(HRAWINPUT handle)

@@ -11,7 +11,6 @@ cbuffer RP_Constants : register(b0)
     uint   InvertedDepth;
     uint   Mode;
     uint   DebugView;
-    uint   Extrapolate;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -24,8 +23,6 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
-    float  LateYaw;
-    float  LatePitch;
 };
 
 Texture2D<float4> LastColor : register(t0);
@@ -34,13 +31,6 @@ Texture2D<float4> Depth     : register(t2);
 RWTexture2D<float4> Output  : register(u0);
 
 SamplerState Bilinear : register(s0);
-
-float3 RotateAxis(float3 v, float3 axis, float angle)
-{
-    float s, c;
-    sincos(angle, s, c);
-    return v * c + cross(axis, v) * s + axis * dot(axis, v) * (1.0f - c);
-}
 
 [numthreads(16, 16, 1)]
 void CSMain(uint3 dtid : SV_DispatchThreadID)
@@ -61,29 +51,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     // Texel displacement -> normalized UV offset, then move BACKWARD along the flow
     float2 deltaUV = delta / float2(MVSize);
 
-    // Projection-only timewarp maps each target display ray back into the source
-    // anchor with the exact rotational homography. Unlike a constant UV offset,
-    // this remains geometrically correct toward the edges of a wide FOV.
-    float lateTanHalfV = tan(CameraVFov * 0.5f);
-    float lateTanHalfH = lateTanHalfV * CameraAspect;
-    float2 lateUV = (lateTanHalfH > 1e-5f && lateTanHalfV > 1e-5f)
-                        ? float2(LateYaw / (2.0f * lateTanHalfH), LatePitch / (2.0f * lateTanHalfV))
-                        : float2(0.0f, 0.0f);
-
     // Clamping an off-screen source stretches the last edge texel across the
     // viewport. Keep the real-frame pixels instead and feather the transition.
-    float2 unboundedSrcUV = uv - deltaUV * TimeStep + lateUV;
-    if (Mode == 3 && lateTanHalfH > 1e-5f && lateTanHalfV > 1e-5f)
-    {
-        float2 targetNdc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-        float3 sourceRay = normalize(float3(targetNdc.x * lateTanHalfH,
-                                             targetNdc.y * lateTanHalfV, 1.0f));
-        sourceRay = RotateAxis(sourceRay, float3(0.0f, 1.0f, 0.0f), LateYaw);
-        sourceRay = RotateAxis(sourceRay, float3(1.0f, 0.0f, 0.0f), LatePitch);
-        float2 sourceNdc = sourceRay.xy / max(sourceRay.z, 1e-5f) /
-                           float2(lateTanHalfH, lateTanHalfV);
-        unboundedSrcUV = float2(sourceNdc.x * 0.5f + 0.5f, 0.5f - sourceNdc.y * 0.5f);
-    }
+    float2 unboundedSrcUV = uv - deltaUV * TimeStep;
     float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
                              min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
     float coverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;

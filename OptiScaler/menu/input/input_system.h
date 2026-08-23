@@ -15,21 +15,6 @@ enum class InputAcquisitionMode : std::uint32_t
     ExternalRawVirtualMouse = 4,
 };
 
-struct RawMouseMotion
-{
-    std::int64_t TotalX = 0;
-    std::int64_t TotalY = 0;
-    double VelocityX = 0.0; // counts/ms, smoothed over recent relative packets
-    double VelocityY = 0.0;
-    double TimestampMs = 0.0;
-};
-
-struct GamepadMotion
-{
-    float RightX = 0.0f; // normalized after XInput's built-in radial deadzone
-    float RightY = 0.0f;
-    double TimestampMs = 0.0;
-};
 
 struct InitializeOptions
 {
@@ -237,10 +222,6 @@ bool IsMouseReleased(int button);
 
 float GetMouseWheel();
 POINT GetMouseScreenPos();
-RawMouseMotion GetRawMouseMotion();
-RawMouseMotion GetRawMouseMotionAt(double timestampMs);
-GamepadMotion GetGamepadMotion();
-void RefreshGamepadMotion();
 
 bool ShouldBlockMouse();
 bool ShouldBlockKeyboard();

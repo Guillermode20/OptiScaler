@@ -358,12 +358,6 @@ struct InputState
 
     float MouseWheel = 0.0f;
 
-    RawMouseMotion RawMouseMotionState {};
-    GamepadMotion GamepadMotionState {};
-    DWORD GamepadUserIndex = 0;
-    // ponytail: 256 packets cover ~32 ms even at 8 kHz; use time-bucketed history only if longer gaps matter.
-    std::array<RawMouseMotion, 256> RawMouseHistory {};
-    std::size_t RawMouseHistoryWriteIndex = 0;
 
     RECT SavedClipRect {};
     bool HasSavedClipRect = false;

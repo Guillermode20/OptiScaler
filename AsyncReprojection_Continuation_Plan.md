@@ -1,6 +1,6 @@
 # Async Reprojection Continuation Plan
 
-> Superseded presentation architecture (updated 2026-08-23): `docs/NativeAsyncTimewarpPlan.md` replaces M5's DirectComposition presenter with game-visible virtual backbuffers and worker-exclusive, display-clocked presentation on the real main swapchain. The ownership seam was live-validated in Deep Rock Galactic on Proton on 2026-08-22; the newer one-warped-output-per-vblank cadence and motion-grid calibration await a fresh game validation.
+> Superseded presentation architecture (updated 2026-08-23): `docs/NativeAsyncTimewarpPlan.md` replaces M5's DirectComposition presenter with game-visible virtual backbuffers and worker-exclusive, display-clocked presentation on the real main swapchain. The ownership seam was live-validated in Deep Rock Galactic on Proton on 2026-08-22; the one-warped-output-per-vblank cadence awaits a fresh game validation. Input-side late latch/auto-calibration were removed on 2026-08-23 after live testing.
 
 ## Purpose
 

@@ -3936,59 +3936,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojRotationOnly = reprojRotationOnly;
         ShowHelpMarker("Keep camera position fixed in depth-aware modes to avoid translation disocclusions");
 
-        bool reprojLateLatch = config->ReprojLateLatch.value_or_default();
-        if (ImGui::Checkbox("Late-latch camera input##reproj", &reprojLateLatch))
-            config->ReprojLateLatch = reprojLateLatch;
-        ShowHelpMarker("Apply mouse movement or the current XInput right-stick rate after the real camera pose immediately "
-                       "before each camera warp");
-
-        bool reprojAutoCalibrate = config->ReprojAutoCalibrate.value_or_default();
-        if (ImGui::Checkbox("Auto-calibrate camera input##reproj", &reprojAutoCalibrate))
-            config->ReprojAutoCalibrate = reprojAutoCalibrate;
-        ShowHelpMarker("Automatically learn sensitivity, axes, inversion, and input delay from real camera movement");
-
-        bool inputPoseLagAuto = !config->ReprojInputPoseLagMs.has_value();
-        if (ImGui::Checkbox("Automatic input pose lag##reproj", &inputPoseLagAuto))
-        {
-            if (inputPoseLagAuto)
-                config->ReprojInputPoseLagMs.reset();
-            else
-                config->ReprojInputPoseLagMs = 0.0f;
-        }
-        if (!inputPoseLagAuto)
-        {
-            ImGui::SameLine();
-            ImGui::PushItemWidth(105.0f * menuResScale);
-            float inputPoseLag = config->ReprojInputPoseLagMs.value_or(0.0f);
-            if (ImGui::InputFloat("##inputPoseLagMs", &inputPoseLag, 1.0f, 5.0f, "%.0f ms"))
-                config->ReprojInputPoseLagMs = std::clamp(inputPoseLag, 0.0f, 150.0f);
-            ImGui::PopItemWidth();
-        }
-        ShowHelpMarker("Auto anchors camera-less source frames to the learned input delay. An explicit 0-150 ms "
-                       "override is intended for troubleshooting.");
-
-        ImGui::PushItemWidth(135.0f * menuResScale);
-        float manualYaw = config->ReprojManualYawDegrees.value_or(0.0f);
-        float manualPitch = config->ReprojManualPitchDegrees.value_or(0.0f);
-        if (ImGui::InputFloat("Manual yaw deg/count##reproj", &manualYaw, 0.001f, 0.01f, "%.4f"))
-            config->ReprojManualYawDegrees = manualYaw;
-        if (ImGui::InputFloat("Manual pitch deg/count##reproj", &manualPitch, 0.001f, 0.01f, "%.4f"))
-            config->ReprojManualPitchDegrees = manualPitch;
-        ImGui::PopItemWidth();
-        ShowHelpMarker("Optional explicit fallback for rotation-only mouse timewarp. Both axes are required when "
-                       "calibration is unavailable.");
-
-        ImGui::PushItemWidth(135.0f * menuResScale);
-        float gamepadYaw = config->ReprojGamepadDegreesPerSecondX.value_or_default();
-        float gamepadPitch = config->ReprojGamepadDegreesPerSecondY.value_or_default();
-        if (ImGui::InputFloat("Gamepad yaw deg/s##reproj", &gamepadYaw, 5.0f, 20.0f, "%.0f"))
-            config->ReprojGamepadDegreesPerSecondX = gamepadYaw;
-        if (ImGui::InputFloat("Gamepad pitch deg/s##reproj", &gamepadPitch, 5.0f, 20.0f, "%.0f"))
-            config->ReprojGamepadDegreesPerSecondY = gamepadPitch;
-        ImGui::PopItemWidth();
-        ShowHelpMarker("Right-stick late latching uses these rotation rates. Adjust to match the game's controller "
-                       "sensitivity; signs control direction.");
-
         bool reprojDebugView = config->ReprojDebugView.value_or_default();
         if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))
             config->ReprojDebugView = reprojDebugView;
@@ -4009,12 +3956,10 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ImGui::TextDisabled("Present interval mean %.2f ms / p95 %.2f ms | missed %u | lead %.2f ms",
                                 metrics.meanPresentIntervalMs, metrics.p95PresentIntervalMs,
                                 metrics.missedDisplaySlots, metrics.dispatchLeadMs);
-            ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s%s", metrics.poseAgeMs,
+            ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s", metrics.poseAgeMs,
                                 metrics.queueDepth,
                                 metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",
-                                metrics.gamePresentBlockMs,
-                                metrics.depthReady ? " | depth ready" : "",
-                                metrics.latePoseEstimated ? " | pose extrapolated" : "");
+                                metrics.gamePresentBlockMs, metrics.depthReady ? " | depth ready" : "");
             if (metrics.focusLost || metrics.anchorStale || !metrics.depthReady)
                 ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Warp paused: %s%s%s",
                                    metrics.focusLost ? "focus lost " : "", metrics.anchorStale ? "anchor stale " : "",
@@ -4025,12 +3970,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             if (metrics.hudWarped)
                 ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
                                    "HUD warning: the supplied UI is being warped with the scene.");
-            if (reprojLateLatch && reprojAutoCalibrate)
-                ImGui::TextDisabled("Mouse calibration %.0f%% | learned delay %d ms | %s%s",
-                                    metrics.mouseCalibrationConfidence * 100.0f, metrics.mouseCalibrationLagMs,
-                                    metrics.calibrationSource == 2 ? "motion grid" :
-                                    (metrics.calibrationSource == 1 ? "camera basis" : "manual fallback"),
-                                    metrics.calibrationReady ? "" : " | awaiting calibration or manual axes");
         }
     }
 

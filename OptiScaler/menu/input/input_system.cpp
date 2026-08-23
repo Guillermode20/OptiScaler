@@ -1352,40 +1352,6 @@ POINT GetMouseScreenPos()
     return _state.MouseScreenPos;
 }
 
-RawMouseMotion GetRawMouseMotion()
-{
-    std::unique_lock lock(_state.Mutex);
-    return _state.RawMouseMotionState;
-}
-
-RawMouseMotion GetRawMouseMotionAt(double timestampMs)
-{
-    std::unique_lock lock(_state.Mutex);
-    // A zero timestamp means that the game did not publish a camera-pose time.
-    // Returning the oldest history entry turns that absence into a very large,
-    // false late-latch delta.  Callers without a valid timestamp must anchor to
-    // the current input sample (or provide their own learned timestamp).
-    if (timestampMs <= 0.0)
-        return _state.RawMouseMotionState;
-
-    RawMouseMotion result {};
-    RawMouseMotion oldest = _state.RawMouseMotionState;
-    for (const auto& sample : _state.RawMouseHistory)
-    {
-        if (sample.TimestampMs > 0.0 && sample.TimestampMs < oldest.TimestampMs)
-            oldest = sample;
-        if (sample.TimestampMs <= timestampMs && sample.TimestampMs >= result.TimestampMs)
-            result = sample;
-    }
-    return result.TimestampMs > 0.0 ? result : oldest;
-}
-
-GamepadMotion GetGamepadMotion()
-{
-    std::unique_lock lock(_state.Mutex);
-    return _state.GamepadMotionState;
-}
-
 bool ShouldBlockMouse()
 {
     std::unique_lock lock(_state.Mutex);

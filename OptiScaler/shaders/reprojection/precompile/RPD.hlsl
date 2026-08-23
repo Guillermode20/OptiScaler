@@ -11,7 +11,6 @@ cbuffer RP_Constants : register(b0)
     uint   InvertedDepth;
     uint   Mode;
     uint   DebugView;
-    uint   Extrapolate;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -24,8 +23,6 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
-    float  LateYaw;
-    float  LatePitch;
 };
 
 Texture2D<float4> LastColor : register(t0);
@@ -96,22 +93,13 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                                   CameraNear, CameraFar, InvertedDepth);
     float3 worldPos = ReconstructWorld(ndc, depthZ, camPos, right, up, forward, tanHalf, CameraAspect);
 
-    // Warp target pose (single-prediction ATW): the current camera basis rotated
-    // only by the late-latched input received since the source pose was captured.
-    // When late latch is disabled (Extrapolate=1), fall back to linearly
-    // projecting the previous->current pose delta forward by TimeStep instead.
-    float s = Extrapolate != 0 ? 1.0f + TimeStep : 1.0f;
+    // Warp target pose: linearly project the previous->current pose delta
+    // forward by TimeStep.
+    const float s = 1.0f + TimeStep;
     float3 midPos     = lerp(PrevCameraPos.xyz, camPos, s);
     float3 midRight   = normalize(lerp(PrevCameraRight.xyz, right, s));
     float3 midUp      = normalize(lerp(PrevCameraUp.xyz, up, s));
     float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
-
-    // Late latch is sampled immediately before dispatch. Apply yaw around the
-    // camera up axis, then pitch around the yawed right axis.
-    midRight = normalize(RotateAxis(midRight, midUp, LateYaw));
-    midForward = normalize(RotateAxis(midForward, midUp, LateYaw));
-    midUp = normalize(RotateAxis(midUp, midRight, LatePitch));
-    midForward = normalize(RotateAxis(midForward, midRight, LatePitch));
 
     // Mode 2 is rotation-only timewarp. Keep the source position so the warp
     // cannot reveal geometry through a translation that we cannot synthesize.

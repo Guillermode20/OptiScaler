@@ -4,13 +4,13 @@
 
 Convert OptiScaler's DX12 reprojection from its validated synchronous presentation path into genuine asynchronous timewarp that returns the game's `Present()` promptly while a dedicated presenter repeatedly warps the newest completed frame at display cadence. The implementation must remain native to OptiScaler, preserve safe swapchain/resource ownership on Windows and Proton, use rotational late-latching first, and fall back synchronously rather than showing black or racing game backbuffers when required presentation capabilities are unavailable.
 
-**Implementation status (2026-08-23):** The virtual-swapchain ownership seam was live-validated in Deep Rock Galactic on Proton on 2026-08-22. The presenter has since been changed to one persistent display-clock loop: packet publication only replaces the anchor at a scheduled slot, every valid output (including a new anchor's first display) is warped, and async presentation is always `Present(1, 0)`. This revised cadence and the motion-grid calibration still require a fresh Windows build and DRG panning validation. Keep `ReprojAsync=false` as the shipped default.
+**Implementation status (2026-08-23):** The virtual-swapchain ownership seam was live-validated in Deep Rock Galactic on Proton on 2026-08-22. The presenter has since been changed to one persistent display-clock loop: packet publication only replaces the anchor at a scheduled slot, every valid output (including a new anchor's first display) is warped, and async presentation is always `Present(1, 0)`. This revised cadence still requires a fresh build and DRG validation. Keep `ReprojAsync=false` as the shipped default.
 
 The display-clock diagnostics separate renderer updates from actual display output. At a 30 FPS source on a 120 Hz display, the invariant is approximately 30 source updates and 120 total warped presents, divided into about 30 new-anchor displays and 90 repeated-anchor displays. Packet arrival never causes an extra present or restarts the display deadline.
 
-When a game supplies projection values but no camera basis (the DRG path), late-latched mouse rotation uses an exact projection-space rotational homography. A 16x9 motion-vector grid is copied asynchronously from the packet-owned velocity texture and robustly fitted to yaw/pitch; accepted fits are regressed against raw input over 0-150 ms lag bins. `[Reproj] InputPoseLagMs=auto` uses that learned delay, while an explicit value overrides it. Until at least 24 frames and 70% confidence, the manual mouse scale and one-source-frame pose-lag estimate remain active.
+**Late latch removed (2026-08-23):** Live DRG testing showed that input-side late latching, motion-grid auto-calibration, and learned input pose lag made the experience feel worse, and the per-packet motion-grid readback ran on the presenter thread against pacing. They were removed along with mode 3 and `RP_Constants::extrapolate`; warps now extrapolate the last two rendered poses by `TimeStep` only. Mouse-look rotation is again bounded by renderer cadence; translation, world animation, recoil, head bob, and scripted camera effects always were.
 
-Mouse-look rotation is detached from render cadence in this mode. Translation, independently animated world objects, recoil, head bob, and scripted camera effects still update only when the renderer publishes a new anchor.
+~~Mouse-look rotation is detached from render cadence in this mode.~~ Superseded by the late-latch removal above.
 
 Two implementation clarifications were required during review:
 
@@ -72,9 +72,9 @@ Two implementation clarifications were required during review:
 - Route every virtualized `Present()` branch through either async packet publication or `PresentVirtualFrameSync`; the current early inactive/paused branch must not directly present an untouched real backbuffer. This includes the hook layer: `FGHooks::FGPresent`'s inactive/paused pass-through branch falls through to `o_FGSCPresent`, which under virtualization would real-present a backbuffer nobody rendered into, so it must divert to the anchor path while virtualized. When virtualization is unavailable, retain the existing raw-backbuffer synchronous logic unchanged.
 - A reset frame or missing velocity publishes no warp but still presents the newest real virtual frame. Device removal is logged via `GetDeviceRemovedReason` and triggers the synchronous downgrade rather than being propagated to the game (`FGHooks::FGPresent` returns `S_OK` unconditionally for Reproj); occlusion pauses warp production without marking the presenter permanently failed.
 
-### 6. Keep late-latched rotational warp and UI behavior at presentation time
+### 6. Keep pose-extrapolated warp and UI behavior at presentation time
 
-- Reuse `FillConstants`, `ApplyLateLatch`, `OptiInput::GetRawMouseMotionAt`, `ReprojRotationOnly`, manual mouse scales, and auto-calibration. Keep late-latch sampling inside `DispatchPacketWarp`, immediately before the worker records each warp; never move it back to packet capture.
+- Reuse `FillConstants`, `ReprojRotationOnly`, and the packet HUDless/UI selection. Warps extrapolate rendered poses by `TimeStep`; do not re-add input sampling to the warp path without revisiting the 2026-08-23 removal verdict.
 - Reuse packet HUDless/UI selection and `RUI_Dx12`: warp HUDless color when both HUDless and UI resources are ready, then composite unwarped UI onto each generated real-swapchain backbuffer. Otherwise warp the complete frame and report `hudWarped=true`.
 - Version 1 remains rotational/MV/depth behavior already implemented; do not add translation prediction, new calibration, optical flow, Vulkan, or DX11 while changing presentation ownership.
 

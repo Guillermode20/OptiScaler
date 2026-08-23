@@ -19,13 +19,8 @@ struct alignas(256) RP_Constants
     uint32_t invertMV;        // flip MV sign convention (per-game)
     uint32_t jitterCancelled; // subtract jitter from the sample position
     uint32_t invertedDepth;
-    uint32_t mode; // 0 = MV, 1 = depth, 2 = basis rotation, 3 = projection-only rotation
+    uint32_t mode; // 0 = MV, 1 = depth, 2 = basis rotation
     uint32_t debugView;
-    // 1 = legacy linear extrapolation of the game pose by TimeStep. 0 (late latch
-    // active) = late-latched input solely owns [source pose -> display time].
-    // ATW rule: never double-predict — extrapolation plus measured post-render
-    // input sums to ~2x rotation during steady turns and jitters.
-    uint32_t extrapolate;
     // --- Mode 1 (depth-aware) camera block, current frame ---
     float cameraPosition[4];
     float cameraUp[4];
@@ -40,8 +35,6 @@ struct alignas(256) RP_Constants
     float cameraFar;
     float cameraVFov; // radians, vertical
     float cameraAspect;
-    float lateYaw;   // radians added from post-render raw mouse input
-    float latePitch;
 };
 
 // v1: motion-vector warp. Sample _lastColor at (p - MV * TimeStep).
@@ -57,9 +50,7 @@ cbuffer RP_Constants : register(b0)
     uint   InvertMV;
     uint   JitterCancelled;
     uint   InvertedDepth;
-    uint   Mode;
     uint   DebugView;
-    uint   Extrapolate;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -72,8 +63,6 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
-    float  LateYaw;
-    float  LatePitch;
 };
 
 Texture2D<float4> LastColor : register(t0);
@@ -109,29 +98,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     // Texel displacement -> normalized UV offset, then move BACKWARD along the flow
     float2 deltaUV = delta / float2(MVSize);
 
-    // Projection-only timewarp maps each target display ray back into the source
-    // anchor with the exact rotational homography. Unlike a constant UV offset,
-    // this remains geometrically correct toward the edges of a wide FOV.
-    float lateTanHalfV = tan(CameraVFov * 0.5f);
-    float lateTanHalfH = lateTanHalfV * CameraAspect;
-    float2 lateUV = (lateTanHalfH > 1e-5f && lateTanHalfV > 1e-5f)
-                        ? float2(LateYaw / (2.0f * lateTanHalfH), LatePitch / (2.0f * lateTanHalfV))
-                        : float2(0.0f, 0.0f);
-
-    // Clamping an off-screen source stretches the last edge texel across the
-    // viewport. Keep the real-frame pixels instead and feather the transition.
-    float2 unboundedSrcUV = uv - deltaUV * TimeStep + lateUV;
-    if (Mode == 3 && lateTanHalfH > 1e-5f && lateTanHalfV > 1e-5f)
-    {
-        float2 targetNdc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-        float3 sourceRay = normalize(float3(targetNdc.x * lateTanHalfH,
-                                             targetNdc.y * lateTanHalfV, 1.0f));
-        sourceRay = RotateAxis(sourceRay, float3(0.0f, 1.0f, 0.0f), LateYaw);
-        sourceRay = RotateAxis(sourceRay, float3(1.0f, 0.0f, 0.0f), LatePitch);
-        float2 sourceNdc = sourceRay.xy / max(sourceRay.z, 1e-5f) /
-                           float2(lateTanHalfH, lateTanHalfV);
-        unboundedSrcUV = float2(sourceNdc.x * 0.5f + 0.5f, 0.5f - sourceNdc.y * 0.5f);
-    }
+    float2 unboundedSrcUV = uv - deltaUV * TimeStep;
     float edgeDistance = min(min(unboundedSrcUV.x, unboundedSrcUV.y),
                              min(1.0f - unboundedSrcUV.x, 1.0f - unboundedSrcUV.y));
     float coverage = all(unboundedSrcUV >= 0.0f) && all(unboundedSrcUV <= 1.0f) ? saturate(edgeDistance * 32.0f) : 0.0f;
@@ -150,7 +117,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 )";
 
 // v2: depth-aware reprojection. Reconstruct the world position from depth +
-// camera, extrapolate the camera to the fake-frame time, reproject and blend
+// camera, project the camera pose forward by TimeStep, reproject and blend
 // with the MV warp where the depth test fails (disocclusions) or MV ~ 0 (HUD).
 inline static std::string RPD_ShaderCode = R"(
 cbuffer RP_Constants : register(b0)
@@ -166,7 +133,6 @@ cbuffer RP_Constants : register(b0)
     uint   InvertedDepth;
     uint   Mode;
     uint   DebugView;
-    uint   Extrapolate;
     float4 CameraPos;
     float4 CameraUp;
     float4 CameraRight;
@@ -179,16 +145,12 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
-    float  LateYaw;
-    float  LatePitch;
 };
 
 Texture2D<float4> LastColor : register(t0);
 Texture2D<float4> Velocity  : register(t1);
 Texture2D<float4> Depth     : register(t2);
 RWTexture2D<float4> Output  : register(u0);
-
-SamplerState Bilinear : register(s0);
 
 // Standard perspective depth -> view-space Z (positive distance from camera plane).
 // Invalid far planes/depth values are handled by the confidence test below.
@@ -251,22 +213,13 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                                   CameraNear, CameraFar, InvertedDepth);
     float3 worldPos = ReconstructWorld(ndc, depthZ, camPos, right, up, forward, tanHalf, CameraAspect);
 
-    // Warp target pose (single-prediction ATW): the current camera basis rotated
-    // only by the late-latched input received since the source pose was captured.
-    // When late latch is disabled (Extrapolate=1), fall back to linearly
-    // projecting the previous->current pose delta forward by TimeStep instead.
-    float s = Extrapolate != 0 ? 1.0f + TimeStep : 1.0f;
+    // Warp target pose: linearly project the previous->current pose delta
+    // forward by TimeStep.
+    const float s = 1.0f + TimeStep;
     float3 midPos     = lerp(PrevCameraPos.xyz, camPos, s);
     float3 midRight   = normalize(lerp(PrevCameraRight.xyz, right, s));
     float3 midUp      = normalize(lerp(PrevCameraUp.xyz, up, s));
     float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
-
-    // Late latch is sampled immediately before dispatch. Apply yaw around the
-    // camera up axis, then pitch around the yawed right axis.
-    midRight = normalize(RotateAxis(midRight, midUp, LateYaw));
-    midForward = normalize(RotateAxis(midForward, midUp, LateYaw));
-    midUp = normalize(RotateAxis(midUp, midRight, LatePitch));
-    midForward = normalize(RotateAxis(midForward, midRight, LatePitch));
 
     // Mode 2 is rotation-only timewarp. Keep the source position so the warp
     // cannot reveal geometry through a translation that we cannot synthesize.
@@ -291,12 +244,6 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                                        CameraNear, CameraFar, InvertedDepth);
         float3 targetWorld = ReconstructWorld(targetNdc, targetZ, camPos, right, up, forward, tanHalf, CameraAspect);
 
-        float relErr = length(worldPos - targetWorld) / max(depthZ, 0.01f);
-        conf = saturate(1.0f - relErr);
-
-        // Reject depth discontinuities around the projected target. This is a
-        // conservative disocclusion test: a little loss of warp coverage is much
-        // less visible than pulling foreground colour across a newly exposed edge.
         float2 depthTexel = 1.0f / float2(DisplaySize);
         float d0 = targetZ;
         float d1 = LinearizeDepth(Depth.SampleLevel(Bilinear, reprojUV + float2(depthTexel.x, 0), 0).r,
@@ -307,6 +254,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                                   CameraNear, CameraFar, InvertedDepth);
         float d4 = LinearizeDepth(Depth.SampleLevel(Bilinear, reprojUV - float2(0, depthTexel.y), 0).r,
                                   CameraNear, CameraFar, InvertedDepth);
+        float relErr = length(worldPos - targetWorld) / max(depthZ, 0.01f);
+        conf = saturate(1.0f - relErr);
+
         float depthSpread = max(max(abs(d1 - d0), abs(d2 - d0)), max(abs(d3 - d0), abs(d4 - d0))) / max(d0, 0.01f);
         conf *= saturate(1.0f - depthSpread * 8.0f);
 

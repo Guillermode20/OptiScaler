@@ -50,12 +50,9 @@ FGOutput=asynctimewarp
 [AsyncTimewarp]
 Enabled=true
 MaxPoseAgeMs=50
-; Optional only when auto-calibration cannot converge; both axes are required.
-ManualYawDegrees=auto
-ManualPitchDegrees=auto
 
 [Reproj]
-; Experimental worker-owned DirectComposition output; false keeps the synchronous fallback
+; Experimental worker-owned presentation on the real main swapchain; false keeps the synchronous fallback
 Async=false
 ; 1 = depth-aware, 2 = rotation-only camera timewarp (0 is legacy MV diagnostics)
 Mode=1
@@ -67,13 +64,12 @@ UseDepth=true
 RotationOnly=false
 ```
 
-`Async=true` uses a worker-owned DirectComposition swapchain, keeping warp writes
-away from the game's backbuffers. If composition setup fails, OptiScaler falls back
+`Async=true` uses a worker-owned presenter on the real main swapchain, keeping warp writes
+away from the game's backbuffers. If waitable-swapchain setup fails, OptiScaler falls back
 to the synchronous presenter. Higher `MaxWarpFrames` values may reduce game-thread
 throughput only in that fallback. Timewarp pauses on lost focus, missing/invalid
-depth, a reset, or an anchor older than `MaxPoseAgeMs`, then presents the latest real
-frame unchanged until a fresh anchor arrives. The menu reports anchor age, warp
-cadence, calibration, rotation-only fallback, and HUD-warp warnings.
+depth, or a reset, then presents the latest real frame unchanged until a fresh anchor
+arrives. The menu reports anchor age, warp cadence, rotation-only fallback, and HUD-warp warnings.
 
 ### Pseudo SuperSampling
 With OptiScaler 0.4 there are new options for pseudo-supersampling under `[Upscalers]`

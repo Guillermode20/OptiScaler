@@ -309,110 +309,6 @@ bool AReproj_Dx12::HasFreshCameraPose(int fIndex, float* ageMs) const
     return hasCamera && IsPoseFresh(_cameraTimestamp[fIndex], ageMs);
 }
 
-void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
-{
-    if (!Config::Instance()->ReprojAutoCalibrate.value_or_default())
-        return;
-
-    const auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
-    const auto timestamp = _cameraTimestamp[fIndex];
-    const auto prevTimestamp = _cameraTimestamp[prevIndex];
-    if (_reset[fIndex] || _reset[prevIndex] || timestamp <= prevTimestamp || timestamp == _lastCalibrationTimestamp ||
-        IsCameraAllZero(fIndex) || IsCameraAllZero(prevIndex))
-        return;
-    _lastCalibrationTimestamp = timestamp;
-
-    const auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
-    const auto yaw = std::atan2(dot(_cameraForward[fIndex], _cameraRight[prevIndex]),
-                                dot(_cameraForward[fIndex], _cameraForward[prevIndex]));
-    const auto pitch = -std::atan2(dot(_cameraForward[fIndex], _cameraUp[prevIndex]),
-                                   dot(_cameraForward[fIndex], _cameraForward[prevIndex]));
-    if (std::hypot(yaw, pitch) > 0.5)
-        return; // scene cut or non-gameplay camera jump
-
-    AddCalibrationSample(yaw, pitch, prevTimestamp, timestamp, 1.0f, 1);
-}
-
-void AReproj_Dx12::AddCalibrationSample(double yaw, double pitch, double prevTimestamp, double timestamp,
-                                        float inlierRatio, uint32_t source)
-{
-    if (timestamp <= prevTimestamp || std::hypot(yaw, pitch) < 1e-5 || std::hypot(yaw, pitch) > 0.5 ||
-        inlierRatio < 0.6f)
-        return;
-
-    std::scoped_lock calibrationLock(_calibrationMutex);
-
-    for (int i = 0; i < CALIBRATION_LAG_BINS; ++i)
-    {
-        const auto lag = static_cast<double>(i * 2);
-        const auto first = OptiInput::GetRawMouseMotionAt(prevTimestamp - lag);
-        const auto last = OptiInput::GetRawMouseMotionAt(timestamp - lag);
-        const auto x = static_cast<double>(last.TotalX - first.TotalX);
-        const auto y = static_cast<double>(last.TotalY - first.TotalY);
-        if (std::hypot(x, y) < 2.0)
-            continue;
-
-        auto& bin = _calibration[i];
-        if (bin.samples > 300)
-        {
-            bin.xx *= 0.995;
-            bin.xy *= 0.995;
-            bin.yy *= 0.995;
-            bin.xYaw *= 0.995;
-            bin.yYaw *= 0.995;
-            bin.xPitch *= 0.995;
-            bin.yPitch *= 0.995;
-            bin.yaw2 *= 0.995;
-            bin.pitch2 *= 0.995;
-            bin.inlierTotal *= 0.995;
-        }
-        bin.xx += x * x;
-        bin.xy += x * y;
-        bin.yy += y * y;
-        bin.xYaw += x * yaw;
-        bin.yYaw += y * yaw;
-        bin.xPitch += x * pitch;
-        bin.yPitch += y * pitch;
-        bin.yaw2 += yaw * yaw;
-        bin.pitch2 += pitch * pitch;
-        bin.inlierTotal += inlierRatio;
-        ++bin.samples;
-    }
-
-    double bestScore = 1.0;
-    for (int i = 0; i < CALIBRATION_LAG_BINS; ++i)
-    {
-        const auto& bin = _calibration[i];
-        const auto determinant = bin.xx * bin.yy - bin.xy * bin.xy;
-        if (bin.samples < 24 || determinant < 1.0 || bin.yaw2 + bin.pitch2 < 1e-6)
-            continue;
-
-        const double yawX = (bin.yy * bin.xYaw - bin.xy * bin.yYaw) / determinant;
-        const double yawY = (bin.xx * bin.yYaw - bin.xy * bin.xYaw) / determinant;
-        const double pitchX = (bin.yy * bin.xPitch - bin.xy * bin.yPitch) / determinant;
-        const double pitchY = (bin.xx * bin.yPitch - bin.xy * bin.xPitch) / determinant;
-        if (std::max({ std::abs(yawX), std::abs(yawY), std::abs(pitchX), std::abs(pitchY) }) > 0.02)
-            continue;
-
-        const auto yawExplained = yawX * bin.xYaw + yawY * bin.yYaw;
-        const auto pitchExplained = pitchX * bin.xPitch + pitchY * bin.yPitch;
-        const auto residual = std::max(0.0, 1.0 - (yawExplained + pitchExplained) / (bin.yaw2 + bin.pitch2));
-        const auto inliers = bin.inlierTotal / std::max(1u, bin.samples);
-        const auto score = 1.0 - std::clamp((1.0 - residual) * inliers, 0.0, 1.0);
-        if (score < bestScore)
-        {
-            bestScore = score;
-            _calibrationMatrix[0] = yawX;
-            _calibrationMatrix[1] = yawY;
-            _calibrationMatrix[2] = pitchX;
-            _calibrationMatrix[3] = pitchY;
-            _calibrationLagMs = i * 2;
-            _calibrationSource = source;
-        }
-    }
-    _calibrationConfidence = static_cast<float>(std::clamp(1.0 - bestScore, 0.0, 1.0));
-}
-
 namespace
 {
 float ReprojHalfToFloat(uint16_t value)
@@ -445,176 +341,8 @@ float ReprojHalfToFloat(uint16_t value)
 }
 }
 
-bool AReproj_Dx12::CaptureMotionGrid(ID3D12GraphicsCommandList* cmdList, ReprojFramePacket& packet)
-{
-    if (cmdList == nullptr || packet.velocity == nullptr)
-        return false;
-
-    const auto desc = packet.velocity->GetDesc();
-    const bool supported = desc.Format == DXGI_FORMAT_R16G16_FLOAT || desc.Format == DXGI_FORMAT_R32G32_FLOAT ||
-                           desc.Format == DXGI_FORMAT_R16G16_SNORM;
-    if (!supported || desc.Width < 8 || desc.Height < 8)
-        return false;
-
-    constexpr uint32_t columns = 16;
-    constexpr uint32_t rows = 9;
-    constexpr uint32_t count = columns * rows;
-    constexpr uint64_t sampleStride = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
-    const auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(count * sampleStride);
-    if (packet.mvReadback == nullptr || packet.mvReadback->GetDesc().Width != bufferDesc.Width)
-    {
-        SAFE_RELEASE(packet.mvReadback);
-        const auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
-        if (FAILED(_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bufferDesc,
-                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                    IID_PPV_ARGS(&packet.mvReadback))))
-            return false;
-        packet.mvReadback->SetName(L"Reproj_MotionGridReadback");
-    }
-
-    ResourceBarrier(cmdList, packet.velocity, packet.velocityState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    for (uint32_t y = 0, sample = 0; y < rows; ++y)
-    {
-        for (uint32_t x = 0; x < columns; ++x, ++sample)
-        {
-            const UINT sx = static_cast<UINT>((x + 0.5) * desc.Width / columns);
-            const UINT sy = static_cast<UINT>((y + 0.5) * desc.Height / rows);
-            D3D12_TEXTURE_COPY_LOCATION destination {};
-            destination.pResource = packet.mvReadback;
-            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            destination.PlacedFootprint.Offset = sample * sampleStride;
-            destination.PlacedFootprint.Footprint.Format = desc.Format;
-            destination.PlacedFootprint.Footprint.Width = 1;
-            destination.PlacedFootprint.Footprint.Height = 1;
-            destination.PlacedFootprint.Footprint.Depth = 1;
-            destination.PlacedFootprint.Footprint.RowPitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
-            D3D12_TEXTURE_COPY_LOCATION source {};
-            source.pResource = packet.velocity;
-            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            D3D12_BOX box { sx, sy, 0, sx + 1, sy + 1, 1 };
-            cmdList->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
-        }
-    }
-    ResourceBarrier(cmdList, packet.velocity, D3D12_RESOURCE_STATE_COPY_SOURCE, packet.velocityState);
-    packet.mvReadbackFormat = desc.Format;
-    packet.mvSampleCount = count;
-    packet.calibrationPending = true;
-    return true;
-}
-
-void AReproj_Dx12::ProcessMotionCalibration(ReprojFramePacket& packet)
-{
-    if (!packet.calibrationPending || packet.mvReadback == nullptr || packet.mvSampleCount == 0)
-        return;
-    packet.calibrationPending = false;
-
-    void* mappedRaw = nullptr;
-    D3D12_RANGE readRange { 0, packet.mvSampleCount * D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT };
-    if (FAILED(packet.mvReadback->Map(0, &readRange, &mappedRaw)))
-        return;
-    const auto* mapped = static_cast<const uint8_t*>(mappedRaw);
-
-    struct Observation
-    {
-        double a, b, c, d; // du=a*yaw+b*pitch, dv=c*yaw+d*pitch
-        double du, dv;
-    };
-    std::vector<Observation> observations;
-    observations.reserve(packet.mvSampleCount);
-    constexpr uint32_t columns = 16;
-    constexpr uint32_t rows = 9;
-    const double tanHalfV = std::tan(0.5 * packet.constants.cameraVFov);
-    const double tanHalfH = tanHalfV * packet.constants.cameraAspect;
-    const double focalY = tanHalfV > 1e-6 ? 0.5 * packet.constants.displayHeight / tanHalfV : 0.0;
-    const double focalX = tanHalfH > 1e-6 ? 0.5 * packet.constants.displayWidth / tanHalfH : 0.0;
-    for (uint32_t i = 0; i < packet.mvSampleCount; ++i)
-    {
-        const auto* sample = mapped + i * D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
-        float x = 0.0f, y = 0.0f;
-        if (packet.mvReadbackFormat == DXGI_FORMAT_R32G32_FLOAT)
-        {
-            std::memcpy(&x, sample, sizeof(float));
-            std::memcpy(&y, sample + sizeof(float), sizeof(float));
-        }
-        else if (packet.mvReadbackFormat == DXGI_FORMAT_R16G16_FLOAT)
-        {
-            x = ReprojHalfToFloat(*reinterpret_cast<const uint16_t*>(sample));
-            y = ReprojHalfToFloat(*reinterpret_cast<const uint16_t*>(sample + 2));
-        }
-        else
-        {
-            x = std::max(-1.0f, *reinterpret_cast<const int16_t*>(sample) / 32767.0f);
-            y = std::max(-1.0f, *reinterpret_cast<const int16_t*>(sample + 2) / 32767.0f);
-        }
-        x *= packet.constants.mvScaleX;
-        y *= packet.constants.mvScaleY;
-        if (packet.constants.invertMV)
-        {
-            x = -x;
-            y = -y;
-        }
-        if (std::isfinite(x) && std::isfinite(y) && std::hypot(x, y) < 0.25f * packet.constants.displayWidth &&
-            focalX > 0.0 && focalY > 0.0)
-        {
-            const uint32_t gridX = i % columns;
-            const uint32_t gridY = i / columns;
-            const double nx = ((gridX + 0.5) / columns * 2.0 - 1.0) * tanHalfH;
-            const double ny = (1.0 - (gridY + 0.5) / rows * 2.0) * tanHalfV;
-            observations.push_back({ focalX * (1.0 + nx * nx), -focalX * nx * ny,
-                                     -focalY * nx * ny, focalY * (1.0 + ny * ny), x, y });
-        }
-    }
-    D3D12_RANGE written { 0, 0 };
-    packet.mvReadback->Unmap(0, &written);
-    if (observations.size() < 24 || packet.constants.cameraVFov <= 0.0f || packet.constants.cameraAspect <= 0.0f)
-        return;
-
-    std::vector<uint8_t> accepted(observations.size(), 1);
-    double yaw = 0.0, pitch = 0.0;
-    for (int iteration = 0; iteration < 3; ++iteration)
-    {
-        double aa = 0.0, ab = 0.0, bb = 0.0, ay = 0.0, by = 0.0;
-        for (size_t i = 0; i < observations.size(); ++i)
-        {
-            if (!accepted[i])
-                continue;
-            const auto& o = observations[i];
-            aa += o.a * o.a + o.c * o.c;
-            ab += o.a * o.b + o.c * o.d;
-            bb += o.b * o.b + o.d * o.d;
-            ay += o.a * o.du + o.c * o.dv;
-            by += o.b * o.du + o.d * o.dv;
-        }
-        const double determinant = aa * bb - ab * ab;
-        if (determinant < 1e-9)
-            return;
-        yaw = (bb * ay - ab * by) / determinant;
-        pitch = (aa * by - ab * ay) / determinant;
-
-        std::vector<double> residuals;
-        residuals.reserve(observations.size());
-        for (const auto& o : observations)
-            residuals.push_back(std::hypot(o.du - o.a * yaw - o.b * pitch,
-                                           o.dv - o.c * yaw - o.d * pitch));
-        auto middle = residuals.begin() + residuals.size() / 2;
-        std::nth_element(residuals.begin(), middle, residuals.end());
-        const double threshold = std::max(0.75, *middle * 3.0);
-        for (size_t i = 0; i < observations.size(); ++i)
-        {
-            const auto& o = observations[i];
-            accepted[i] = std::hypot(o.du - o.a * yaw - o.b * pitch,
-                                     o.dv - o.c * yaw - o.d * pitch) <= threshold;
-        }
-    }
-    const auto inliers = static_cast<uint32_t>(std::count(accepted.begin(), accepted.end(), uint8_t { 1 }));
-    const float inlierRatio = static_cast<float>(inliers) / observations.size();
-    AddCalibrationSample(yaw, pitch, packet.renderTimestamp - packet.frameDelta, packet.renderTimestamp,
-                         inlierRatio, 2);
-}
-
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 {
-    UpdateMouseCalibration(fIndex);
     auto& state = State::Instance();
     auto config = Config::Instance();
     auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
@@ -633,13 +361,7 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.jitterCancelled = (config->ReprojUseJitterCancel.value_or_default() && IsJitteredMVs()) ? 1 : 0;
     cb.invertedDepth = IsInvertedDepth() ? 1 : 0;
     cb.mode = config->ReprojMode.value_or_default();
-    // Single-prediction ATW: when late latch is on, measured post-render input
-    // solely defines [source pose -> display time]; pose extrapolation would
-    // double-predict that same interval and jitter (overshoot/snap-back).
-    cb.extrapolate = config->ReprojLateLatch.value_or_default() ? 0u : 1u;
     cb.debugView = config->ReprojDebugView.value_or_default() ? 1 : 0;
-    cb.cameraNear = _cameraNear[fIndex];
-    cb.cameraFar = _cameraFar[fIndex];
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
 
@@ -656,94 +378,8 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 
     const bool hasCamera = _cameraVFov[fIndex] > 0.0f && _cameraAspectRatio[fIndex] > 0.0f &&
                            !IsCameraAllZero(fIndex) && !IsCameraAllZero(prevIndex);
-    if (!hasCamera)
-    {
-        // Mode 3 is a camera-basis-independent rotational homography. It is the
-        // DRG path: projection values are present even though a world basis is not.
-        cb.mode = cb.cameraVFov > 0.0f && cb.cameraAspect > 0.0f && config->ReprojLateLatch.value_or_default() ? 3 : 0;
-    }
-    else if (config->ReprojRotationOnly.value_or_default() && cb.mode != 0)
-        cb.mode = 2;
-}
-
-void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse,
-                                     double sourcePoseTimestamp, double additionalLeadMs) const
-{
-    auto config = Config::Instance();
-    // Focus tracking relies on Win32 focus messages, which Wine/Proton does not
-    // always deliver to the wrapped window; skip the gate there (same exemption
-    // the presenter loop uses) so late latch stays live during DRG sessions.
-    if (!config->ReprojLateLatch.value_or_default() ||
-        (!OptiInput::IsFocused() && !State::Instance().isRunningOnLinux))
-        return;
-    // The MV-only path approximates the late rotation as a screen-space offset, so
-    // it needs a valid FOV/aspect; the depth path always has one when mode != 0.
-    if (constants.cameraVFov <= 0.0f || constants.cameraAspect <= 0.0f)
-        return;
-
-    const auto now = Util::MillisecondsNow();
-    const auto current = OptiInput::GetRawMouseMotion();
-    double dx = static_cast<double>(current.TotalX - sourceMouse.TotalX);
-    double dy = static_cast<double>(current.TotalY - sourceMouse.TotalY);
-    const auto predictionMs =
-        std::clamp<double>(config->ReprojPredictionMs.value_or_default() + additionalLeadMs, 0.0, 20.0);
-    if (current.TimestampMs != 0 && now - current.TimestampMs <= 25)
-    {
-        dx += current.VelocityX * predictionMs;
-        dy += current.VelocityY * predictionMs;
-    }
-
-    constexpr double radiansPerDegree = 0.017453292519943295;
-    double yaw = 0.0;
-    double pitch = 0.0;
-    double calibrationMatrix[4] = {};
-    float calibrationConfidence = 0.0f;
-    {
-        std::scoped_lock calibrationLock(_calibrationMutex);
-        std::memcpy(calibrationMatrix, _calibrationMatrix, sizeof(calibrationMatrix));
-        calibrationConfidence = _calibrationConfidence;
-    }
-    if (config->ReprojAutoCalibrate.value_or_default() && calibrationConfidence >= 0.7f)
-    {
-        yaw = calibrationMatrix[0] * dx + calibrationMatrix[1] * dy;
-        pitch = calibrationMatrix[2] * dx + calibrationMatrix[3] * dy;
-    }
-    else if (config->ReprojManualYawDegrees.has_value() && config->ReprojManualPitchDegrees.has_value())
-    {
-        yaw = dx * config->ReprojManualYawDegrees.value() * radiansPerDegree;
-        pitch = dy * config->ReprojManualPitchDegrees.value() * radiansPerDegree;
-    }
-    else if (config->ReprojMouseDegreesX.has_value() && config->ReprojMouseDegreesY.has_value())
-    {
-        yaw = dx * config->ReprojMouseDegreesX.value() * radiansPerDegree;
-        pitch = dy * config->ReprojMouseDegreesY.value() * radiansPerDegree;
-    }
-
-    // Mouse deltas are already integrated; a right stick is a rotation rate.  The
-    // game's latest XInput sample lets a generated frame include aim input received
-    // after the source camera pose, rather than waiting for the next real frame.
-    OptiInput::RefreshGamepadMotion();
-    const auto gamepad = OptiInput::GetGamepadMotion();
-    if (gamepad.TimestampMs != 0.0 && now - gamepad.TimestampMs <= 100.0 && sourcePoseTimestamp > 0.0)
-    {
-        const auto elapsedMs = std::clamp(now - sourcePoseTimestamp + predictionMs, 0.0, 100.0);
-        yaw += gamepad.RightX * config->ReprojGamepadDegreesPerSecondX.value_or_default() * radiansPerDegree *
-               elapsedMs / 1000.0;
-        // XInput's positive Y is up; screen-space pitch is positive down.
-        pitch -= gamepad.RightY * config->ReprojGamepadDegreesPerSecondY.value_or_default() * radiansPerDegree *
-                 elapsedMs / 1000.0;
-    }
-
-    const auto maximum = std::clamp<double>(config->ReprojMaxRotation.value_or_default(), 0.0, 45.0) * radiansPerDegree;
-    const auto length = std::hypot(yaw, pitch);
-    if (length > maximum && length > 0.0)
-    {
-        yaw *= maximum / length;
-        pitch *= maximum / length;
-    }
-
-    constants.lateYaw = static_cast<float>(yaw);
-    constants.latePitch = static_cast<float>(pitch);
+    if (!hasCamera || (config->ReprojRotationOnly.value_or_default() && cb.mode != 0))
+        cb.mode = 0;
 }
 
 bool AReproj_Dx12::CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
@@ -814,7 +450,6 @@ void AReproj_Dx12::RetirePackets()
                                  _scFence->GetCompletedValue() >= packet.retirementFenceValue;
         if (captureDone && presentDone)
         {
-            ProcessMotionCalibration(packet);
             packet.state.store(PacketState::Free);
         }
     }
@@ -869,8 +504,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     if (ok && velocity)
         ok = CopyPacketResource(cmdList, velocity->GetResource(), velocity->state, &packet.velocity,
                                 packet.velocityState, L"Reproj_PacketVelocity");
-    if (ok && velocity && warpAllowed && Config::Instance()->ReprojAutoCalibrate.value_or_default())
-        CaptureMotionGrid(cmdList, packet);
 
     packet.hasDepth = ok && warpAllowed && Config::Instance()->ReprojUseDepth.value_or_default() && depth;
     if (packet.hasDepth)
@@ -901,25 +534,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
     const auto cameraTimestamp = _cameraTimestamp[sourceIndex];
-    const auto configuredLag = Config::Instance()->ReprojInputPoseLagMs;
-    float calibrationConfidence = 0.0f;
-    int calibrationLagMs = 0;
-    {
-        std::scoped_lock calibrationLock(_calibrationMutex);
-        calibrationConfidence = _calibrationConfidence;
-        calibrationLagMs = _calibrationLagMs;
-    }
-    const double learnedOrFallbackLag = calibrationConfidence >= 0.7f
-                                            ? calibrationLagMs
-                                            : std::clamp(packet.frameDelta, 0.0, 150.0);
-    const double sourceTimestamp = cameraTimestamp > 0.0
-                                       ? cameraTimestamp
-                                       : now - std::clamp<double>(configuredLag.value_or(
-                                                                      static_cast<float>(learnedOrFallbackLag)),
-                                                                  0.0, 150.0);
-    packet.sourceMouse = OptiInput::GetRawMouseMotionAt(sourceTimestamp);
+    // Anchor pose age is measured from the camera timestamp; without one, fall
+    // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.
+    const double sourceTimestamp =
+        cameraTimestamp > 0.0 ? cameraTimestamp : now - std::clamp(packet.frameDelta, 0.0, 150.0);
     packet.hasCamera = packet.constants.mode != 0;
-    if (!packet.hasDepth && packet.constants.mode != 3)
+    if (!packet.hasDepth && !packet.hasCamera)
         packet.constants.mode = 0;
     packet.warpAllowed = warpAllowed && velocity;
     packet.retirementFenceValue = 0;
@@ -1004,9 +624,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
-    const auto leadMs = scanoutDeadlineMs > 0.0 ? std::max(0.0, scanoutDeadlineMs - Util::MillisecondsNow()) : 0.0;
-    ApplyLateLatch(constants, packet.sourceMouse, packet.sourcePoseTimestamp, leadMs);
-    const bool useDepth = packet.hasDepth && packet.constants.mode != 3;
+    const bool useDepth = packet.hasDepth;
     const bool ok = _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
                                     useDepth ? packet.depth : nullptr, packet.depthState,
                                     _warpOutput[outputIndex], constants);
@@ -1120,12 +738,9 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     RP_Constants cb {};
     FillConstants(fIndex, cb);
     cb.timeStep = timeStep;
-    ApplyLateLatch(cb, _syncSourceMouse, _cameraTimestamp[fIndex]);
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
-    if (cb.mode == 3)
-        hasDepth = false;
     if (!hasDepth)
         cb.mode = 0;
 
@@ -1177,7 +792,23 @@ double AReproj_Dx12::TargetRefreshHz()
     const auto now = Util::MillisecondsNow();
     if ((now - _lastRefreshQueryMs) >= 1000.0 || _cachedRefreshHz <= 1.0)
     {
-        _cachedRefreshHz = _hwnd != NULL ? static_cast<double>(Util::GetActiveRefreshRate(_hwnd)) : 0.0;
+        // Prefer the swapchain's actual mode (fractional rates like 59.94/119.88,
+        // VRR current rate) and fall back to the desktop display mode.
+        double measured = 0.0;
+        if (_swapChain != nullptr)
+        {
+            DXGI_SWAP_CHAIN_DESC scDesc {};
+            if (SUCCEEDED(_swapChain->GetDesc(&scDesc)))
+            {
+                const auto& rr = scDesc.BufferDesc.RefreshRate;
+                if (rr.Denominator > 0)
+                    measured = static_cast<double>(rr.Numerator) / static_cast<double>(rr.Denominator);
+            }
+        }
+        if (measured <= 1.0 && _hwnd != NULL)
+            measured = static_cast<double>(Util::GetActiveRefreshRate(_hwnd));
+
+        _cachedRefreshHz = measured;
         _lastRefreshQueryMs = now;
     }
 
@@ -1305,23 +936,6 @@ void AReproj_Dx12::StopAsyncPresenter()
     _presenterState.store(PresenterState::Stopped);
 }
 
-bool AReproj_Dx12::WaitForPacketDeadline(int packetIndex, double deadlineMs)
-{
-    auto& packet = _packets[packetIndex];
-    std::unique_lock lock(_presentMutex);
-    const auto remaining = deadlineMs - Util::MillisecondsNow();
-    if (remaining > 0.25)
-    {
-        _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(remaining - 0.2),
-                            [&] { return _stopPresenter.load() || _readyFrameId.load() > packet.frameId; });
-    }
-    lock.unlock();
-
-    while (!_stopPresenter.load() && _readyFrameId.load() <= packet.frameId && Util::MillisecondsNow() < deadlineMs)
-        YieldProcessor();
-
-    return !_stopPresenter.load() && _readyFrameId.load() <= packet.frameId;
-}
 
 HRESULT AReproj_Dx12::WaitForPresentSlot()
 {
@@ -1375,25 +989,17 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
 
 void AReproj_Dx12::PresenterMain()
 {
-    _presenterState.store(PresenterState::Running);
     int activePacketIndex = -1;
     UINT64 activeFrame = 0;
-    double nextDeadlineMs = 0.0;
 
     while (!_stopPresenter.load())
     {
+        // The frame-latency waitable object IS the display clock. Proton signals
+        // it whenever queue capacity frees up (possibly early), so the wall-clock
+        // deadline below gates presents that would otherwise flood ahead of
+        // vblank; the waitable itself keeps us locked to actual scanout slots.
         const auto refreshHz = TargetRefreshHz();
         const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
-        auto now = Util::MillisecondsNow();
-        if (nextDeadlineMs <= 0.0)
-            nextDeadlineMs = now + refreshPeriodMs;
-        if (now > nextDeadlineMs)
-        {
-            std::scoped_lock metricsLock(_metricsMutex);
-            ++_metricsMissedDisplaySlots;
-            nextDeadlineMs = now + refreshPeriodMs;
-        }
-        WaitUntil(nextDeadlineMs - std::clamp(_dispatchLeadMs, 1.0, 5.0));
 
         const auto slotResult = WaitForPresentSlot();
         if (slotResult != S_OK)
@@ -1405,14 +1011,13 @@ void AReproj_Dx12::PresenterMain()
                 std::scoped_lock metricsLock(_metricsMutex);
                 ++_metricsMissedDisplaySlots;
             }
-            nextDeadlineMs = Util::MillisecondsNow() + refreshPeriodMs;
             continue;
         }
         if (_stopPresenter.load())
             break;
 
         // Packet publication never owns cadence. Select the newest completed
-        // anchor only after the slot wait, immediately before late latch/dispatch.
+        // anchor only after the slot wait, immediately before dispatch.
         int newestPacketIndex = -1;
         UINT64 newestFrame = activeFrame;
         for (int i = 0; i < BUFFER_COUNT; ++i)
@@ -1455,7 +1060,6 @@ void AReproj_Dx12::PresenterMain()
             std::unique_lock lock(_presentMutex);
             _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(refreshPeriodMs),
                                 [&] { return _stopPresenter.load() || _readyFrameId.load() > activeFrame; });
-            nextDeadlineMs = Util::MillisecondsNow() + refreshPeriodMs;
             continue;
         }
 
@@ -1467,6 +1071,16 @@ void AReproj_Dx12::PresenterMain()
             static_cast<float>(((dispatchStart - packet.renderTimestamp) / realPeriodMs) *
                                Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
             0.0f, 1.0f);
+
+        // Software pacing: hold back warps that arrive too early relative to the
+        // nominal refresh period. The waitable can signal up to a full period
+        // early on Proton; without this gate the presenter floods warps and
+        // freezes visible output until DXGI throttles it. The first present of a
+        // session has no prior slot, so it goes out immediately.
+        double nextDeadlineMs =
+            _lastDisplayPresentMs > 0.0 ? _lastDisplayPresentMs + refreshPeriodMs : dispatchStart;
+        WaitUntil(nextDeadlineMs - std::clamp(_dispatchLeadMs, 1.0, 5.0));
+
         const bool dispatched = packet.warpAllowed && !focusLost
                                     ? DispatchPacketWarp(activePacketIndex, timeStep, nextDeadlineMs)
                                     : DisplayPacket(activePacketIndex, true);
@@ -1504,13 +1118,6 @@ void AReproj_Dx12::PresenterMain()
             _lastDisplayPresentMs = presentedAt;
         }
 
-        nextDeadlineMs += refreshPeriodMs;
-        if (presentedAt > nextDeadlineMs)
-        {
-            std::scoped_lock metricsLock(_metricsMutex);
-            ++_metricsMissedDisplaySlots;
-            nextDeadlineMs = presentedAt + refreshPeriodMs;
-        }
     }
 
     if (activePacketIndex >= 0)
@@ -1601,18 +1208,9 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.queueDepth = PacketQueueDepth();
     _runtimeMetrics.asyncPresenter = _presenterState.load() == PresenterState::Running &&
                                      _wrappedSwapChain != nullptr && _wrappedSwapChain->IsReprojectionVirtualized();
-    _runtimeMetrics.latePoseEstimated =
-        _runtimeMetrics.depthReady && Config::Instance()->ReprojLateLatch.value_or_default();
-    {
-        std::scoped_lock calibrationLock(_calibrationMutex);
-        _runtimeMetrics.mouseCalibrationConfidence = _calibrationConfidence;
-        _runtimeMetrics.mouseCalibrationLagMs = _calibrationLagMs;
-        _runtimeMetrics.calibrationSource = _calibrationSource;
-    }
     _runtimeMetrics.newAnchorDisplays = _metricsNewAnchorDisplays;
     _runtimeMetrics.repeatedAnchorDisplays = _metricsRepeatedAnchorDisplays;
     _runtimeMetrics.missedDisplaySlots = _metricsMissedDisplaySlots;
-    _runtimeMetrics.dispatchLeadMs = static_cast<float>(_dispatchLeadMs);
     if (_presentIntervalCount > 0)
     {
         std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
@@ -1622,30 +1220,13 @@ void AReproj_Dx12::LogMetricsIfDue()
         std::nth_element(intervals.begin(), p95, intervals.end());
         _runtimeMetrics.p95PresentIntervalMs = static_cast<float>(*p95);
     }
-    const auto mouse = OptiInput::GetRawMouseMotion();
-    uint32_t calibrationSamples = 0;
-    float calibrationConfidence = 0.0f;
-    int calibrationLagMs = 0;
-    uint32_t calibrationSourceValue = 0;
-    {
-        std::scoped_lock calibrationLock(_calibrationMutex);
-        for (const auto& bin : _calibration)
-            calibrationSamples = std::max(calibrationSamples, bin.samples);
-        calibrationConfidence = _calibrationConfidence;
-        calibrationLagMs = _calibrationLagMs;
-        calibrationSourceValue = _calibrationSource;
-    }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
-    const char* calibrationSource = calibrationSourceValue == 2 ? "motion-grid" :
-                                    (calibrationSourceValue == 1 ? "camera" : "manual");
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} interval={:.2f}/{:.2f}ms "
-             "lead={:.2f}ms poseAge={:.1f}ms queue={} ({}, block={:.2f}ms) mouseCal={:.0f}%/{}ms/{} samples={} "
-             "input=({}, {})",
+             "lead={:.2f}ms poseAge={:.1f}ms queue={} ({}, block={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth, presenter,
-             _runtimeMetrics.gamePresentBlockMs, calibrationConfidence * 100.0f, calibrationLagMs,
-             calibrationSource, calibrationSamples, mouse.TotalX, mouse.TotalY);
+             _runtimeMetrics.gamePresentBlockMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;
@@ -1820,10 +1401,6 @@ bool AReproj_Dx12::Present()
         _runtimeMetrics.rotationOnly = Config::Instance()->ReprojRotationOnly.value_or_default() ||
                                        Config::Instance()->ReprojMode.value_or_default() == 2;
         _runtimeMetrics.hudWarped = !Config::Instance()->FGDrawUIOverFG.value_or_default();
-        std::scoped_lock calibrationLock(_calibrationMutex);
-        _runtimeMetrics.calibrationReady = _calibrationConfidence >= 0.7f ||
-                                           (Config::Instance()->ReprojManualYawDegrees.has_value() &&
-                                            Config::Instance()->ReprojManualPitchDegrees.has_value());
     }
 
     // 1. Flush any pending deferred command lists (resource copies from SetResource etc.)
@@ -1845,10 +1422,9 @@ bool AReproj_Dx12::Present()
 
     // Present the newest real frame as an unwarped anchor for reset, missing
     // velocity, or focus loss (the focus check is unreliable on Proton). Pose
-    // staleness deliberately does NOT disable warping: late latch owns
-    // [anchor -> scanout] rotation from continuously integrated raw input, so
-    // an old anchor warps exactly like ATW over a stalled renderer - the point
-    // of timewarp is that aim feel is independent of the render rate.
+    // staleness deliberately does NOT disable warping: warping an old anchor is
+    // exactly ATW over a stalled renderer - the point of timewarp is that aim
+    // feel is independent of the render rate.
     const bool focusLost = !focused && !State::Instance().isRunningOnLinux;
     const bool hasVelocity = _resourceReady[fIndex].contains(FG_ResourceType::Velocity);
     const bool warpAllowed = !stalled && !_reset[fIndex] && hasVelocity && !focusLost;
@@ -1861,20 +1437,17 @@ bool AReproj_Dx12::Present()
         auto packetIndex = AcquirePacket();
         if (packetIndex < 0)
         {
-            const auto refreshHz = TargetRefreshHz();
-            const auto waitMs = refreshHz > 1.0 ? 2000.0 / refreshHz : 34.0;
+            // No free packet slot: retire completed packets and wait for one.
+            RetirePackets();
             std::unique_lock lock(_presentMutex);
-            _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(waitMs),
-                                [&]
-                                {
-                                    RetirePackets();
-                                    if (_presenterState.load() == PresenterState::Failed)
-                                        return true;
-                                    for (const auto& candidate : _packets)
-                                        if (candidate.state.load() == PacketState::Free)
-                                            return true;
-                                    return false;
-                                });
+            _presentCv.wait_for(lock, std::chrono::milliseconds(2), [&] {
+                if (_presenterState.load() == PresenterState::Failed)
+                    return true;
+                for (const auto& candidate : _packets)
+                    if (candidate.state.load() == PacketState::Free)
+                        return true;
+                return false;
+            });
             lock.unlock();
             packetIndex = AcquirePacket();
         }
@@ -1939,7 +1512,6 @@ bool AReproj_Dx12::Present()
 
     // Synchronous path.  With virtualization the game source is copied to the real
     // anchor while the worker is stopped; otherwise retain the legacy raw-buffer path.
-    _syncSourceMouse = OptiInput::GetRawMouseMotionAt(_cameraTimestamp[fIndex]);
     HRESULT realResult = E_FAIL;
     if (virtualized)
     {
@@ -2043,15 +1615,6 @@ void AReproj_Dx12::Activate()
     if (Config::Instance()->FGDrawUIOverFG.value_or_default() && _renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
-    {
-        std::scoped_lock calibrationLock(_calibrationMutex);
-        std::memset(_calibration, 0, sizeof(_calibration));
-        std::memset(_calibrationMatrix, 0, sizeof(_calibrationMatrix));
-        _lastCalibrationTimestamp = 0.0;
-        _calibrationConfidence = 0.0f;
-        _calibrationLagMs = 0;
-        _calibrationSource = 0;
-    }
     const bool async = StartAsyncPresenter();
     LOG_INFO("Reproj: activated ({})", async ? "async virtual swapchain" : "synchronous");
 }
@@ -2765,7 +2328,6 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_packets[i].depth);
         SAFE_RELEASE(_packets[i].velocity);
         SAFE_RELEASE(_packets[i].ui);
-        SAFE_RELEASE(_packets[i].mvReadback);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
@@ -2779,7 +2341,6 @@ void AReproj_Dx12::ReleaseObjects()
         _packets[i].syncInterval = 0;
         _packets[i].presentFlags = 0;
         _packets[i].warpAllowed = false;
-        _packets[i].calibrationPending = false;
         _packets[i].state.store(PacketState::Free);
 
         // Reset command list state
