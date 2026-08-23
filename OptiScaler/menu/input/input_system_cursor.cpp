@@ -189,7 +189,7 @@ DWORD PackCursorMessagePos(const POINT& point)
 
 void RecordPolledMouseMotionLocked(const POINT& point)
 {
-    if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid)
+    if (!_state.Initialized || _state.MenuVisible || !_state.CursorPollCenterValid)
         return;
 
     const POINT offset { point.x - _state.CursorPollCenter.x, point.y - _state.CursorPollCenter.y };
@@ -233,7 +233,7 @@ void RefreshMouseMotion()
     std::uint64_t pollGeneration = 0;
     {
         std::unique_lock lock(_state.Mutex);
-        if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid)
+        if (!_state.Initialized || _state.MenuVisible || !_state.CursorPollCenterValid)
             return;
         pollGeneration = _state.CursorPollGeneration;
     }

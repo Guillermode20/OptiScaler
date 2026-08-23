@@ -627,6 +627,7 @@ class Config
     CustomOptional<bool> ReprojRotationOnly { false };    // suppress camera translation in depth-aware modes
     CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
+    CustomOptional<bool> ReprojCenterCropDebug { false }; // show only central 50% of the viewport
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
 
     // As per

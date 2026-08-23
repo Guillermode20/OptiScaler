@@ -62,6 +62,8 @@ TargetRefresh=0
 MaxWarpFrames=1
 UseDepth=true
 RotationOnly=false
+; Diagnostic: black out the outer 25% per side and suppress separately composited UI
+CenterCropDebug=false
 ```
 
 `Async=true` uses a worker-owned presenter on the real main swapchain, keeping warp writes

@@ -3943,8 +3943,22 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
 
         bool reprojDebugView = config->ReprojDebugView.value_or_default();
         if (ImGui::Checkbox("Debug view##reproj", &reprojDebugView))
+        {
             config->ReprojDebugView = reprojDebugView;
+            if (reprojDebugView)
+                config->ReprojCenterCropDebug = false;
+        }
         ShowHelpMarker("False-color the warped pixels (red = moved, green = depth confidence)");
+
+        bool reprojCenterCropDebug = config->ReprojCenterCropDebug.value_or_default();
+        if (ImGui::Checkbox("Center-only diagnostic##reproj", &reprojCenterCropDebug))
+        {
+            config->ReprojCenterCropDebug = reprojCenterCropDebug;
+            if (reprojCenterCropDebug)
+                config->ReprojDebugView = false;
+        }
+        ShowHelpMarker("Black out the outer 25% on every side and suppress separately composited UI.\n"
+                       "Use this to judge central camera motion without edge or corner-HUD artifacts.");
 
         bool reprojForceBorderless = config->ReprojForceBorderless.value_or_default();
         if (ImGui::Checkbox("Force borderless##reproj", &reprojForceBorderless))

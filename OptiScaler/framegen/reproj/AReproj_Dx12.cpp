@@ -618,7 +618,8 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.jitterCancelled = (config->ReprojUseJitterCancel.value_or_default() && IsJitteredMVs()) ? 1 : 0;
     cb.invertedDepth = IsInvertedDepth() ? 1 : 0;
     cb.mode = config->ReprojMode.value_or_default();
-    cb.debugView = config->ReprojDebugView.value_or_default() ? 1 : 0;
+    cb.debugView =
+        config->ReprojCenterCropDebug.value_or_default() ? 2 : (config->ReprojDebugView.value_or_default() ? 1 : 0);
     cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
@@ -909,7 +910,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     ResourceBarrier(cmdList, _warpOutput[outputIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     backBuffer->Release();
 
-    if (packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
+    if (constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
         _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
 
     if (_warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr)
@@ -1034,7 +1035,8 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     ResourceBarrier(cmdList, _warpOutput[fIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
 
     // Composite the captured UI unwarped on top of the warped HUD-less frame
-    if (_syncHasUi[fIndex] && _uiColor[fIndex] != nullptr && _renderUI != nullptr && _renderUI->IsInit())
+    if (cb.debugView != 2 && _syncHasUi[fIndex] && _uiColor[fIndex] != nullptr && _renderUI != nullptr &&
+        _renderUI->IsInit())
         _renderUI->Dispatch(sc, cmdList, _uiColor[fIndex], _uiColorState[fIndex]);
 
     bb->Release();

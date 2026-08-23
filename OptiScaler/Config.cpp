@@ -197,6 +197,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojUseDepth.set_from_config(readBool("Reproj", "UseDepth"));
             ReprojRotationOnly.set_from_config(readBool("Reproj", "RotationOnly"));
             ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
+            ReprojCenterCropDebug.set_from_config(readBool("Reproj", "CenterCropDebug"));
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
         }
 
@@ -1036,6 +1037,8 @@ bool Config::SaveIni()
         ini.SetValue("Reproj", "UseDepth", GetBoolValue(Instance()->ReprojUseDepth.value_for_config()).c_str());
         ini.SetValue("Reproj", "RotationOnly", GetBoolValue(Instance()->ReprojRotationOnly.value_for_config()).c_str());
         ini.SetValue("Reproj", "DebugView", GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
+        ini.SetValue("Reproj", "CenterCropDebug",
+                     GetBoolValue(Instance()->ReprojCenterCropDebug.value_for_config()).c_str());
         ini.SetValue("Reproj", "ForceBorderless",
                      GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());
     }

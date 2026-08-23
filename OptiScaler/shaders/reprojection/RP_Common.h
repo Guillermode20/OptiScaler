@@ -82,6 +82,11 @@ SamplerState Bilinear : register(s0);
 void CSMain(uint3 dtid : SV_DispatchThreadID)
 {
     float2 uv = (dtid.xy + 0.5f) / float2(DisplaySize);
+    if (DebugView == 2 && any(abs(uv - 0.5f) > 0.25f))
+    {
+        Output[dtid.xy] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        return;
+    }
 
     // The MV texture covers the full frame (possibly at render resolution), so its UV maps 1:1
     float2 mvUV = uv;
@@ -110,7 +115,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
     float4 result = lerp(original, warped, Strength * coverage);
 
-    if (DebugView)
+    if (DebugView == 1)
         Output[dtid.xy] = float4(length(delta) > 0.5f ? 1.0f : 0.0f, 0.0f, 0.0f, 1.0f);
     else
         Output[dtid.xy] = float4(result.rgb, 1.0f);
@@ -183,6 +188,11 @@ float3 RotateAxis(float3 v, float3 axis, float angle)
 void CSMain(uint3 dtid : SV_DispatchThreadID)
 {
     float2 uv = (dtid.xy + 0.5f) / float2(DisplaySize);
+    if (DebugView == 2 && any(abs(uv - 0.5f) > 0.25f))
+    {
+        Output[dtid.xy] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        return;
+    }
     float2 mvUV = uv;
     float2 delta = 0.0f;
 
@@ -222,7 +232,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         float4 warped = LastColor.SampleLevel(Bilinear, clamp(reprojUV, 0.0f, 1.0f), 0);
         float4 result = lerp(original, warped, Strength * conf);
 
-        if (DebugView)
+        if (DebugView == 1)
             Output[dtid.xy] = float4(0.0f, conf, 1.0f, 1.0f);
         else
             Output[dtid.xy] = float4(result.rgb, 1.0f);
@@ -303,7 +313,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float4 fallback = lerp(original, mvWarp, mvCoverage);
     float4 result = lerp(original, lerp(fallback, warped, conf), Strength);
 
-    if (DebugView)
+    if (DebugView == 1)
         Output[dtid.xy] = float4(length(delta) > 0.5f ? 1.0f : 0.0f, conf, 0.0f, 1.0f);
     else
         Output[dtid.xy] = float4(result.rgb, 1.0f);
