@@ -339,7 +339,7 @@ float ReprojHalfToFloat(uint16_t value)
         bits = sign | (exponent + 112u) << 23 | mantissa << 13;
     return std::bit_cast<float>(bits);
 }
-}
+} // namespace
 
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 {
@@ -625,9 +625,9 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     auto constants = packet.constants;
     constants.timeStep = timeStep;
     const bool useDepth = packet.hasDepth;
-    const bool ok = _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
-                                    useDepth ? packet.depth : nullptr, packet.depthState,
-                                    _warpOutput[outputIndex], constants);
+    const bool ok =
+        _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
+                        useDepth ? packet.depth : nullptr, packet.depthState, _warpOutput[outputIndex], constants);
     if (!ok)
     {
         backBuffer->Release();
@@ -936,7 +936,6 @@ void AReproj_Dx12::StopAsyncPresenter()
     _presenterState.store(PresenterState::Stopped);
 }
 
-
 HRESULT AReproj_Dx12::WaitForPresentSlot()
 {
     if (_presentWaitableObject == nullptr)
@@ -1067,18 +1066,17 @@ void AReproj_Dx12::PresenterMain()
         const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
         const auto dispatchStart = Util::MillisecondsNow();
         const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs);
-        const auto timeStep = std::clamp(
-            static_cast<float>(((dispatchStart - packet.renderTimestamp) / realPeriodMs) *
-                               Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
-            0.0f, 1.0f);
+        const auto timeStep =
+            std::clamp(static_cast<float>(((dispatchStart - packet.renderTimestamp) / realPeriodMs) *
+                                          Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
+                       0.0f, 1.0f);
 
         // Software pacing: hold back warps that arrive too early relative to the
         // nominal refresh period. The waitable can signal up to a full period
         // early on Proton; without this gate the presenter floods warps and
         // freezes visible output until DXGI throttles it. The first present of a
         // session has no prior slot, so it goes out immediately.
-        double nextDeadlineMs =
-            _lastDisplayPresentMs > 0.0 ? _lastDisplayPresentMs + refreshPeriodMs : dispatchStart;
+        double nextDeadlineMs = _lastDisplayPresentMs > 0.0 ? _lastDisplayPresentMs + refreshPeriodMs : dispatchStart;
         WaitUntil(nextDeadlineMs - std::clamp(_dispatchLeadMs, 1.0, 5.0));
 
         const bool dispatched = packet.warpAllowed && !focusLost
@@ -1117,7 +1115,6 @@ void AReproj_Dx12::PresenterMain()
             }
             _lastDisplayPresentMs = presentedAt;
         }
-
     }
 
     if (activePacketIndex >= 0)
@@ -1440,14 +1437,16 @@ bool AReproj_Dx12::Present()
             // No free packet slot: retire completed packets and wait for one.
             RetirePackets();
             std::unique_lock lock(_presentMutex);
-            _presentCv.wait_for(lock, std::chrono::milliseconds(2), [&] {
-                if (_presenterState.load() == PresenterState::Failed)
-                    return true;
-                for (const auto& candidate : _packets)
-                    if (candidate.state.load() == PacketState::Free)
-                        return true;
-                return false;
-            });
+            _presentCv.wait_for(lock, std::chrono::milliseconds(2),
+                                [&]
+                                {
+                                    if (_presenterState.load() == PresenterState::Failed)
+                                        return true;
+                                    for (const auto& candidate : _packets)
+                                        if (candidate.state.load() == PacketState::Free)
+                                            return true;
+                                    return false;
+                                });
             lock.unlock();
             packetIndex = AcquirePacket();
         }
@@ -1688,9 +1687,8 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         {
             LOG_WARN("Reproj swapchain already created for the same output window!");
 
-            auto bufferCount = Config::Instance()->ReprojAsync.value_or_default() && desc->BufferCount < 3
-                                   ? 3
-                                   : desc->BufferCount;
+            auto bufferCount =
+                Config::Instance()->ReprojAsync.value_or_default() && desc->BufferCount < 3 ? 3 : desc->BufferCount;
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               bufferCount, desc->BufferDesc.Width, desc->BufferDesc.Height, desc->BufferDesc.Format,
                               desc->Flags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == S_OK;
@@ -1805,8 +1803,8 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
             const bool alreadyWrapped =
                 SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
             if (!alreadyWrapped)
-                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false,
-                                                     originalBufferCount);
+                wrapped =
+                    new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false, originalBufferCount);
 
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();
@@ -1850,9 +1848,8 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
         {
             LOG_WARN("Reproj swapchain already created for the same output window!");
 
-            auto bufferCount = Config::Instance()->ReprojAsync.value_or_default() && desc->BufferCount < 3
-                                   ? 3
-                                   : desc->BufferCount;
+            auto bufferCount =
+                Config::Instance()->ReprojAsync.value_or_default() && desc->BufferCount < 3 ? 3 : desc->BufferCount;
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               bufferCount, desc->Width, desc->Height, desc->Format,
                               desc->Flags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == S_OK;
@@ -1980,8 +1977,8 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
             const bool alreadyWrapped =
                 SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
             if (!alreadyWrapped)
-                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false,
-                                                     originalBufferCount);
+                wrapped =
+                    new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false, originalBufferCount);
 
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();

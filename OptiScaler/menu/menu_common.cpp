@@ -1431,8 +1431,9 @@ void MenuCommon::UpdateVersionAndStartupNotifications(RenderMenuContext& ctx)
         {
             ImGuiToast notification { ImGuiToastType::Error, 15000 };
             notification.setTitle("OptiScaler PASS-THRU (inactive)");
-            notification.setContent("%s\nFix: clear [ProcessFilter] TargetProcessName/ProcessExclusionList or rename dll correctly.",
-                                    state.passThruReason.c_str());
+            notification.setContent(
+                "%s\nFix: clear [ProcessFilter] TargetProcessName/ProcessExclusionList or rename dll correctly.",
+                state.passThruReason.c_str());
             ImGui::InsertNotification(notification);
         }
 
@@ -2177,11 +2178,14 @@ void MenuCommon::RenderMainMenuHeaderMessages(RenderMenuContext& ctx)
         ImGui::Spacing();
         ImGui::TextColored(toneMapColor(ImVec4(0.7f, 0.85f, 1.f, 1.f)), "Startup: %s", state.startupDiagnostic.c_str());
         if (!state.passThruReason.empty())
-            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.3f, 1.f)), "PASS-THRU (OptiScaler inactive): %s", state.passThruReason.c_str());
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.3f, 1.f)), "PASS-THRU (OptiScaler inactive): %s",
+                               state.passThruReason.c_str());
         if (!state.overlayDisableReason.empty())
-            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.6f, 0.2f, 1.f)), "Overlay disabled: %s", state.overlayDisableReason.c_str());
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.6f, 0.2f, 1.f)), "Overlay disabled: %s",
+                               state.overlayDisableReason.c_str());
         if (!state.reprojDisableReason.empty())
-            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Timewarp inactive: %s", state.reprojDisableReason.c_str());
+            ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Timewarp inactive: %s",
+                               state.reprojDisableReason.c_str());
         ImGui::Spacing();
     }
 
@@ -3133,9 +3137,8 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         if (state.currentFG != nullptr && state.currentFG->IsActive())
             state.reprojDisableReason.clear();
         else if (state.swapchainApi != API::DX12)
-            state.reprojDisableReason = state.swapchainApi == API::NotSelected
-                                            ? "Waiting for a DX12 swapchain"
-                                            : "Requires a DX12 swapchain";
+            state.reprojDisableReason =
+                state.swapchainApi == API::NotSelected ? "Waiting for a DX12 swapchain" : "Requires a DX12 swapchain";
         else if (!IsFsr(reprojBackend))
             state.reprojDisableReason = "Requires the FSR/FFX DX12 upscaler";
         else
@@ -3840,10 +3843,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
     if (config->FGOutput.value_or_default() == FGOutput::Reproj && !state.reprojDisableReason.empty())
     {
         ImGui::SeparatorText("Output (Async Timewarp) - INACTIVE");
-        ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.5f, 0.3f, 1.f)), "Disabled: %s", state.reprojDisableReason.c_str());
+        ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.5f, 0.3f, 1.f)), "Disabled: %s",
+                           state.reprojDisableReason.c_str());
         ImGui::Spacing();
-        ImGui::TextDisabled("Requires: DX12 + FGInput=upscaler + Dx12Upscaler=fsr22/ffx + [FrameGen] Enabled=true + FGOutput=reproj + "
-                            "[AsyncTimewarp] Enabled=true");
+        ImGui::TextDisabled(
+            "Requires: DX12 + FGInput=upscaler + Dx12Upscaler=fsr22/ffx + [FrameGen] Enabled=true + FGOutput=reproj + "
+            "[AsyncTimewarp] Enabled=true");
         if (state.swapchainApi != API::DX12 && state.swapchainApi != API::NotSelected)
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.3f, 1.f)), "Current API: %s (DX12 required)",
                                magic_enum::enum_name(state.swapchainApi).data());
@@ -3951,11 +3956,11 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         {
             const auto metrics = reproj->GetRuntimeMetrics();
             ImGui::TextDisabled("Source %.1f FPS | display %.1f FPS | target %.0f Hz | new %u | repeat %u",
-                                metrics.realFps, metrics.displayFps, metrics.targetRefreshHz,
-                                metrics.newAnchorDisplays, metrics.repeatedAnchorDisplays);
+                                metrics.realFps, metrics.displayFps, metrics.targetRefreshHz, metrics.newAnchorDisplays,
+                                metrics.repeatedAnchorDisplays);
             ImGui::TextDisabled("Present interval mean %.2f ms / p95 %.2f ms | missed %u | lead %.2f ms",
-                                metrics.meanPresentIntervalMs, metrics.p95PresentIntervalMs,
-                                metrics.missedDisplaySlots, metrics.dispatchLeadMs);
+                                metrics.meanPresentIntervalMs, metrics.p95PresentIntervalMs, metrics.missedDisplaySlots,
+                                metrics.dispatchLeadMs);
             ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s", metrics.poseAgeMs,
                                 metrics.queueDepth,
                                 metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",

@@ -15,7 +15,6 @@ enum class InputAcquisitionMode : std::uint32_t
     ExternalRawVirtualMouse = 4,
 };
 
-
 struct InitializeOptions
 {
     // Target/game window. Can be foreign-process in external overlay mode.

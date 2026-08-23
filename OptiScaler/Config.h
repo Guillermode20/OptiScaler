@@ -622,9 +622,9 @@ class Config
     CustomOptional<int> ReprojMaxWarpFrames {
         1
     }; // bounds blocking warps in synchronous mode; async mode fills every refresh slot instead
-    CustomOptional<float> ReprojTargetRefresh { 0.0f }; // 0 = FramerateLimit, then active display refresh
-    CustomOptional<bool> ReprojUseDepth { true };       // fall back to MV warp when depth/camera data is unavailable
-    CustomOptional<bool> ReprojRotationOnly { false };  // suppress camera translation in depth-aware modes
+    CustomOptional<float> ReprojTargetRefresh { 0.0f };   // 0 = FramerateLimit, then active display refresh
+    CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
+    CustomOptional<bool> ReprojRotationOnly { false };    // suppress camera translation in depth-aware modes
     CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents

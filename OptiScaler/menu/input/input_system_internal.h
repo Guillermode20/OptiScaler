@@ -358,7 +358,6 @@ struct InputState
 
     float MouseWheel = 0.0f;
 
-
     RECT SavedClipRect {};
     bool HasSavedClipRect = false;
     bool SavedClipWasActive = false;

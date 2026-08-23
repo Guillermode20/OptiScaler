@@ -92,7 +92,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::unique_ptr<RP_Dx12> _warp;                // the reprojection pass (v1/v2 PSOs)
     ID3D12Resource* _lastColor[BUFFER_COUNT] = {}; // copy of the last presented real frame
     D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
-    ID3D12Resource* _uiColor[BUFFER_COUNT] = {};   // sync-path UI capture composited after warping
+    ID3D12Resource* _uiColor[BUFFER_COUNT] = {}; // sync-path UI capture composited after warping
     D3D12_RESOURCE_STATES _uiColorState[BUFFER_COUNT] = {};
     bool _syncHasUi[BUFFER_COUNT] = {};
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)

@@ -833,8 +833,7 @@ UINT WINAPI hkGetRawInputData(HRAWINPUT rawInput, UINT command, LPVOID data, PUI
 
         if (bypassHookDepth == 0)
         {
-            if (input->header.dwType == RIM_TYPEMOUSE &&
-                (input->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 &&
+            if (input->header.dwType == RIM_TYPEMOUSE && (input->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 &&
                 ShouldRecordRawMotionHandleLocked(rawInput))
             {
                 AccumulateRelativeMouseMotionLocked(input->data.mouse.lLastX, input->data.mouse.lLastY);
@@ -895,8 +894,7 @@ UINT WINAPI hkGetRawInputBuffer(PRAWINPUT data, PUINT size, UINT headerSize)
                 break;
 
             const DWORD packetSize = current->header.dwSize;
-            if (current->header.dwType == RIM_TYPEMOUSE &&
-                (current->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0)
+            if (current->header.dwType == RIM_TYPEMOUSE && (current->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0)
             {
                 AccumulateRelativeMouseMotionLocked(current->data.mouse.lLastX, current->data.mouse.lLastY);
             }
