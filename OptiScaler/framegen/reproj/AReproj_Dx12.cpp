@@ -994,7 +994,7 @@ void AReproj_Dx12::StopAsyncPresenter()
     _presenterState.store(PresenterState::Stopped);
 }
 
-HRESULT AReproj_Dx12::WaitForPresentSlot() const
+HRESULT AReproj_Dx12::WaitForPresentSlot()
 {
     if (_presentWaitableObject == nullptr)
         return E_FAIL;
