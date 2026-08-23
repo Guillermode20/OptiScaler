@@ -1352,6 +1352,36 @@ POINT GetMouseScreenPos()
     return _state.MouseScreenPos;
 }
 
+RawMouseMotion GetRawMouseMotion()
+{
+    std::unique_lock lock(_state.Mutex);
+    return _state.RawMouseMotionState;
+}
+
+RawMouseMotion GetRawMouseMotionAt(double timestampMs)
+{
+    std::unique_lock lock(_state.Mutex);
+    if (timestampMs <= 0.0 || _state.RawMouseHistoryWriteIndex == 0 && _state.RawMouseHistory.back().TimestampMs <= 0.0)
+        return _state.RawMouseMotionState;
+
+    for (std::size_t offset = 0; offset < _state.RawMouseHistory.size(); ++offset)
+    {
+        const auto index = (_state.RawMouseHistoryWriteIndex + _state.RawMouseHistory.size() - 1 - offset) %
+                           _state.RawMouseHistory.size();
+        const auto& sample = _state.RawMouseHistory[index];
+        if (sample.TimestampMs > 0.0 && sample.TimestampMs <= timestampMs)
+            return sample;
+    }
+
+    // Target predates retained history. Return the oldest valid sample rather
+    // than inventing motion before input capture began.
+    RawMouseMotion oldest = _state.RawMouseMotionState;
+    for (const auto& sample : _state.RawMouseHistory)
+        if (sample.TimestampMs > 0.0 && sample.TimestampMs < oldest.TimestampMs)
+            oldest = sample;
+    return oldest;
+}
+
 bool ShouldBlockMouse()
 {
     std::unique_lock lock(_state.Mutex);

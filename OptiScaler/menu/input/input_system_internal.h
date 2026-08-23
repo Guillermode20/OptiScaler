@@ -341,6 +341,7 @@ struct InputState
     POINT CursorPollCenter {};
     POINT CursorPollLastOffset {};
     bool CursorPollCenterValid = false;
+    std::uint64_t CursorPollGeneration = 0;
 
     // Cursor position returned to the game while the menu owns cursor input.
     // MouseScreenPos may still move because the menu uses the real cursor.
@@ -357,6 +358,11 @@ struct InputState
     DWORD ExternalRawInputSinkThreadId = 0;
 
     float MouseWheel = 0.0f;
+    RawMouseMotion RawMouseMotionState {};
+    // Retain at least 500 ms even for an 8 kHz mouse so 15 FPS anchors and
+    // camera/input lag calibration can address the input that produced them.
+    std::array<RawMouseMotion, 4096> RawMouseHistory {};
+    std::size_t RawMouseHistoryWriteIndex = 0;
 
     RECT SavedClipRect {};
     bool HasSavedClipRect = false;

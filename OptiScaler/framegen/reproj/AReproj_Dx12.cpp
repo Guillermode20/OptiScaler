@@ -310,6 +310,137 @@ bool AReproj_Dx12::HasFreshCameraPose(int fIndex, float* ageMs) const
     return hasCamera && IsPoseFresh(_cameraTimestamp[fIndex], ageMs);
 }
 
+void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
+{
+    const auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    const auto timestamp = _cameraTimestamp[fIndex];
+    const auto prevTimestamp = _cameraTimestamp[prevIndex];
+    if (_reset[fIndex] || _reset[prevIndex] || timestamp <= prevTimestamp ||
+        timestamp == _lastMouseCalibrationTimestamp || IsCameraAllZero(fIndex) || IsCameraAllZero(prevIndex))
+        return;
+    _lastMouseCalibrationTimestamp = timestamp;
+
+    const auto dot = [](const float* left, const float* right)
+    { return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]; };
+    const auto yaw = std::atan2(dot(_cameraForward[fIndex], _cameraRight[prevIndex]),
+                                dot(_cameraForward[fIndex], _cameraForward[prevIndex]));
+    const auto pitch = -std::atan2(dot(_cameraForward[fIndex], _cameraUp[prevIndex]),
+                                   dot(_cameraForward[fIndex], _cameraForward[prevIndex]));
+    if (!std::isfinite(yaw) || !std::isfinite(pitch) || std::hypot(yaw, pitch) < 1.0e-5 ||
+        std::hypot(yaw, pitch) > 0.35)
+        return;
+
+    double motionX[MOUSE_CALIBRATION_LAG_BINS] = {};
+    double motionY[MOUSE_CALIBRATION_LAG_BINS] = {};
+    bool valid[MOUSE_CALIBRATION_LAG_BINS] = {};
+    for (int i = 0; i < MOUSE_CALIBRATION_LAG_BINS; ++i)
+    {
+        const double lag = static_cast<double>(i * MOUSE_CALIBRATION_LAG_STEP_MS);
+        const double firstTarget = prevTimestamp - lag;
+        const double lastTarget = timestamp - lag;
+        const auto first = OptiInput::GetRawMouseMotionAt(firstTarget);
+        const auto last = OptiInput::GetRawMouseMotionAt(lastTarget);
+        if (first.TimestampMs <= 0.0 || last.TimestampMs <= 0.0 ||
+            first.TimestampMs > firstTarget + MOUSE_CALIBRATION_LAG_STEP_MS ||
+            last.TimestampMs > lastTarget + MOUSE_CALIBRATION_LAG_STEP_MS)
+            continue;
+
+        motionX[i] = static_cast<double>(last.TotalX - first.TotalX);
+        motionY[i] = static_cast<double>(last.TotalY - first.TotalY);
+        valid[i] = std::hypot(motionX[i], motionY[i]) >= 2.0;
+    }
+
+    std::scoped_lock calibrationLock(_mouseCalibrationMutex);
+    for (int i = 0; i < MOUSE_CALIBRATION_LAG_BINS; ++i)
+    {
+        if (!valid[i])
+            continue;
+
+        auto& bin = _mouseCalibration[i];
+        if (bin.samples > 600)
+        {
+            bin.xx *= 0.995;
+            bin.xy *= 0.995;
+            bin.yy *= 0.995;
+            bin.xYaw *= 0.995;
+            bin.yYaw *= 0.995;
+            bin.xPitch *= 0.995;
+            bin.yPitch *= 0.995;
+            bin.yaw2 *= 0.995;
+            bin.pitch2 *= 0.995;
+        }
+
+        const double x = motionX[i];
+        const double y = motionY[i];
+        bin.xx += x * x;
+        bin.xy += x * y;
+        bin.yy += y * y;
+        bin.xYaw += x * yaw;
+        bin.yYaw += y * yaw;
+        bin.xPitch += x * pitch;
+        bin.yPitch += y * pitch;
+        bin.yaw2 += yaw * yaw;
+        bin.pitch2 += pitch * pitch;
+        ++bin.samples;
+    }
+
+    double bestConfidence = 0.0;
+    for (int i = 0; i < MOUSE_CALIBRATION_LAG_BINS; ++i)
+    {
+        const auto& bin = _mouseCalibration[i];
+        const double determinant = bin.xx * bin.yy - bin.xy * bin.xy;
+        const double poseEnergy = bin.yaw2 + bin.pitch2;
+        if (bin.samples < 24 || determinant < 1.0 || poseEnergy < 1.0e-6)
+            continue;
+
+        const double yawX = (bin.yy * bin.xYaw - bin.xy * bin.yYaw) / determinant;
+        const double yawY = (bin.xx * bin.yYaw - bin.xy * bin.xYaw) / determinant;
+        const double pitchX = (bin.yy * bin.xPitch - bin.xy * bin.yPitch) / determinant;
+        const double pitchY = (bin.xx * bin.yPitch - bin.xy * bin.xPitch) / determinant;
+        if (std::max({ std::abs(yawX), std::abs(yawY), std::abs(pitchX), std::abs(pitchY) }) > 0.02)
+            continue;
+
+        const double explained = yawX * bin.xYaw + yawY * bin.yYaw + pitchX * bin.xPitch + pitchY * bin.yPitch;
+        const double confidence = std::clamp(explained / poseEnergy, 0.0, 1.0);
+        if (confidence > bestConfidence)
+        {
+            bestConfidence = confidence;
+            _mouseToPose[0] = yawX;
+            _mouseToPose[1] = yawY;
+            _mouseToPose[2] = pitchX;
+            _mouseToPose[3] = pitchY;
+            _mouseCalibrationLagMs = i * MOUSE_CALIBRATION_LAG_STEP_MS;
+        }
+    }
+    _mouseCalibrationConfidence = static_cast<float>(bestConfidence);
+}
+
+void AReproj_Dx12::CaptureLateInput(ReprojFramePacket& packet, double sourcePoseTimestamp)
+{
+    packet.inputLatchReady = false;
+    float confidence = 0.0f;
+    int lagMs = 0;
+    {
+        std::scoped_lock calibrationLock(_mouseCalibrationMutex);
+        confidence = _mouseCalibrationConfidence;
+        lagMs = _mouseCalibrationLagMs;
+        std::memcpy(packet.mouseToPose, _mouseToPose, sizeof(packet.mouseToPose));
+    }
+    if (confidence < 0.8f || sourcePoseTimestamp <= 0.0 ||
+        OptiInput::GetInputAcquisitionMode() != OptiInput::InputAcquisitionMode::PolledAbsolute)
+        return;
+
+    const double inputPoseTimestamp = sourcePoseTimestamp - lagMs;
+    const auto source = OptiInput::GetRawMouseMotionAt(inputPoseTimestamp);
+    if (source.TimestampMs <= 0.0 || source.TimestampMs > inputPoseTimestamp + MOUSE_CALIBRATION_LAG_STEP_MS)
+        return;
+
+    packet.sourceMouseX = source.TotalX;
+    packet.sourceMouseY = source.TotalY;
+    packet.sourceMouseTimestamp = source.TimestampMs;
+    packet.inputLatchReady = true;
+}
+
 namespace
 {
 float ReprojHalfToFloat(uint16_t value)
@@ -379,6 +510,12 @@ ReprojVec3 ExtrapolateReprojVec3(ReprojVec3 previous, ReprojVec3 current, float 
                                  previous.z + (current.z - previous.z) * scale });
 }
 
+ReprojVec3 CombineReprojVec3(ReprojVec3 first, float firstScale, ReprojVec3 second, float secondScale)
+{
+    return { first.x * firstScale + second.x * secondScale, first.y * firstScale + second.y * secondScale,
+             first.z * firstScale + second.z * secondScale };
+}
+
 void StoreReprojVec3(float* target, ReprojVec3 value)
 {
     target[0] = value.x;
@@ -386,7 +523,8 @@ void StoreReprojVec3(float* target, ReprojVec3 value)
     target[2] = value.z;
 }
 
-void PrepareRotationConstants(RP_Constants& constants)
+void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false, float lateYaw = 0.0f,
+                              float latePitch = 0.0f)
 {
     if (constants.mode != 2)
         return;
@@ -394,11 +532,29 @@ void PrepareRotationConstants(RP_Constants& constants)
     const auto right = NormalizeReprojVec3(LoadReprojVec3(constants.cameraRight));
     const auto up = NormalizeReprojVec3(LoadReprojVec3(constants.cameraUp));
     const auto forward = NormalizeReprojVec3(LoadReprojVec3(constants.cameraForward));
-    const float scale = 1.0f + constants.timeStep;
+    ReprojVec3 predictedRight {};
+    ReprojVec3 predictedUp {};
+    ReprojVec3 predictedForward {};
 
-    const auto predictedRight = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraRight), right, scale);
-    const auto predictedUp = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraUp), up, scale);
-    const auto predictedForward = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraForward), forward, scale);
+    if (inputLatched)
+    {
+        const float yawSin = std::sin(lateYaw);
+        const float yawCos = std::cos(lateYaw);
+        const float pitchSin = std::sin(latePitch);
+        const float pitchCos = std::cos(latePitch);
+        const auto yawRight = CombineReprojVec3(right, yawCos, forward, -yawSin);
+        const auto yawForward = CombineReprojVec3(forward, yawCos, right, yawSin);
+        predictedRight = NormalizeReprojVec3(yawRight);
+        predictedUp = NormalizeReprojVec3(CombineReprojVec3(up, pitchCos, yawForward, pitchSin));
+        predictedForward = NormalizeReprojVec3(CombineReprojVec3(yawForward, pitchCos, up, -pitchSin));
+    }
+    else
+    {
+        const float scale = 1.0f + constants.timeStep;
+        predictedRight = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraRight), right, scale);
+        predictedUp = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraUp), up, scale);
+        predictedForward = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraForward), forward, scale);
+    }
 
     StoreReprojVec3(constants.prevCameraRight,
                     ReprojTransformRow(right, predictedRight, predictedUp, predictedForward));
@@ -409,8 +565,39 @@ void PrepareRotationConstants(RP_Constants& constants)
 }
 } // namespace
 
+bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet) const
+{
+    if (!packet.inputLatchReady || !packet.hasCamera || !packet.hasDepth)
+        return false;
+
+    OptiInput::RefreshMouseMotion();
+    const auto current = OptiInput::GetRawMouseMotion();
+    if (current.TimestampMs < packet.sourceMouseTimestamp)
+        return false;
+
+    const double x = static_cast<double>(current.TotalX - packet.sourceMouseX);
+    const double y = static_cast<double>(current.TotalY - packet.sourceMouseY);
+    double yaw = packet.mouseToPose[0] * x + packet.mouseToPose[1] * y;
+    double pitch = packet.mouseToPose[2] * x + packet.mouseToPose[3] * y;
+    if (!std::isfinite(yaw) || !std::isfinite(pitch))
+        return false;
+
+    constexpr double maximumRotation = 0.35;
+    const double rotation = std::hypot(yaw, pitch);
+    if (rotation > maximumRotation)
+    {
+        yaw *= maximumRotation / rotation;
+        pitch *= maximumRotation / rotation;
+    }
+
+    constants.mode = 2;
+    PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch));
+    return true;
+}
+
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 {
+    UpdateMouseCalibration(fIndex);
     auto& state = State::Instance();
     auto config = Config::Instance();
     auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
@@ -447,8 +634,10 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 
     const bool hasCamera = _cameraVFov[fIndex] > 0.0f && _cameraAspectRatio[fIndex] > 0.0f &&
                            !IsCameraAllZero(fIndex) && !IsCameraAllZero(prevIndex);
-    if (!hasCamera || (config->ReprojRotationOnly.value_or_default() && cb.mode != 0))
+    if (!hasCamera)
         cb.mode = 0;
+    else if (config->ReprojRotationOnly.value_or_default() && cb.mode != 0)
+        cb.mode = 2;
 }
 
 bool AReproj_Dx12::CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
@@ -611,6 +800,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.hasCamera = packet.constants.mode != 0;
     if (!packet.hasDepth && !packet.hasCamera)
         packet.constants.mode = 0;
+    CaptureLateInput(packet, sourceTimestamp);
     packet.warpAllowed = warpAllowed && velocity;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
@@ -694,7 +884,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
-    PrepareRotationConstants(constants);
+    if (!ApplyLateInput(constants, packet))
+        PrepareRotationConstants(constants);
     const bool useDepth = packet.hasDepth;
     const bool ok =
         _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
@@ -1339,6 +1530,12 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.newAnchorDisplays = _metricsNewAnchorDisplays;
     _runtimeMetrics.repeatedAnchorDisplays = _metricsRepeatedAnchorDisplays;
     _runtimeMetrics.missedDisplaySlots = _metricsMissedDisplaySlots;
+    {
+        std::scoped_lock calibrationLock(_mouseCalibrationMutex);
+        _runtimeMetrics.inputLatchConfidence = _mouseCalibrationConfidence;
+        _runtimeMetrics.inputLatchLagMs = _mouseCalibrationLagMs;
+        _runtimeMetrics.inputLatchActive = _mouseCalibrationConfidence >= 0.8f;
+    }
     if (_presentIntervalCount > 0)
     {
         std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
@@ -1350,11 +1547,12 @@ void AReproj_Dx12::LogMetricsIfDue()
     }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} interval={:.2f}/{:.2f}ms "
-             "lead={:.2f}ms poseAge={:.1f}ms queue={} ({}, block={:.2f}ms)",
+             "lead={:.2f}ms poseAge={:.1f}ms queue={} input={}({:.0f}% @ {}ms) ({}, block={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
-             _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth, presenter,
-             _runtimeMetrics.gamePresentBlockMs);
+             _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
+             _runtimeMetrics.inputLatchActive ? "latched" : "learning", _runtimeMetrics.inputLatchConfidence * 100.0f,
+             _runtimeMetrics.inputLatchLagMs, presenter, _runtimeMetrics.gamePresentBlockMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;

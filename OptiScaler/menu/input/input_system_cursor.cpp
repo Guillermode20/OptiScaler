@@ -187,11 +187,24 @@ DWORD PackCursorMessagePos(const POINT& point)
 }
 } // namespace
 
+void RecordPolledMouseMotionLocked(const POINT& point)
+{
+    if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid ||
+        _state.AcquisitionMode != InputAcquisitionMode::PolledAbsolute)
+        return;
+
+    const POINT offset { point.x - _state.CursorPollCenter.x, point.y - _state.CursorPollCenter.y };
+    AccumulateRelativeMouseMotionLocked(offset.x - _state.CursorPollLastOffset.x,
+                                        offset.y - _state.CursorPollLastOffset.y);
+    _state.CursorPollLastOffset = offset;
+}
+
 BOOL WINAPI hkGetCursorPos(LPPOINT point)
 {
     if (point == nullptr)
         return FALSE;
 
+    std::uint64_t pollGeneration = 0;
     {
         std::unique_lock lock(_state.Mutex);
 
@@ -201,21 +214,37 @@ BOOL WINAPI hkGetCursorPos(LPPOINT point)
             GetBlockedCursorScreenPosLocked(*point);
             return TRUE;
         }
+        pollGeneration = _state.CursorPollGeneration;
     }
 
     const auto result = o_GetCursorPos(point);
     if (result)
     {
         std::unique_lock lock(_state.Mutex);
-        if (_state.Initialized && _state.Focused && !_state.MenuVisible && _state.CursorPollCenterValid)
-        {
-            const POINT offset { point->x - _state.CursorPollCenter.x, point->y - _state.CursorPollCenter.y };
-            AccumulateRelativeMouseMotionLocked(offset.x - _state.CursorPollLastOffset.x,
-                                                offset.y - _state.CursorPollLastOffset.y);
-            _state.CursorPollLastOffset = offset;
-        }
+        if (pollGeneration == _state.CursorPollGeneration)
+            RecordPolledMouseMotionLocked(*point);
     }
     return result;
+}
+
+void RefreshMouseMotion()
+{
+    std::uint64_t pollGeneration = 0;
+    {
+        std::unique_lock lock(_state.Mutex);
+        if (!_state.Initialized || !_state.Focused || _state.MenuVisible || !_state.CursorPollCenterValid ||
+            _state.AcquisitionMode != InputAcquisitionMode::PolledAbsolute)
+            return;
+        pollGeneration = _state.CursorPollGeneration;
+    }
+
+    POINT point {};
+    if (!o_GetCursorPos(&point))
+        return;
+
+    std::unique_lock lock(_state.Mutex);
+    if (pollGeneration == _state.CursorPollGeneration)
+        RecordPolledMouseMotionLocked(point);
 }
 
 BOOL WINAPI hkSetCursorPos(int x, int y)
@@ -228,6 +257,9 @@ BOOL WINAPI hkSetCursorPos(int x, int y)
             _state.SetCursorPosBlockedCount++;
             return TRUE;
         }
+
+        ++_state.CursorPollGeneration;
+        _state.CursorPollCenterValid = false;
     }
 
     const auto result = o_SetCursorPos(x, y);
@@ -240,6 +272,7 @@ BOOL WINAPI hkSetCursorPos(int x, int y)
             _state.CursorPollLastOffset = {};
             _state.CursorPollCenterValid = true;
         }
+        ++_state.CursorPollGeneration;
     }
     return result;
 }
