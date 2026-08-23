@@ -684,7 +684,10 @@ void AReproj_Dx12::UpdateWarpGpuDuration(int outputIndex)
         {
             std::scoped_lock metricsLock(_metricsMutex);
             _warpDurationEmaMs = _warpDurationEmaMs * 0.9 + durationMs * 0.1;
-            _dispatchLeadMs = std::clamp(_warpDurationEmaMs + 0.5, 1.0, 5.0);
+            // Full-screen GPU work is not the whole submission path: command
+            // recording, queue handoff and DXGI present also need headroom.
+            // One millisecond repeatedly missed 120 Hz slots on Proton.
+            _dispatchLeadMs = std::clamp(_warpDurationEmaMs + 1.0, 3.0, 5.0);
         }
     }
     D3D12_RANGE written { 0, 0 };
@@ -839,6 +842,27 @@ void AReproj_Dx12::WaitUntil(double deadlineMs) const
         FrameLimit::sleepForMs(remaining);
 }
 
+bool AReproj_Dx12::WaitForPresenterDeadline(double deadlineMs)
+{
+    // Keep stop/join preemptible, then spin only for the final fraction of a
+    // millisecond so ordinary scheduler jitter does not move the display phase.
+    while (!_stopPresenter.load())
+    {
+        const auto remaining = deadlineMs - Util::MillisecondsNow();
+        if (remaining <= 0.2)
+            break;
+
+        std::unique_lock lock(_presentMutex);
+        _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(remaining - 0.2),
+                            [&] { return _stopPresenter.load(); });
+    }
+
+    while (!_stopPresenter.load() && Util::MillisecondsNow() < deadlineMs)
+        YieldProcessor();
+
+    return !_stopPresenter.load();
+}
+
 bool AReproj_Dx12::CreateAsyncPresenter()
 {
     if (_presentQueue != nullptr)
@@ -920,6 +944,13 @@ bool AReproj_Dx12::StartAsyncPresenter()
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
 
     _stopPresenter.store(false);
+    {
+        std::scoped_lock metricsLock(_metricsMutex);
+        _lastDisplayPresentMs = 0.0;
+        _presentIntervalCount = 0;
+        _presentIntervalCursor = 0;
+        std::fill(_presentIntervals, _presentIntervals + _countof(_presentIntervals), 0.0);
+    }
     _presenterState.store(PresenterState::Running);
     _presentThread = std::thread(&AReproj_Dx12::PresenterMain, this);
     return true;
@@ -991,16 +1022,37 @@ void AReproj_Dx12::PresenterMain()
 {
     int activePacketIndex = -1;
     UINT64 activeFrame = 0;
+    double nextDeadlineMs = 0.0;
 
     while (!_stopPresenter.load())
     {
-        // The frame-latency waitable object IS the display clock. Proton signals
-        // it whenever queue capacity frees up (possibly early), so the wall-clock
-        // deadline below gates presents that would otherwise flood ahead of
-        // vblank; the waitable itself keeps us locked to actual scanout slots.
         const auto refreshHz = TargetRefreshHz();
         const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
+        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, 5.0);
 
+        // Publication never drives cadence. Keep a monotonic software display
+        // clock because Proton may signal the frame-latency object whenever queue
+        // capacity is available instead of at vblank. Wake before the target so
+        // capacity wait, late anchor selection, GPU work and Present all complete
+        // before scanout.
+        if (nextDeadlineMs > 0.0)
+        {
+            const auto now = Util::MillisecondsNow();
+            const auto lateness = now - nextDeadlineMs;
+            if (lateness >= refreshPeriodMs)
+            {
+                const auto skipped = static_cast<uint32_t>(std::floor(lateness / refreshPeriodMs));
+                nextDeadlineMs += skipped * refreshPeriodMs;
+                std::scoped_lock metricsLock(_metricsMutex);
+                _metricsMissedDisplaySlots += skipped;
+            }
+
+            if (!WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs))
+                break;
+        }
+
+        // Consume queue capacity exactly once for this output. Present below must
+        // not wait again or it can add another refresh of latency.
         const auto slotResult = WaitForPresentSlot();
         if (slotResult != S_OK)
         {
@@ -1011,13 +1063,16 @@ void AReproj_Dx12::PresenterMain()
                 std::scoped_lock metricsLock(_metricsMutex);
                 ++_metricsMissedDisplaySlots;
             }
+            if (nextDeadlineMs > 0.0)
+                nextDeadlineMs += refreshPeriodMs;
             continue;
         }
         if (_stopPresenter.load())
             break;
 
-        // Packet publication never owns cadence. Select the newest completed
-        // anchor only after the slot wait, immediately before dispatch.
+        // Select the newest completed anchor after both pacing waits. A packet
+        // published during the lead sleep therefore reaches this slot instead of
+        // being delayed by another refresh.
         int newestPacketIndex = -1;
         UINT64 newestFrame = activeFrame;
         for (int i = 0; i < BUFFER_COUNT; ++i)
@@ -1057,6 +1112,7 @@ void AReproj_Dx12::PresenterMain()
 
         if (activePacketIndex < 0)
         {
+            nextDeadlineMs = 0.0;
             std::unique_lock lock(_presentMutex);
             _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(refreshPeriodMs),
                                 [&] { return _stopPresenter.load() || _readyFrameId.load() > activeFrame; });
@@ -1065,23 +1121,15 @@ void AReproj_Dx12::PresenterMain()
 
         auto& packet = _packets[activePacketIndex];
         const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
-        const auto dispatchStart = Util::MillisecondsNow();
+        const auto targetDisplayMs = nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
         const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs);
         const auto timeStep =
-            std::clamp(static_cast<float>(((dispatchStart - packet.renderTimestamp) / realPeriodMs) *
+            std::clamp(static_cast<float>(((targetDisplayMs - packet.renderTimestamp) / realPeriodMs) *
                                           Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
                        0.0f, 1.0f);
 
-        // Software pacing: hold back warps that arrive too early relative to the
-        // nominal refresh period. The waitable can signal up to a full period
-        // early on Proton; without this gate the presenter floods warps and
-        // freezes visible output until DXGI throttles it. The first present of a
-        // session has no prior slot, so it goes out immediately.
-        double nextDeadlineMs = _lastDisplayPresentMs > 0.0 ? _lastDisplayPresentMs + refreshPeriodMs : dispatchStart;
-        WaitUntil(nextDeadlineMs - std::clamp(_dispatchLeadMs, 1.0, 5.0));
-
         const bool dispatched = packet.warpAllowed && !focusLost
-                                    ? DispatchPacketWarp(activePacketIndex, timeStep, nextDeadlineMs)
+                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs)
                                     : DisplayPacket(activePacketIndex, true);
         if (!dispatched || _gameCommandQueue == nullptr ||
             FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
@@ -1091,11 +1139,11 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
 
-        // Display-clock mode is always vblank synchronized: one Present(1, 0)
-        // for this slot, with no tearing or DO_NOT_WAIT flags.
+        // Display-clock mode emits exactly one vblank-synchronized output for
+        // every software slot, with no tearing or DO_NOT_WAIT flags.
         const auto result = PresentCompositorFrame(1, 0, !newAnchor, false);
         const auto presentedAt = Util::MillisecondsNow();
-        const auto poseAge = static_cast<float>(std::max(0.0, presentedAt - packet.sourcePoseTimestamp));
+        const auto poseAge = static_cast<float>(std::max(0.0, targetDisplayMs - packet.sourcePoseTimestamp));
         RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
         if (result != S_OK)
         {
@@ -1110,12 +1158,22 @@ void AReproj_Dx12::PresenterMain()
             _metricsRepeatedAnchorDisplays += !newAnchor;
             if (_lastDisplayPresentMs > 0.0)
             {
-                _presentIntervals[_presentIntervalCursor] = presentedAt - _lastDisplayPresentMs;
+                const auto intervalMs = presentedAt - _lastDisplayPresentMs;
+                _presentIntervals[_presentIntervalCursor] = intervalMs;
                 _presentIntervalCursor = (_presentIntervalCursor + 1) % _countof(_presentIntervals);
                 _presentIntervalCount = std::min<uint32_t>(_presentIntervalCount + 1, _countof(_presentIntervals));
+
+                const auto representedSlots = static_cast<uint32_t>(std::floor(intervalMs / refreshPeriodMs + 0.5));
+                if (representedSlots > 1)
+                    _metricsMissedDisplaySlots += representedSlots - 1;
             }
             _lastDisplayPresentMs = presentedAt;
         }
+
+        if (nextDeadlineMs <= 0.0)
+            nextDeadlineMs = presentedAt + refreshPeriodMs;
+        else
+            nextDeadlineMs += refreshPeriodMs;
     }
 
     if (activePacketIndex >= 0)

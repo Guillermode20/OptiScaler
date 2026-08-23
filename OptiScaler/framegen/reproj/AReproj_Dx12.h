@@ -148,6 +148,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t WarpCountForFrame(double refreshHz) const;
     uint32_t WarpCountForPeriod(double realFrameMs, double refreshHz) const;
     void WaitUntil(double deadlineMs) const;
+    bool WaitForPresenterDeadline(double deadlineMs);
     bool DrainGpuWork();
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated = false); // skip-flag wrapped present
     bool SubmitSCCommandList(int fIndex);                      // close + execute the SC command list
