@@ -205,6 +205,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojGamepadDegreesPerSecondX.set_from_config(readFloat("Reproj", "GamepadDegreesPerSecondX"));
             ReprojGamepadDegreesPerSecondY.set_from_config(readFloat("Reproj", "GamepadDegreesPerSecondY"));
             ReprojPredictionMs.set_from_config(readFloat("Reproj", "PredictionMs"));
+            ReprojInputPoseLagMs.set_from_config(readFloat("Reproj", "InputPoseLagMs"));
             ReprojMaxRotation.set_from_config(readFloat("Reproj", "MaxRotation"));
             ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
@@ -1062,6 +1063,8 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojGamepadDegreesPerSecondY.value_for_config()).c_str());
         ini.SetValue("Reproj", "PredictionMs",
                      GetFloatValue(Instance()->ReprojPredictionMs.value_for_config()).c_str());
+        ini.SetValue("Reproj", "InputPoseLagMs",
+                     GetFloatValue(Instance()->ReprojInputPoseLagMs.value_for_config()).c_str());
         ini.SetValue("Reproj", "MaxRotation",
                      GetFloatValue(Instance()->ReprojMaxRotation.value_for_config()).c_str());
         ini.SetValue("Reproj", "DebugView", GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());

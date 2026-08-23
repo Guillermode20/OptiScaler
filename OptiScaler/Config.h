@@ -635,6 +635,9 @@ class Config
     CustomOptional<float> ReprojGamepadDegreesPerSecondY { 180.0f }; // right-stick pitch; sign controls direction
     CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose
     CustomOptional<float> ReprojPredictionMs { 2.0f };    // extrapolate recent raw input toward scanout
+    // Empty/auto uses the learned camera-input lag. An explicit value overrides
+    // it for diagnosis; values are clamped to the retained 0..150 ms history.
+    CustomOptional<float, NoDefault> ReprojInputPoseLagMs;
     CustomOptional<float> ReprojMaxRotation { 15.0f };    // clamp late rotation to limit edge artifacts
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents

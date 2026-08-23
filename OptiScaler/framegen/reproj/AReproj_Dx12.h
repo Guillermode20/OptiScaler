@@ -21,7 +21,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     struct RuntimeMetrics
     {
         float realFps = 0.0f;
-        float warpFps = 0.0f;
+        float warpFps = 0.0f; // total display FPS (all scheduled outputs are warped)
+        float displayFps = 0.0f;
         float poseAgeMs = 0.0f;
         float targetRefreshHz = 0.0f;
         uint32_t warpsPerReal = 0;
@@ -37,7 +38,15 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool calibrationReady = false;
         float mouseCalibrationConfidence = 0.0f;
         float gamePresentBlockMs = 0.0f;
+        float meanPresentIntervalMs = 0.0f;
+        float p95PresentIntervalMs = 0.0f;
+        float dispatchLeadMs = 3.0f;
         int mouseCalibrationLagMs = 0;
+        uint32_t newAnchorDisplays = 0;
+        uint32_t repeatedAnchorDisplays = 0;
+        uint32_t missedDisplaySlots = 0;
+        // 0 = manual/fallback, 1 = game camera basis, 2 = motion-vector grid.
+        uint32_t calibrationSource = 0;
     };
 
   private:
@@ -66,6 +75,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         double xx = 0.0, xy = 0.0, yy = 0.0;
         double xYaw = 0.0, yYaw = 0.0, xPitch = 0.0, yPitch = 0.0;
         double yaw2 = 0.0, pitch2 = 0.0;
+        double inlierTotal = 0.0;
         uint32_t samples = 0;
     };
 
@@ -75,6 +85,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         ID3D12Resource* depth = nullptr;
         ID3D12Resource* velocity = nullptr;
         ID3D12Resource* ui = nullptr;
+        ID3D12Resource* mvReadback = nullptr;
         D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_COMMON;
         D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON;
         D3D12_RESOURCE_STATES velocityState = D3D12_RESOURCE_STATE_COMMON;
@@ -92,6 +103,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool hasCamera = false;
         bool hasUi = false;
         bool warpAllowed = false;
+        bool calibrationPending = false;
+        DXGI_FORMAT mvReadbackFormat = DXGI_FORMAT_UNKNOWN;
+        uint32_t mvSampleCount = 0;
         OptiInput::RawMouseMotion sourceMouse {};
         std::atomic<PacketState> state { PacketState::Free };
     };
@@ -116,6 +130,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::atomic<uint32_t> _stageTraceCount { 0 };
 
     ID3D12CommandQueue* _presentQueue = nullptr;
+    ID3D12QueryHeap* _warpTimestampHeap = nullptr;
+    ID3D12Resource* _warpTimestampReadback = nullptr;
+    UINT64 _presentTimestampFrequency = 0;
     class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use
     HANDLE _presentWaitableObject = nullptr;
     bool _asyncDowngraded = false;
@@ -138,6 +155,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
     void FillConstants(int fIndex, RP_Constants& constants);
     void UpdateMouseCalibration(int fIndex);
+    bool CaptureMotionGrid(ID3D12GraphicsCommandList* cmdList, ReprojFramePacket& packet);
+    void ProcessMotionCalibration(ReprojFramePacket& packet);
+    void AddCalibrationSample(double yaw, double pitch, double previousTimestamp, double timestamp,
+                              float inlierRatio, uint32_t source);
     void ApplyLateLatch(RP_Constants& constants, const OptiInput::RawMouseMotion& sourceMouse,
                         double sourcePoseTimestamp, double additionalLeadMs = 0.0) const;
     int AcquirePacket();
@@ -151,6 +172,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool WaitForPacketDeadline(int packetIndex, double deadlineMs);
     HRESULT WaitForPresentSlot();
     HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot = true);
+    void UpdateWarpGpuDuration(int outputIndex);
     double TargetRefreshHz();
     uint32_t WarpCountForFrame(double refreshHz) const;
     uint32_t WarpCountForPeriod(double realFrameMs, double refreshHz) const;
@@ -168,9 +190,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void LogMetricsIfDue();
 
     OptiInput::RawMouseMotion _syncSourceMouse {};
-    static constexpr int CALIBRATION_LAG_BINS = 26; // 0..50 ms in 2 ms steps
+    static constexpr int CALIBRATION_LAG_BINS = 76; // 0..150 ms in 2 ms steps
     CalibrationBin _calibration[CALIBRATION_LAG_BINS] {};
     double _calibrationMatrix[4] = {}; // yawX, yawY, pitchX, pitchY in radians/count
+    mutable std::mutex _calibrationMutex;
     double _lastCalibrationTimestamp = 0.0;
     float _calibrationConfidence = 0.0f;
     int _calibrationLagMs = 0;
@@ -181,6 +204,16 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsMaxWarpsPerReal = 0;
     double _metricsPoseAgeTotalMs = 0.0;
     uint32_t _metricsPoseSamples = 0;
+    uint32_t _metricsNewAnchorDisplays = 0;
+    uint32_t _metricsRepeatedAnchorDisplays = 0;
+    uint32_t _metricsMissedDisplaySlots = 0;
+    double _presentIntervals[240] = {};
+    uint32_t _presentIntervalCount = 0;
+    uint32_t _presentIntervalCursor = 0;
+    double _lastDisplayPresentMs = 0.0;
+    double _dispatchLeadMs = 3.0;
+    double _warpDurationEmaMs = 2.0;
+    uint32_t _calibrationSource = 0;
     RuntimeMetrics _runtimeMetrics {};
     mutable std::mutex _metricsMutex;
     std::mutex _refreshMutex;

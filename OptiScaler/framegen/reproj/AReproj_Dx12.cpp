@@ -2,10 +2,13 @@
 #include "AReproj_Dx12.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
+#include <vector>
 
 #include <State.h>
 #include <Config.h>
@@ -327,6 +330,18 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
     if (std::hypot(yaw, pitch) > 0.5)
         return; // scene cut or non-gameplay camera jump
 
+    AddCalibrationSample(yaw, pitch, prevTimestamp, timestamp, 1.0f, 1);
+}
+
+void AReproj_Dx12::AddCalibrationSample(double yaw, double pitch, double prevTimestamp, double timestamp,
+                                        float inlierRatio, uint32_t source)
+{
+    if (timestamp <= prevTimestamp || std::hypot(yaw, pitch) < 1e-5 || std::hypot(yaw, pitch) > 0.5 ||
+        inlierRatio < 0.6f)
+        return;
+
+    std::scoped_lock calibrationLock(_calibrationMutex);
+
     for (int i = 0; i < CALIBRATION_LAG_BINS; ++i)
     {
         const auto lag = static_cast<double>(i * 2);
@@ -349,6 +364,7 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
             bin.yPitch *= 0.995;
             bin.yaw2 *= 0.995;
             bin.pitch2 *= 0.995;
+            bin.inlierTotal *= 0.995;
         }
         bin.xx += x * x;
         bin.xy += x * y;
@@ -359,6 +375,7 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
         bin.yPitch += y * pitch;
         bin.yaw2 += yaw * yaw;
         bin.pitch2 += pitch * pitch;
+        bin.inlierTotal += inlierRatio;
         ++bin.samples;
     }
 
@@ -367,7 +384,7 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
     {
         const auto& bin = _calibration[i];
         const auto determinant = bin.xx * bin.yy - bin.xy * bin.xy;
-        if (bin.samples < 12 || determinant < 1.0 || bin.yaw2 + bin.pitch2 < 1e-6)
+        if (bin.samples < 24 || determinant < 1.0 || bin.yaw2 + bin.pitch2 < 1e-6)
             continue;
 
         const double yawX = (bin.yy * bin.xYaw - bin.xy * bin.yYaw) / determinant;
@@ -379,7 +396,9 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
 
         const auto yawExplained = yawX * bin.xYaw + yawY * bin.yYaw;
         const auto pitchExplained = pitchX * bin.xPitch + pitchY * bin.yPitch;
-        const auto score = std::max(0.0, 1.0 - (yawExplained + pitchExplained) / (bin.yaw2 + bin.pitch2));
+        const auto residual = std::max(0.0, 1.0 - (yawExplained + pitchExplained) / (bin.yaw2 + bin.pitch2));
+        const auto inliers = bin.inlierTotal / std::max(1u, bin.samples);
+        const auto score = 1.0 - std::clamp((1.0 - residual) * inliers, 0.0, 1.0);
         if (score < bestScore)
         {
             bestScore = score;
@@ -388,9 +407,209 @@ void AReproj_Dx12::UpdateMouseCalibration(int fIndex)
             _calibrationMatrix[2] = pitchX;
             _calibrationMatrix[3] = pitchY;
             _calibrationLagMs = i * 2;
+            _calibrationSource = source;
         }
     }
     _calibrationConfidence = static_cast<float>(std::clamp(1.0 - bestScore, 0.0, 1.0));
+}
+
+namespace
+{
+float ReprojHalfToFloat(uint16_t value)
+{
+    const uint32_t sign = static_cast<uint32_t>(value & 0x8000u) << 16;
+    uint32_t exponent = (value >> 10) & 0x1fu;
+    uint32_t mantissa = value & 0x3ffu;
+    uint32_t bits = 0;
+    if (exponent == 0)
+    {
+        if (mantissa == 0)
+            bits = sign;
+        else
+        {
+            int shift = 0;
+            while ((mantissa & 0x400u) == 0)
+            {
+                mantissa <<= 1;
+                ++shift;
+            }
+            mantissa &= 0x3ffu;
+            bits = sign | static_cast<uint32_t>(127 - 15 - shift) << 23 | mantissa << 13;
+        }
+    }
+    else if (exponent == 31)
+        bits = sign | 0x7f800000u | mantissa << 13;
+    else
+        bits = sign | (exponent + 112u) << 23 | mantissa << 13;
+    return std::bit_cast<float>(bits);
+}
+}
+
+bool AReproj_Dx12::CaptureMotionGrid(ID3D12GraphicsCommandList* cmdList, ReprojFramePacket& packet)
+{
+    if (cmdList == nullptr || packet.velocity == nullptr)
+        return false;
+
+    const auto desc = packet.velocity->GetDesc();
+    const bool supported = desc.Format == DXGI_FORMAT_R16G16_FLOAT || desc.Format == DXGI_FORMAT_R32G32_FLOAT ||
+                           desc.Format == DXGI_FORMAT_R16G16_SNORM;
+    if (!supported || desc.Width < 8 || desc.Height < 8)
+        return false;
+
+    constexpr uint32_t columns = 16;
+    constexpr uint32_t rows = 9;
+    constexpr uint32_t count = columns * rows;
+    constexpr uint64_t sampleStride = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    const auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(count * sampleStride);
+    if (packet.mvReadback == nullptr || packet.mvReadback->GetDesc().Width != bufferDesc.Width)
+    {
+        SAFE_RELEASE(packet.mvReadback);
+        const auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+        if (FAILED(_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                    IID_PPV_ARGS(&packet.mvReadback))))
+            return false;
+        packet.mvReadback->SetName(L"Reproj_MotionGridReadback");
+    }
+
+    ResourceBarrier(cmdList, packet.velocity, packet.velocityState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    for (uint32_t y = 0, sample = 0; y < rows; ++y)
+    {
+        for (uint32_t x = 0; x < columns; ++x, ++sample)
+        {
+            const UINT sx = static_cast<UINT>((x + 0.5) * desc.Width / columns);
+            const UINT sy = static_cast<UINT>((y + 0.5) * desc.Height / rows);
+            D3D12_TEXTURE_COPY_LOCATION destination {};
+            destination.pResource = packet.mvReadback;
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint.Offset = sample * sampleStride;
+            destination.PlacedFootprint.Footprint.Format = desc.Format;
+            destination.PlacedFootprint.Footprint.Width = 1;
+            destination.PlacedFootprint.Footprint.Height = 1;
+            destination.PlacedFootprint.Footprint.Depth = 1;
+            destination.PlacedFootprint.Footprint.RowPitch = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+            D3D12_TEXTURE_COPY_LOCATION source {};
+            source.pResource = packet.velocity;
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            D3D12_BOX box { sx, sy, 0, sx + 1, sy + 1, 1 };
+            cmdList->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
+        }
+    }
+    ResourceBarrier(cmdList, packet.velocity, D3D12_RESOURCE_STATE_COPY_SOURCE, packet.velocityState);
+    packet.mvReadbackFormat = desc.Format;
+    packet.mvSampleCount = count;
+    packet.calibrationPending = true;
+    return true;
+}
+
+void AReproj_Dx12::ProcessMotionCalibration(ReprojFramePacket& packet)
+{
+    if (!packet.calibrationPending || packet.mvReadback == nullptr || packet.mvSampleCount == 0)
+        return;
+    packet.calibrationPending = false;
+
+    void* mappedRaw = nullptr;
+    D3D12_RANGE readRange { 0, packet.mvSampleCount * D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT };
+    if (FAILED(packet.mvReadback->Map(0, &readRange, &mappedRaw)))
+        return;
+    const auto* mapped = static_cast<const uint8_t*>(mappedRaw);
+
+    struct Observation
+    {
+        double a, b, c, d; // du=a*yaw+b*pitch, dv=c*yaw+d*pitch
+        double du, dv;
+    };
+    std::vector<Observation> observations;
+    observations.reserve(packet.mvSampleCount);
+    constexpr uint32_t columns = 16;
+    constexpr uint32_t rows = 9;
+    const double tanHalfV = std::tan(0.5 * packet.constants.cameraVFov);
+    const double tanHalfH = tanHalfV * packet.constants.cameraAspect;
+    const double focalY = tanHalfV > 1e-6 ? 0.5 * packet.constants.displayHeight / tanHalfV : 0.0;
+    const double focalX = tanHalfH > 1e-6 ? 0.5 * packet.constants.displayWidth / tanHalfH : 0.0;
+    for (uint32_t i = 0; i < packet.mvSampleCount; ++i)
+    {
+        const auto* sample = mapped + i * D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+        float x = 0.0f, y = 0.0f;
+        if (packet.mvReadbackFormat == DXGI_FORMAT_R32G32_FLOAT)
+        {
+            std::memcpy(&x, sample, sizeof(float));
+            std::memcpy(&y, sample + sizeof(float), sizeof(float));
+        }
+        else if (packet.mvReadbackFormat == DXGI_FORMAT_R16G16_FLOAT)
+        {
+            x = ReprojHalfToFloat(*reinterpret_cast<const uint16_t*>(sample));
+            y = ReprojHalfToFloat(*reinterpret_cast<const uint16_t*>(sample + 2));
+        }
+        else
+        {
+            x = std::max(-1.0f, *reinterpret_cast<const int16_t*>(sample) / 32767.0f);
+            y = std::max(-1.0f, *reinterpret_cast<const int16_t*>(sample + 2) / 32767.0f);
+        }
+        x *= packet.constants.mvScaleX;
+        y *= packet.constants.mvScaleY;
+        if (packet.constants.invertMV)
+        {
+            x = -x;
+            y = -y;
+        }
+        if (std::isfinite(x) && std::isfinite(y) && std::hypot(x, y) < 0.25f * packet.constants.displayWidth &&
+            focalX > 0.0 && focalY > 0.0)
+        {
+            const uint32_t gridX = i % columns;
+            const uint32_t gridY = i / columns;
+            const double nx = ((gridX + 0.5) / columns * 2.0 - 1.0) * tanHalfH;
+            const double ny = (1.0 - (gridY + 0.5) / rows * 2.0) * tanHalfV;
+            observations.push_back({ focalX * (1.0 + nx * nx), -focalX * nx * ny,
+                                     -focalY * nx * ny, focalY * (1.0 + ny * ny), x, y });
+        }
+    }
+    D3D12_RANGE written { 0, 0 };
+    packet.mvReadback->Unmap(0, &written);
+    if (observations.size() < 24 || packet.constants.cameraVFov <= 0.0f || packet.constants.cameraAspect <= 0.0f)
+        return;
+
+    std::vector<uint8_t> accepted(observations.size(), 1);
+    double yaw = 0.0, pitch = 0.0;
+    for (int iteration = 0; iteration < 3; ++iteration)
+    {
+        double aa = 0.0, ab = 0.0, bb = 0.0, ay = 0.0, by = 0.0;
+        for (size_t i = 0; i < observations.size(); ++i)
+        {
+            if (!accepted[i])
+                continue;
+            const auto& o = observations[i];
+            aa += o.a * o.a + o.c * o.c;
+            ab += o.a * o.b + o.c * o.d;
+            bb += o.b * o.b + o.d * o.d;
+            ay += o.a * o.du + o.c * o.dv;
+            by += o.b * o.du + o.d * o.dv;
+        }
+        const double determinant = aa * bb - ab * ab;
+        if (determinant < 1e-9)
+            return;
+        yaw = (bb * ay - ab * by) / determinant;
+        pitch = (aa * by - ab * ay) / determinant;
+
+        std::vector<double> residuals;
+        residuals.reserve(observations.size());
+        for (const auto& o : observations)
+            residuals.push_back(std::hypot(o.du - o.a * yaw - o.b * pitch,
+                                           o.dv - o.c * yaw - o.d * pitch));
+        auto middle = residuals.begin() + residuals.size() / 2;
+        std::nth_element(residuals.begin(), middle, residuals.end());
+        const double threshold = std::max(0.75, *middle * 3.0);
+        for (size_t i = 0; i < observations.size(); ++i)
+        {
+            const auto& o = observations[i];
+            accepted[i] = std::hypot(o.du - o.a * yaw - o.b * pitch,
+                                     o.dv - o.c * yaw - o.d * pitch) <= threshold;
+        }
+    }
+    const auto inliers = static_cast<uint32_t>(std::count(accepted.begin(), accepted.end(), uint8_t { 1 }));
+    const float inlierRatio = static_cast<float>(inliers) / observations.size();
+    AddCalibrationSample(yaw, pitch, packet.renderTimestamp - packet.frameDelta, packet.renderTimestamp,
+                         inlierRatio, 2);
 }
 
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
@@ -438,7 +657,11 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     const bool hasCamera = _cameraVFov[fIndex] > 0.0f && _cameraAspectRatio[fIndex] > 0.0f &&
                            !IsCameraAllZero(fIndex) && !IsCameraAllZero(prevIndex);
     if (!hasCamera)
-        cb.mode = 0;
+    {
+        // Mode 3 is a camera-basis-independent rotational homography. It is the
+        // DRG path: projection values are present even though a world basis is not.
+        cb.mode = cb.cameraVFov > 0.0f && cb.cameraAspect > 0.0f && config->ReprojLateLatch.value_or_default() ? 3 : 0;
+    }
     else if (config->ReprojRotationOnly.value_or_default() && cb.mode != 0)
         cb.mode = 2;
 }
@@ -473,10 +696,17 @@ void AReproj_Dx12::ApplyLateLatch(RP_Constants& constants, const OptiInput::RawM
     constexpr double radiansPerDegree = 0.017453292519943295;
     double yaw = 0.0;
     double pitch = 0.0;
-    if (config->ReprojAutoCalibrate.value_or_default() && _calibrationConfidence >= 0.35f)
+    double calibrationMatrix[4] = {};
+    float calibrationConfidence = 0.0f;
     {
-        yaw = _calibrationMatrix[0] * dx + _calibrationMatrix[1] * dy;
-        pitch = _calibrationMatrix[2] * dx + _calibrationMatrix[3] * dy;
+        std::scoped_lock calibrationLock(_calibrationMutex);
+        std::memcpy(calibrationMatrix, _calibrationMatrix, sizeof(calibrationMatrix));
+        calibrationConfidence = _calibrationConfidence;
+    }
+    if (config->ReprojAutoCalibrate.value_or_default() && calibrationConfidence >= 0.7f)
+    {
+        yaw = calibrationMatrix[0] * dx + calibrationMatrix[1] * dy;
+        pitch = calibrationMatrix[2] * dx + calibrationMatrix[3] * dy;
     }
     else if (config->ReprojManualYawDegrees.has_value() && config->ReprojManualPitchDegrees.has_value())
     {
@@ -583,7 +813,10 @@ void AReproj_Dx12::RetirePackets()
         const bool presentDone = packet.retirementFenceValue == 0 || _scFence == nullptr ||
                                  _scFence->GetCompletedValue() >= packet.retirementFenceValue;
         if (captureDone && presentDone)
+        {
+            ProcessMotionCalibration(packet);
             packet.state.store(PacketState::Free);
+        }
     }
 }
 
@@ -636,6 +869,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     if (ok && velocity)
         ok = CopyPacketResource(cmdList, velocity->GetResource(), velocity->state, &packet.velocity,
                                 packet.velocityState, L"Reproj_PacketVelocity");
+    if (ok && velocity && warpAllowed && Config::Instance()->ReprojAutoCalibrate.value_or_default())
+        CaptureMotionGrid(cmdList, packet);
 
     packet.hasDepth = ok && warpAllowed && Config::Instance()->ReprojUseDepth.value_or_default() && depth;
     if (packet.hasDepth)
@@ -659,19 +894,37 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     if (!ok || !submitted)
         return false;
 
-    FillConstants(sourceIndex, packet.constants);
-    packet.sourceMouse = OptiInput::GetRawMouseMotionAt(_cameraTimestamp[sourceIndex]);
-    packet.hasCamera = packet.constants.mode != 0;
-    if (!packet.hasDepth)
-        packet.constants.mode = 0;
-    packet.warpAllowed = warpAllowed && velocity;
-    packet.retirementFenceValue = 0;
-    packet.frameId = ++_publishedFrameId;
-    packet.sourcePoseTimestamp = _cameraTimestamp[sourceIndex];
     const auto now = Util::MillisecondsNow();
     packet.frameDelta =
         _lastRealFrameTimestamp > 0.0 ? now - _lastRealFrameTimestamp : State::Instance().lastFGFrameTime;
     _lastRealFrameTimestamp = now;
+    packet.renderTimestamp = now;
+    FillConstants(sourceIndex, packet.constants);
+    const auto cameraTimestamp = _cameraTimestamp[sourceIndex];
+    const auto configuredLag = Config::Instance()->ReprojInputPoseLagMs;
+    float calibrationConfidence = 0.0f;
+    int calibrationLagMs = 0;
+    {
+        std::scoped_lock calibrationLock(_calibrationMutex);
+        calibrationConfidence = _calibrationConfidence;
+        calibrationLagMs = _calibrationLagMs;
+    }
+    const double learnedOrFallbackLag = calibrationConfidence >= 0.7f
+                                            ? calibrationLagMs
+                                            : std::clamp(packet.frameDelta, 0.0, 150.0);
+    const double sourceTimestamp = cameraTimestamp > 0.0
+                                       ? cameraTimestamp
+                                       : now - std::clamp<double>(configuredLag.value_or(
+                                                                      static_cast<float>(learnedOrFallbackLag)),
+                                                                  0.0, 150.0);
+    packet.sourceMouse = OptiInput::GetRawMouseMotionAt(sourceTimestamp);
+    packet.hasCamera = packet.constants.mode != 0;
+    if (!packet.hasDepth && packet.constants.mode != 3)
+        packet.constants.mode = 0;
+    packet.warpAllowed = warpAllowed && velocity;
+    packet.retirementFenceValue = 0;
+    packet.frameId = ++_publishedFrameId;
+    packet.sourcePoseTimestamp = sourceTimestamp;
     packet.syncInterval = FGHooks::LastPresentSyncInterval();
     packet.presentFlags = FGHooks::LastPresentFlags();
     return true;
@@ -744,13 +997,18 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         return false;
     }
 
+    UpdateWarpGpuDuration(outputIndex);
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
+    const UINT timestampStart = static_cast<UINT>(outputIndex * 2);
+    if (_warpTimestampHeap != nullptr)
+        cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
     const auto leadMs = scanoutDeadlineMs > 0.0 ? std::max(0.0, scanoutDeadlineMs - Util::MillisecondsNow()) : 0.0;
     ApplyLateLatch(constants, packet.sourceMouse, packet.sourcePoseTimestamp, leadMs);
+    const bool useDepth = packet.hasDepth && packet.constants.mode != 3;
     const bool ok = _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,
-                                    packet.hasDepth ? packet.depth : nullptr, packet.depthState,
+                                    useDepth ? packet.depth : nullptr, packet.depthState,
                                     _warpOutput[outputIndex], constants);
     if (!ok)
     {
@@ -772,11 +1030,46 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
         _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
 
+    if (_warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr)
+    {
+        cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart + 1);
+        cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart, 2,
+                                  _warpTimestampReadback, timestampStart * sizeof(UINT64));
+    }
+
     if (!SubmitSCCommandList(outputIndex))
         return false;
 
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
     return true;
+}
+
+void AReproj_Dx12::UpdateWarpGpuDuration(int outputIndex)
+{
+    if (_warpTimestampReadback == nullptr || _presentTimestampFrequency == 0 || outputIndex < 0 ||
+        outputIndex >= BUFFER_COUNT || _scAllocatorFenceValues[outputIndex] == 0 || _scFence == nullptr ||
+        _scFence->GetCompletedValue() < _scAllocatorFenceValues[outputIndex])
+        return;
+
+    const SIZE_T offset = static_cast<SIZE_T>(outputIndex * 2 * sizeof(UINT64));
+    D3D12_RANGE range { offset, offset + 2 * sizeof(UINT64) };
+    void* mapped = nullptr;
+    if (FAILED(_warpTimestampReadback->Map(0, &range, &mapped)))
+        return;
+    const auto* timestamps = reinterpret_cast<const UINT64*>(static_cast<const uint8_t*>(mapped) + offset);
+    if (timestamps[1] >= timestamps[0])
+    {
+        const double durationMs = static_cast<double>(timestamps[1] - timestamps[0]) * 1000.0 /
+                                  static_cast<double>(_presentTimestampFrequency);
+        if (durationMs > 0.0 && durationMs < 50.0)
+        {
+            std::scoped_lock metricsLock(_metricsMutex);
+            _warpDurationEmaMs = _warpDurationEmaMs * 0.9 + durationMs * 0.1;
+            _dispatchLeadMs = std::clamp(_warpDurationEmaMs + 0.5, 1.0, 5.0);
+        }
+    }
+    D3D12_RANGE written { 0, 0 };
+    _warpTimestampReadback->Unmap(0, &written);
 }
 
 bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
@@ -831,6 +1124,8 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
+    if (cb.mode == 3)
+        hasDepth = false;
     if (!hasDepth)
         cb.mode = 0;
 
@@ -946,6 +1241,19 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         return false;
     }
     _presentQueue->SetName(L"Reproj_PresentQueue");
+    _presentQueue->GetTimestampFrequency(&_presentTimestampFrequency);
+    D3D12_QUERY_HEAP_DESC queryDesc {};
+    queryDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    queryDesc.Count = BUFFER_COUNT * 2;
+    if (SUCCEEDED(_device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&_warpTimestampHeap))))
+    {
+        const auto readbackDesc = CD3DX12_RESOURCE_DESC::Buffer(BUFFER_COUNT * 2 * sizeof(UINT64));
+        const auto readbackHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+        if (FAILED(_device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &readbackDesc,
+                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                    IID_PPV_ARGS(&_warpTimestampReadback))))
+            SAFE_RELEASE(_warpTimestampHeap);
+    }
     LOG_INFO("Reproj: main-swapchain async presenter created");
     return true;
 }
@@ -953,6 +1261,9 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 void AReproj_Dx12::DestroyAsyncPresenter()
 {
     _presentWaitableObject = nullptr;
+    SAFE_RELEASE(_warpTimestampReadback);
+    SAFE_RELEASE(_warpTimestampHeap);
+    _presentTimestampFrequency = 0;
     SAFE_RELEASE(_presentQueue);
 }
 
@@ -1040,6 +1351,11 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
             return slotResult;
     }
 
+    if (_presenterState.load() == PresenterState::Running)
+    {
+        syncInterval = 1;
+        flags = 0;
+    }
     UINT presentFlags = flags;
     if (syncInterval == 0)
         presentFlags |= DXGI_PRESENT_DO_NOT_WAIT;
@@ -1060,182 +1376,145 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
 void AReproj_Dx12::PresenterMain()
 {
     _presenterState.store(PresenterState::Running);
-    UINT64 consumedFrame = 0;
+    int activePacketIndex = -1;
+    UINT64 activeFrame = 0;
+    double nextDeadlineMs = 0.0;
 
     while (!_stopPresenter.load())
     {
-        std::unique_lock lock(_presentMutex);
-        _presentCv.wait(lock, [&] { return _stopPresenter.load() || _readyFrameId.load() > consumedFrame; });
-        lock.unlock();
+        const auto refreshHz = TargetRefreshHz();
+        const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
+        auto now = Util::MillisecondsNow();
+        if (nextDeadlineMs <= 0.0)
+            nextDeadlineMs = now + refreshPeriodMs;
+        if (now > nextDeadlineMs)
+        {
+            std::scoped_lock metricsLock(_metricsMutex);
+            ++_metricsMissedDisplaySlots;
+            nextDeadlineMs = now + refreshPeriodMs;
+        }
+        WaitUntil(nextDeadlineMs - std::clamp(_dispatchLeadMs, 1.0, 5.0));
+
+        const auto slotResult = WaitForPresentSlot();
+        if (slotResult != S_OK)
+        {
+            if (slotResult != DXGI_ERROR_WAS_STILL_DRAWING)
+                _presenterState.store(PresenterState::Failed);
+            else
+            {
+                std::scoped_lock metricsLock(_metricsMutex);
+                ++_metricsMissedDisplaySlots;
+            }
+            nextDeadlineMs = Util::MillisecondsNow() + refreshPeriodMs;
+            continue;
+        }
         if (_stopPresenter.load())
             break;
 
-        int packetIndex = -1;
-        UINT64 newestFrame = consumedFrame;
+        // Packet publication never owns cadence. Select the newest completed
+        // anchor only after the slot wait, immediately before late latch/dispatch.
+        int newestPacketIndex = -1;
+        UINT64 newestFrame = activeFrame;
         for (int i = 0; i < BUFFER_COUNT; ++i)
         {
             if (_packets[i].state.load() == PacketState::Ready && _packets[i].frameId > newestFrame)
             {
                 newestFrame = _packets[i].frameId;
-                packetIndex = i;
+                newestPacketIndex = i;
             }
         }
-        if (packetIndex < 0)
-            continue;
 
-        for (int i = 0; i < BUFFER_COUNT; ++i)
+        bool newAnchor = false;
+        if (newestPacketIndex >= 0)
         {
-            if (i != packetIndex && _packets[i].state.load() == PacketState::Ready && _packets[i].frameId < newestFrame)
-                _packets[i].state.store(PacketState::Retired);
-        }
-
-        auto expected = PacketState::Ready;
-        if (!_packets[packetIndex].state.compare_exchange_strong(expected, PacketState::Presenting))
-            continue;
-
-        auto& packet = _packets[packetIndex];
-        consumedFrame = packet.frameId;
-
-        // One-time stage tracing for the first packets: a silent worker stall here
-        // (e.g. Present blocking on an unscanned-out window) is otherwise invisible.
-        const bool traceStages = _stageTraceCount.fetch_add(1) < 3;
-        if (traceStages)
-            LOG_INFO("Reproj: presenter consuming frame {} (packet {})", packet.frameId, packetIndex);
-
-        // Fail in stages so a stalled presenter leaves an actionable message instead
-        // of a silent queue buildup.
-        if (FAILED(_presentQueue->Wait(_uiFence, packet.captureFenceValue)))
-        {
-            LOG_ERROR("Reproj: presenter failed to wait on capture fence for frame {}", packet.frameId);
-            packet.state.store(PacketState::Retired);
-            _presenterState.store(PresenterState::Failed);
-            break;
-        }
-        if (!DisplayPacket(packetIndex, true))
-        {
-            LOG_ERROR("Reproj: presenter failed to display frame {}", packet.frameId);
-            packet.state.store(PacketState::Retired);
-            _presenterState.store(PresenterState::Failed);
-            break;
-        }
-        // The DXGI swapchain remains associated with the queue used at creation.
-        // Bridge the worker queue's real-buffer write before calling Present.
-        if (_gameCommandQueue == nullptr || FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
-        {
-            LOG_ERROR("Reproj: game queue failed to wait for async anchor {}", packet.frameId);
-            packet.state.store(PacketState::Retired);
-            _presenterState.store(PresenterState::Failed);
-            break;
-        }
-        const auto realPresentResult = PresentCompositorFrame(packet.syncInterval, packet.presentFlags, false);
-        if (traceStages)
-            LOG_INFO("Reproj: presenter compositor present result {:X} for frame {}", (UINT) realPresentResult,
-                     packet.frameId);
-        if (realPresentResult == DXGI_ERROR_WAS_STILL_DRAWING)
-        {
-            if (traceStages)
-                LOG_INFO("Reproj: presenter not ready for frame {}; dropping without blocking", packet.frameId);
-            packet.state.store(PacketState::Retired);
-            continue;
-        }
-        if (realPresentResult != S_OK)
-        {
-            LOG_ERROR("Reproj: presenter real-frame present failed: {:X}", (UINT) realPresentResult);
-            packet.state.store(PacketState::Retired);
-            _presenterState.store(PresenterState::Failed);
-            break;
-        }
-
-        const auto refreshHz = TargetRefreshHz();
-        const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : std::max(packet.frameDelta * 0.5, 4.0);
-        const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs * 2.0);
-
-        // Proton's frame-latency object signals queue capacity, not necessarily
-        // vblank cadence for Present(0, ALLOW_TEARING). Keep software refresh
-        // deadlines as the heartbeat, but wake early enough to submit GPU work
-        // before scanout. Consume the waitable once before dispatch and never wait
-        // again in PresentCompositorFrame.
-        if (packet.warpAllowed)
-        {
-            auto slotDeadline = Util::MillisecondsNow();
-            const auto dispatchLeadMs = std::min(3.0, refreshPeriodMs * 0.5);
-            for (;;)
+            auto expected = PacketState::Ready;
+            if (_packets[newestPacketIndex].state.compare_exchange_strong(expected, PacketState::Presenting))
             {
-                slotDeadline += refreshPeriodMs;
-                if (!WaitForPacketDeadline(packetIndex, slotDeadline - dispatchLeadMs))
-                    break;
-
-                const auto slotResult = WaitForPresentSlot();
-                if (slotResult != S_OK)
+                auto& newest = _packets[newestPacketIndex];
+                if (FAILED(_presentQueue->Wait(_uiFence, newest.captureFenceValue)))
                 {
-                    if (slotResult != DXGI_ERROR_WAS_STILL_DRAWING)
-                        _presenterState.store(PresenterState::Failed);
-                    break;
-                }
-                if (_stopPresenter.load() || _readyFrameId.load() > packet.frameId)
-                    break;
-
-                // Keep the real frame that was already copied to the composition
-                // swapchain, but do not warp it after a focus change (ignore focus
-                // on Wine/Proton where GetForegroundWindow is unreliable).
-                const bool focusLostWarp = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
-                if (focusLostWarp)
-                {
-                    RecordWarpFrame(false, true, 0.0f);
-                    break;
-                }
-
-                const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
-                const auto now = Util::MillisecondsNow();
-                const auto timeStep =
-                    std::clamp(static_cast<float>(((now - packet.renderTimestamp) / realPeriodMs) *
-                                                  configuredStep * 2.0f),
-                               0.0f, 1.0f);
-                if (!DispatchPacketWarp(packetIndex, timeStep, slotDeadline))
-                {
-                    RecordWarpFrame(false, true, 0.0f);
-                    continue;
-                }
-
-                if (_gameCommandQueue == nullptr ||
-                    FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
-                {
+                    newest.state.store(PacketState::Retired);
                     _presenterState.store(PresenterState::Failed);
-                    RecordWarpFrame(false, true, 0.0f);
                     break;
                 }
-
-                const UINT generatedFlags = State::Instance().SCAllowTearing && !State::Instance().realExclusiveFullscreen
-                                                ? DXGI_PRESENT_ALLOW_TEARING
-                                                : 0;
-                const auto result = PresentCompositorFrame(0, generatedFlags, true, false);
-                const auto poseTimestamp =
-                    packet.sourcePoseTimestamp > 0.0 ? packet.sourcePoseTimestamp : packet.renderTimestamp;
-                const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - poseTimestamp));
-                RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
-                if (result != S_OK)
-                {
-                    if (result == DXGI_ERROR_WAS_STILL_DRAWING)
-                        LOG_INFO("Reproj: presenter not ready for warp {}; dropping without blocking", packet.frameId);
-                    else
-                    {
-                        LOG_ERROR("Reproj: presenter generated-frame present failed: {:X}", (UINT) result);
-                        _presenterState.store(PresenterState::Failed);
-                    }
-                    break;
-                }
-
-                // Never burst catch-up warps after an overrun.
-                if (Util::MillisecondsNow() > slotDeadline)
-                    slotDeadline = Util::MillisecondsNow();
+                if (activePacketIndex >= 0)
+                    _packets[activePacketIndex].state.store(PacketState::Retired);
+                activePacketIndex = newestPacketIndex;
+                activeFrame = newest.frameId;
+                newAnchor = true;
+                for (int i = 0; i < BUFFER_COUNT; ++i)
+                    if (i != activePacketIndex && _packets[i].state.load() == PacketState::Ready &&
+                        _packets[i].frameId < activeFrame)
+                        _packets[i].state.store(PacketState::Retired);
+                _presentCv.notify_all();
             }
         }
 
-        packet.state.store(PacketState::Retired);
-        _presentCv.notify_all();
-        if (_presenterState.load() == PresenterState::Failed)
+        if (activePacketIndex < 0)
+        {
+            std::unique_lock lock(_presentMutex);
+            _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(refreshPeriodMs),
+                                [&] { return _stopPresenter.load() || _readyFrameId.load() > activeFrame; });
+            nextDeadlineMs = Util::MillisecondsNow() + refreshPeriodMs;
+            continue;
+        }
+
+        auto& packet = _packets[activePacketIndex];
+        const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
+        const auto dispatchStart = Util::MillisecondsNow();
+        const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs);
+        const auto timeStep = std::clamp(
+            static_cast<float>(((dispatchStart - packet.renderTimestamp) / realPeriodMs) *
+                               Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
+            0.0f, 1.0f);
+        const bool dispatched = packet.warpAllowed && !focusLost
+                                    ? DispatchPacketWarp(activePacketIndex, timeStep, nextDeadlineMs)
+                                    : DisplayPacket(activePacketIndex, true);
+        if (!dispatched || _gameCommandQueue == nullptr ||
+            FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
+        {
+            LOG_ERROR("Reproj: scheduled output failed for anchor {}", packet.frameId);
+            _presenterState.store(PresenterState::Failed);
             break;
+        }
+
+        // Display-clock mode is always vblank synchronized: one Present(1, 0)
+        // for this slot, with no tearing or DO_NOT_WAIT flags.
+        const auto result = PresentCompositorFrame(1, 0, !newAnchor, false);
+        const auto presentedAt = Util::MillisecondsNow();
+        const auto poseAge = static_cast<float>(std::max(0.0, presentedAt - packet.sourcePoseTimestamp));
+        RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
+        if (result != S_OK)
+        {
+            LOG_ERROR("Reproj: display-clock present failed: {:X}", (UINT) result);
+            _presenterState.store(PresenterState::Failed);
+            break;
+        }
+
+        {
+            std::scoped_lock metricsLock(_metricsMutex);
+            _metricsNewAnchorDisplays += newAnchor;
+            _metricsRepeatedAnchorDisplays += !newAnchor;
+            if (_lastDisplayPresentMs > 0.0)
+            {
+                _presentIntervals[_presentIntervalCursor] = presentedAt - _lastDisplayPresentMs;
+                _presentIntervalCursor = (_presentIntervalCursor + 1) % _countof(_presentIntervals);
+                _presentIntervalCount = std::min<uint32_t>(_presentIntervalCount + 1, _countof(_presentIntervals));
+            }
+            _lastDisplayPresentMs = presentedAt;
+        }
+
+        nextDeadlineMs += refreshPeriodMs;
+        if (presentedAt > nextDeadlineMs)
+        {
+            std::scoped_lock metricsLock(_metricsMutex);
+            ++_metricsMissedDisplaySlots;
+            nextDeadlineMs = presentedAt + refreshPeriodMs;
+        }
     }
+
+    if (activePacketIndex >= 0)
+        _packets[activePacketIndex].state.store(PacketState::Retired);
 
     if (_presenterState.load() != PresenterState::Failed)
         _presenterState.store(PresenterState::Stopped);
@@ -1314,6 +1593,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     const auto poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
     _runtimeMetrics.realFps = static_cast<float>(_metricsRealFrames * scale);
     _runtimeMetrics.warpFps = static_cast<float>(_metricsWarpFrames * scale);
+    _runtimeMetrics.displayFps = _runtimeMetrics.warpFps;
     _runtimeMetrics.poseAgeMs = static_cast<float>(poseAge);
     _runtimeMetrics.targetRefreshHz = static_cast<float>(TargetRefreshHz());
     _runtimeMetrics.warpsPerReal = _metricsMaxWarpsPerReal;
@@ -1323,18 +1603,49 @@ void AReproj_Dx12::LogMetricsIfDue()
                                      _wrappedSwapChain != nullptr && _wrappedSwapChain->IsReprojectionVirtualized();
     _runtimeMetrics.latePoseEstimated =
         _runtimeMetrics.depthReady && Config::Instance()->ReprojLateLatch.value_or_default();
-    _runtimeMetrics.mouseCalibrationConfidence = _calibrationConfidence;
-    _runtimeMetrics.mouseCalibrationLagMs = _calibrationLagMs;
+    {
+        std::scoped_lock calibrationLock(_calibrationMutex);
+        _runtimeMetrics.mouseCalibrationConfidence = _calibrationConfidence;
+        _runtimeMetrics.mouseCalibrationLagMs = _calibrationLagMs;
+        _runtimeMetrics.calibrationSource = _calibrationSource;
+    }
+    _runtimeMetrics.newAnchorDisplays = _metricsNewAnchorDisplays;
+    _runtimeMetrics.repeatedAnchorDisplays = _metricsRepeatedAnchorDisplays;
+    _runtimeMetrics.missedDisplaySlots = _metricsMissedDisplaySlots;
+    _runtimeMetrics.dispatchLeadMs = static_cast<float>(_dispatchLeadMs);
+    if (_presentIntervalCount > 0)
+    {
+        std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
+        _runtimeMetrics.meanPresentIntervalMs =
+            static_cast<float>(std::accumulate(intervals.begin(), intervals.end(), 0.0) / intervals.size());
+        const auto p95 = intervals.begin() + static_cast<size_t>((intervals.size() - 1) * 0.95);
+        std::nth_element(intervals.begin(), p95, intervals.end());
+        _runtimeMetrics.p95PresentIntervalMs = static_cast<float>(*p95);
+    }
     const auto mouse = OptiInput::GetRawMouseMotion();
     uint32_t calibrationSamples = 0;
-    for (const auto& bin : _calibration)
-        calibrationSamples = std::max(calibrationSamples, bin.samples);
+    float calibrationConfidence = 0.0f;
+    int calibrationLagMs = 0;
+    uint32_t calibrationSourceValue = 0;
+    {
+        std::scoped_lock calibrationLock(_calibrationMutex);
+        for (const auto& bin : _calibration)
+            calibrationSamples = std::max(calibrationSamples, bin.samples);
+        calibrationConfidence = _calibrationConfidence;
+        calibrationLagMs = _calibrationLagMs;
+        calibrationSourceValue = _calibrationSource;
+    }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
-    LOG_INFO("Reproj: real={:.1f} FPS, warp={:.1f} FPS, dropped={}, maxWarps={}, poseAge={:.1f} ms, queue={} ({}, "
-             "block={:.2f}ms), mouseCal={:.0f}%/{}ms samples={} input=({}, {})",
-             _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsDroppedWarps, _metricsMaxWarpsPerReal,
-             poseAge, _runtimeMetrics.queueDepth, presenter, _runtimeMetrics.gamePresentBlockMs,
-             _calibrationConfidence * 100.0f, _calibrationLagMs, calibrationSamples, mouse.TotalX, mouse.TotalY);
+    const char* calibrationSource = calibrationSourceValue == 2 ? "motion-grid" :
+                                    (calibrationSourceValue == 1 ? "camera" : "manual");
+    LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} interval={:.2f}/{:.2f}ms "
+             "lead={:.2f}ms poseAge={:.1f}ms queue={} ({}, block={:.2f}ms) mouseCal={:.0f}%/{}ms/{} samples={} "
+             "input=({}, {})",
+             _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
+             _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
+             _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth, presenter,
+             _runtimeMetrics.gamePresentBlockMs, calibrationConfidence * 100.0f, calibrationLagMs,
+             calibrationSource, calibrationSamples, mouse.TotalX, mouse.TotalY);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;
@@ -1342,6 +1653,9 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsMaxWarpsPerReal = 0;
     _metricsPoseAgeTotalMs = 0.0;
     _metricsPoseSamples = 0;
+    _metricsNewAnchorDisplays = 0;
+    _metricsRepeatedAnchorDisplays = 0;
+    _metricsMissedDisplaySlots = 0;
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -1506,9 +1820,10 @@ bool AReproj_Dx12::Present()
         _runtimeMetrics.rotationOnly = Config::Instance()->ReprojRotationOnly.value_or_default() ||
                                        Config::Instance()->ReprojMode.value_or_default() == 2;
         _runtimeMetrics.hudWarped = !Config::Instance()->FGDrawUIOverFG.value_or_default();
-        _runtimeMetrics.calibrationReady =
-            _calibrationConfidence >= 0.35f || (Config::Instance()->ReprojManualYawDegrees.has_value() &&
-                                                Config::Instance()->ReprojManualPitchDegrees.has_value());
+        std::scoped_lock calibrationLock(_calibrationMutex);
+        _runtimeMetrics.calibrationReady = _calibrationConfidence >= 0.7f ||
+                                           (Config::Instance()->ReprojManualYawDegrees.has_value() &&
+                                            Config::Instance()->ReprojManualPitchDegrees.has_value());
     }
 
     // 1. Flush any pending deferred command lists (resource copies from SetResource etc.)
@@ -1587,7 +1902,6 @@ bool AReproj_Dx12::Present()
         const bool advanced = submitted && SUCCEEDED(wrapped->AdvanceReprojectionBuffer());
         if (captured && submitted && advanced)
         {
-            packet.renderTimestamp = Util::MillisecondsNow();
             packet.state.store(PacketState::Ready);
             _readyFrameId.store(packet.frameId);
             _presentCv.notify_one();
@@ -1729,11 +2043,15 @@ void AReproj_Dx12::Activate()
     if (Config::Instance()->FGDrawUIOverFG.value_or_default() && _renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
-    std::memset(_calibration, 0, sizeof(_calibration));
-    std::memset(_calibrationMatrix, 0, sizeof(_calibrationMatrix));
-    _lastCalibrationTimestamp = 0.0;
-    _calibrationConfidence = 0.0f;
-    _calibrationLagMs = 0;
+    {
+        std::scoped_lock calibrationLock(_calibrationMutex);
+        std::memset(_calibration, 0, sizeof(_calibration));
+        std::memset(_calibrationMatrix, 0, sizeof(_calibrationMatrix));
+        _lastCalibrationTimestamp = 0.0;
+        _calibrationConfidence = 0.0f;
+        _calibrationLagMs = 0;
+        _calibrationSource = 0;
+    }
     const bool async = StartAsyncPresenter();
     LOG_INFO("Reproj: activated ({})", async ? "async virtual swapchain" : "synchronous");
 }
@@ -2447,6 +2765,7 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_packets[i].depth);
         SAFE_RELEASE(_packets[i].velocity);
         SAFE_RELEASE(_packets[i].ui);
+        SAFE_RELEASE(_packets[i].mvReadback);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
@@ -2460,6 +2779,7 @@ void AReproj_Dx12::ReleaseObjects()
         _packets[i].syncInterval = 0;
         _packets[i].presentFlags = 0;
         _packets[i].warpAllowed = false;
+        _packets[i].calibrationPending = false;
         _packets[i].state.store(PacketState::Free);
 
         // Reset command list state

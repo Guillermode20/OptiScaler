@@ -3947,6 +3947,26 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojAutoCalibrate = reprojAutoCalibrate;
         ShowHelpMarker("Automatically learn sensitivity, axes, inversion, and input delay from real camera movement");
 
+        bool inputPoseLagAuto = !config->ReprojInputPoseLagMs.has_value();
+        if (ImGui::Checkbox("Automatic input pose lag##reproj", &inputPoseLagAuto))
+        {
+            if (inputPoseLagAuto)
+                config->ReprojInputPoseLagMs.reset();
+            else
+                config->ReprojInputPoseLagMs = 0.0f;
+        }
+        if (!inputPoseLagAuto)
+        {
+            ImGui::SameLine();
+            ImGui::PushItemWidth(105.0f * menuResScale);
+            float inputPoseLag = config->ReprojInputPoseLagMs.value_or(0.0f);
+            if (ImGui::InputFloat("##inputPoseLagMs", &inputPoseLag, 1.0f, 5.0f, "%.0f ms"))
+                config->ReprojInputPoseLagMs = std::clamp(inputPoseLag, 0.0f, 150.0f);
+            ImGui::PopItemWidth();
+        }
+        ShowHelpMarker("Auto anchors camera-less source frames to the learned input delay. An explicit 0-150 ms "
+                       "override is intended for troubleshooting.");
+
         ImGui::PushItemWidth(135.0f * menuResScale);
         float manualYaw = config->ReprojManualYawDegrees.value_or(0.0f);
         float manualPitch = config->ReprojManualPitchDegrees.value_or(0.0f);
@@ -3983,9 +4003,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {
             const auto metrics = reproj->GetRuntimeMetrics();
-            ImGui::TextDisabled("Real %.1f FPS | warp %.1f FPS | target %.0f Hz | warps %u | dropped %u",
-                                metrics.realFps, metrics.warpFps, metrics.targetRefreshHz, metrics.warpsPerReal,
-                                metrics.droppedWarps);
+            ImGui::TextDisabled("Source %.1f FPS | display %.1f FPS | target %.0f Hz | new %u | repeat %u",
+                                metrics.realFps, metrics.displayFps, metrics.targetRefreshHz,
+                                metrics.newAnchorDisplays, metrics.repeatedAnchorDisplays);
+            ImGui::TextDisabled("Present interval mean %.2f ms / p95 %.2f ms | missed %u | lead %.2f ms",
+                                metrics.meanPresentIntervalMs, metrics.p95PresentIntervalMs,
+                                metrics.missedDisplaySlots, metrics.dispatchLeadMs);
             ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s%s", metrics.poseAgeMs,
                                 metrics.queueDepth,
                                 metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",
@@ -4003,8 +4026,10 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
                                    "HUD warning: the supplied UI is being warped with the scene.");
             if (reprojLateLatch && reprojAutoCalibrate)
-                ImGui::TextDisabled("Mouse calibration %.0f%% | learned delay %d ms%s",
+                ImGui::TextDisabled("Mouse calibration %.0f%% | learned delay %d ms | %s%s",
                                     metrics.mouseCalibrationConfidence * 100.0f, metrics.mouseCalibrationLagMs,
+                                    metrics.calibrationSource == 2 ? "motion grid" :
+                                    (metrics.calibrationSource == 1 ? "camera basis" : "manual fallback"),
                                     metrics.calibrationReady ? "" : " | awaiting calibration or manual axes");
         }
     }
