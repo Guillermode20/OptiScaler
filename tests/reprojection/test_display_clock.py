@@ -62,6 +62,34 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("PresentCompositorFrame(1, 0, !newAnchor, false)", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
+    def test_warp_phase_extrapolates_from_pose_timestamp(self):
+        # Capture-completion timestamps carry the game's pipeline latency and its
+        # jitter into the warp phase; the pose-sample time is the valid origin.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
+            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        self.assertIn("packet.sourcePoseTimestamp", presenter)
+        self.assertIn("warpOriginMs", presenter)
+        self.assertNotIn("(targetDisplayMs - packet.renderTimestamp)", presenter)
+
+    def test_source_period_is_ema_smoothed_against_outliers(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
+            "int AReproj_Dx12::AcquirePacket()", 1)[0]
+        self.assertIn("_realPeriodEmaMs", capture)
+        self.assertIn("packet.frameDelta = _realPeriodEmaMs", capture)
+
+    def test_presenter_locks_to_measured_vblank_grid(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
+            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        self.assertIn("GetFrameStatistics", source.split("void AReproj_Dx12::PresenterMain()", 1)[0])
+        self.assertIn("_displayClockAnchorMs", presenter)
+        self.assertIn("_measuredRefreshPeriodMs", presenter)
+
     def test_runtime_and_precompiled_shader_sources_match(self):
         root = Path(__file__).resolve().parents[2]
         common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")

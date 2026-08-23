@@ -616,6 +616,7 @@ class Config
     CustomOptional<int> ReprojMode { 1 };                 // 0 = MV warp, 1 = depth-aware, 2 = camera-only
     CustomOptional<float> ReprojStrength { 1.0f };        // blend of the warp result with the original frame
     CustomOptional<float> ReprojTimeStep { 0.5f };        // warp fraction (0.5 = midpoint between real frames)
+    CustomOptional<float> ReprojMaxTimeStep { 1.5f };     // async warp extrapolation cap in source-frame units
     CustomOptional<bool> ReprojInvertMV { false };        // per-game MV sign convention
     CustomOptional<bool> ReprojUseJitterCancel { true };  // subtract jitter from the sample position
     CustomOptional<bool> ReprojCapAtHalfRefresh { true }; // apply FrameLimit only in synchronous fallback mode

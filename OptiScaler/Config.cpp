@@ -189,6 +189,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojMode.set_from_config(readInt("Reproj", "Mode"));
             ReprojStrength.set_from_config(readFloat("Reproj", "Strength"));
             ReprojTimeStep.set_from_config(readFloat("Reproj", "TimeStep"));
+            ReprojMaxTimeStep.set_from_config(readFloat("Reproj", "MaxTimeStep"));
             ReprojInvertMV.set_from_config(readBool("Reproj", "InvertMV"));
             ReprojUseJitterCancel.set_from_config(readBool("Reproj", "UseJitterCancel"));
             ReprojCapAtHalfRefresh.set_from_config(readBool("Reproj", "CapAtHalfRefresh"));

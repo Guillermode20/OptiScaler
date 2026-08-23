@@ -789,8 +789,16 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         return false;
 
     const auto now = Util::MillisecondsNow();
-    packet.frameDelta =
+    const auto rawFrameDelta =
         _lastRealFrameTimestamp > 0.0 ? now - _lastRealFrameTimestamp : State::Instance().lastFGFrameTime;
+    const auto saneFrameDelta = std::clamp(rawFrameDelta, 1.0, 500.0);
+    // EMA-smooth the source period and reject pacing outliers: one stalled frame
+    // must not skew the warp extrapolation rate of every display of this anchor.
+    if (_realPeriodEmaMs <= 0.0)
+        _realPeriodEmaMs = saneFrameDelta;
+    else if (saneFrameDelta < _realPeriodEmaMs * 4.0 && saneFrameDelta > _realPeriodEmaMs * 0.25)
+        _realPeriodEmaMs = _realPeriodEmaMs * 0.8 + saneFrameDelta * 0.2;
+    packet.frameDelta = _realPeriodEmaMs;
     _lastRealFrameTimestamp = now;
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
@@ -1293,17 +1301,92 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     return result;
 }
 
+bool AReproj_Dx12::SampleDisplayClock(double nowMs)
+{
+    if (_swapChain == nullptr)
+        return false;
+
+    static const LONGLONG qpfFrequency = [] {
+        LARGE_INTEGER frequency {};
+        QueryPerformanceFrequency(&frequency);
+        return frequency.QuadPart;
+    }();
+    if (qpfFrequency <= 0)
+        return false;
+
+    // The query is cheap, but there is no reason to run it on every ~8 ms slot.
+    if (_lastStatsQueryMs > 0.0 && (nowMs - _lastStatsQueryMs) < 50.0)
+        return _displayClockAnchorMs > 0.0 && _measuredRefreshPeriodMs > 1.0;
+    _lastStatsQueryMs = nowMs;
+
+    DXGI_FRAME_STATISTICS stats {};
+    // Wine/Proton may not implement this; keep any previously locked anchor.
+    if (FAILED(_swapChain->GetFrameStatistics(&stats)) || stats.SyncQPCTime.QuadPart <= 0 ||
+        stats.SyncRefreshCount == 0)
+        return _displayClockAnchorMs > 0.0 && _measuredRefreshPeriodMs > 1.0;
+
+    LARGE_INTEGER qpcNow {};
+    QueryPerformanceCounter(&qpcNow);
+    const auto qpcOffsetMs =
+        nowMs - static_cast<double>(qpcNow.QuadPart) * 1000.0 / static_cast<double>(qpfFrequency);
+
+    if (_lastStatsSyncRefreshCount != 0 && stats.SyncRefreshCount > _lastStatsSyncRefreshCount)
+    {
+        const auto refreshDelta = static_cast<double>(stats.SyncRefreshCount - _lastStatsSyncRefreshCount);
+        const auto qpcDeltaMs = static_cast<double>(stats.SyncQPCTime.QuadPart - _lastStatsSyncQpc) * 1000.0 /
+                                static_cast<double>(qpfFrequency);
+        if (qpcDeltaMs > 0.0)
+        {
+            // Sanity band covers ~24-360 Hz scanout; reject compositor garbage.
+            const auto measuredPeriodMs = qpcDeltaMs / refreshDelta;
+            if (measuredPeriodMs > 2.7 && measuredPeriodMs < 42.0)
+            {
+                _measuredRefreshPeriodMs = _measuredRefreshPeriodMs > 1.0
+                                               ? _measuredRefreshPeriodMs * 0.8 + measuredPeriodMs * 0.2
+                                               : measuredPeriodMs;
+            }
+        }
+    }
+
+    _lastStatsSyncRefreshCount = stats.SyncRefreshCount;
+    _lastStatsSyncQpc = stats.SyncQPCTime.QuadPart;
+    _displayClockAnchorMs =
+        static_cast<double>(stats.SyncQPCTime.QuadPart) * 1000.0 / static_cast<double>(qpfFrequency) + qpcOffsetMs;
+
+    return _displayClockAnchorMs > 0.0 && _measuredRefreshPeriodMs > 1.0;
+}
+
 void AReproj_Dx12::PresenterMain()
 {
     int activePacketIndex = -1;
     UINT64 activeFrame = 0;
     double nextDeadlineMs = 0.0;
+    // Presents must land ahead of the true scanout grid: submitting after a
+    // vblank slips that output a full refresh, which reads as judder.
+    constexpr double VBLANK_SAFETY_LEAD_MS = 2.0;
 
     while (!_stopPresenter.load())
     {
         const auto refreshHz = TargetRefreshHz();
-        const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
+        auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
         const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, 5.0);
+
+        // Lock the software display clock to the measured vblank grid when DXGI
+        // reports one: BufferDesc.RefreshRate drifts against fractional or VRR
+        // scanout rates and against Proton's waitable signalling. The correction
+        // only ever pulls the deadline EARLIER (bounded to half a slot per frame):
+        // presenting early simply blocks inside Present(1), while presenting late
+        // drops the output into the next refresh.
+        if (SampleDisplayClock(Util::MillisecondsNow()) && nextDeadlineMs > 0.0)
+        {
+            refreshPeriodMs = _measuredRefreshPeriodMs;
+            const auto nearestVblankMs =
+                _displayClockAnchorMs +
+                std::round((nextDeadlineMs - _displayClockAnchorMs) / refreshPeriodMs) * refreshPeriodMs;
+            const auto correctedMs = nearestVblankMs - VBLANK_SAFETY_LEAD_MS;
+            if (correctedMs < nextDeadlineMs)
+                nextDeadlineMs += std::max(correctedMs - nextDeadlineMs, -refreshPeriodMs * 0.5);
+        }
 
         // Publication never drives cadence. Keep a monotonic software display
         // clock because Proton may signal the frame-latency object whenever queue
@@ -1398,10 +1481,20 @@ void AReproj_Dx12::PresenterMain()
         const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
         const auto targetDisplayMs = nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
         const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs);
+        // Extrapolate from the pose-sample time, not capture completion: the frame
+        // depicts the world at sourcePoseTimestamp, while renderTimestamp carries
+        // the game's whole pipeline latency (and its jitter) into the warp phase.
+        const bool poseOriginValid = packet.hasCamera && packet.sourcePoseTimestamp > 0.0 &&
+                                     packet.sourcePoseTimestamp <= targetDisplayMs;
+        const auto warpOriginMs = poseOriginValid ? packet.sourcePoseTimestamp : packet.renderTimestamp;
+        const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
+        // Overshoot above one source frame bridges a late/missing anchor smoothly
+        // instead of freezing motion at the clamp and jumping on the next anchor.
+        const auto maxTimeStep = std::max(0.25f, Config::Instance()->ReprojMaxTimeStep.value_or_default());
         const auto timeStep =
-            std::clamp(static_cast<float>(((targetDisplayMs - packet.renderTimestamp) / realPeriodMs) *
+            std::clamp(static_cast<float>((anchorAgeMs / realPeriodMs) *
                                           Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
-                       0.0f, 1.0f);
+                       0.0f, maxTimeStep);
 
         const bool dispatched = packet.warpAllowed && !focusLost
                                     ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs)

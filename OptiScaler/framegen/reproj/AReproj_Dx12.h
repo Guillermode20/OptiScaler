@@ -171,6 +171,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     HRESULT WaitForPresentSlot();
     HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot = true);
     void UpdateWarpGpuDuration(int outputIndex);
+    bool SampleDisplayClock(double nowMs); // lock pacing to DXGI_FRAME_STATISTICS vblanks
     double TargetRefreshHz();
     uint32_t WarpCountForFrame(double refreshHz) const;
     uint32_t WarpCountForPeriod(double realFrameMs, double refreshHz) const;
@@ -210,6 +211,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _cachedRefreshHz = 0.0;
     double _lastRefreshQueryMs = 0.0;
     double _lastRealFrameTimestamp = 0.0;
+    double _realPeriodEmaMs = 0.0;         // smoothed source-frame period used for warp scaling
+    double _measuredRefreshPeriodMs = 0.0; // scanout period measured from DXGI_FRAME_STATISTICS
+    double _displayClockAnchorMs = 0.0;    // MillisecondsNow()-domain estimate of the last reported vblank
+    double _lastStatsQueryMs = 0.0;
+    UINT64 _lastStatsSyncRefreshCount = 0;
+    LONGLONG _lastStatsSyncQpc = 0;
     static constexpr int MOUSE_CALIBRATION_LAG_STEP_MS = 4;
     static constexpr int MOUSE_CALIBRATION_LAG_BINS = 26;
     MouseCalibrationBin _mouseCalibration[MOUSE_CALIBRATION_LAG_BINS] {};
