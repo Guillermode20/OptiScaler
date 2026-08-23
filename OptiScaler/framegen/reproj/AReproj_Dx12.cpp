@@ -994,39 +994,32 @@ void AReproj_Dx12::StopAsyncPresenter()
     _presenterState.store(PresenterState::Stopped);
 }
 
-bool AReproj_Dx12::WaitForPacketDeadline(int packetIndex, double deadlineMs)
+HRESULT AReproj_Dx12::WaitForPresentSlot() const
 {
-    auto& packet = _packets[packetIndex];
-    std::unique_lock lock(_presentMutex);
-    const auto remaining = deadlineMs - Util::MillisecondsNow();
-    if (remaining > 0.25)
-    {
-        _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(remaining - 0.2),
-                            [&] { return _stopPresenter.load() || _readyFrameId.load() > packet.frameId; });
-    }
-    lock.unlock();
+    if (_presentWaitableObject == nullptr)
+        return E_FAIL;
 
-    while (!_stopPresenter.load() && _readyFrameId.load() <= packet.frameId && Util::MillisecondsNow() < deadlineMs)
-        YieldProcessor();
-
-    return !_stopPresenter.load() && _readyFrameId.load() <= packet.frameId;
+    const auto refreshHz = TargetRefreshHz();
+    const DWORD timeout = refreshHz > 10.0 ? static_cast<DWORD>(1000.0 / refreshHz + 5.0) : 25;
+    const auto waitResult = WaitForSingleObject(_presentWaitableObject, timeout);
+    if (waitResult == WAIT_OBJECT_0)
+        return S_OK;
+    return waitResult == WAIT_TIMEOUT ? DXGI_ERROR_WAS_STILL_DRAWING : HRESULT_FROM_WIN32(GetLastError());
 }
 
-HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated)
+HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot)
 {
     if (_swapChain == nullptr || _presentWaitableObject == nullptr)
         return E_FAIL;
 
-    // Wait before exposing the child window. Wine can return a waitable handle that
-    // never becomes usable; showing its still-black surface before this check would
-    // cover the game's otherwise healthy swapchain.
-    if (_presentWaitableObject != nullptr)
+    // The caller may consume the waitable object before late-latching and dispatch
+    // so input is sampled as close to scanout as possible. Never wait both before
+    // dispatch and again here: that adds up to a full refresh of latency.
+    if (waitForSlot)
     {
-        const auto refreshHz = TargetRefreshHz();
-        const DWORD timeout = refreshHz > 10.0 ? static_cast<DWORD>(1000.0 / refreshHz + 5.0) : 25;
-        const auto waitResult = WaitForSingleObject(_presentWaitableObject, timeout);
-        if (waitResult != WAIT_OBJECT_0)
-            return waitResult == WAIT_TIMEOUT ? DXGI_ERROR_WAS_STILL_DRAWING : HRESULT_FROM_WIN32(GetLastError());
+        const auto slotResult = WaitForPresentSlot();
+        if (slotResult != S_OK)
+            return slotResult;
     }
 
     UINT presentFlags = flags;
@@ -1139,19 +1132,24 @@ void AReproj_Dx12::PresenterMain()
         const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : std::max(packet.frameDelta * 0.5, 4.0);
         const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs * 2.0);
 
-        // Display-anchored timewarp: fill EVERY refresh slot after the real frame
-        // with a warp until a newer packet preempts us. The warp count is whatever
-        // the display needs - never bounded by the render rate or
-        // ReprojMaxWarpFrames (which only bounds the synchronous fallback) - so
-        // aiming feels identical at 15 FPS and 60 FPS.
+        // Display-anchored timewarp: DXGI's frame-latency waitable object is the
+        // sole refresh heartbeat. Wait BEFORE late latch and GPU dispatch, then
+        // present without waiting again. The old deadline wait started compute at
+        // scanout time and Present waited a second time, causing missed slots and
+        // up to one refresh of avoidable input latency.
         if (packet.warpAllowed)
         {
-            auto slotDeadline = Util::MillisecondsNow(); // the real frame was just presented
-            for (uint32_t warp = 1;; ++warp)
+            for (;;)
             {
-                slotDeadline += refreshPeriodMs;
-                if (!WaitForPacketDeadline(packetIndex, slotDeadline))
-                    break; // newer packet is ready (or presenter stopping): not a drop
+                const auto slotResult = WaitForPresentSlot();
+                if (slotResult != S_OK)
+                {
+                    if (slotResult != DXGI_ERROR_WAS_STILL_DRAWING)
+                        _presenterState.store(PresenterState::Failed);
+                    break;
+                }
+                if (_stopPresenter.load() || _readyFrameId.load() > packet.frameId)
+                    break;
 
                 // Keep the real frame that was already copied to the composition
                 // swapchain, but do not warp it after a focus change (ignore focus
@@ -1164,11 +1162,13 @@ void AReproj_Dx12::PresenterMain()
                 }
 
                 const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
+                const auto now = Util::MillisecondsNow();
                 const auto timeStep =
-                    std::clamp(static_cast<float>(((slotDeadline - packet.renderTimestamp) / realPeriodMs) *
+                    std::clamp(static_cast<float>(((now - packet.renderTimestamp) / realPeriodMs) *
                                                   configuredStep * 2.0f),
                                0.0f, 1.0f);
-                if (!DispatchPacketWarp(packetIndex, timeStep, slotDeadline))
+                // Capacity is available now; predict toward the upcoming scanout.
+                if (!DispatchPacketWarp(packetIndex, timeStep, now + refreshPeriodMs))
                 {
                     RecordWarpFrame(false, true, 0.0f);
                     continue;
@@ -1185,7 +1185,7 @@ void AReproj_Dx12::PresenterMain()
                 const UINT generatedFlags = State::Instance().SCAllowTearing && !State::Instance().realExclusiveFullscreen
                                                 ? DXGI_PRESENT_ALLOW_TEARING
                                                 : 0;
-                const auto result = PresentCompositorFrame(0, generatedFlags, true);
+                const auto result = PresentCompositorFrame(0, generatedFlags, true, false);
                 const auto poseTimestamp =
                     packet.sourcePoseTimestamp > 0.0 ? packet.sourcePoseTimestamp : packet.renderTimestamp;
                 const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - poseTimestamp));
@@ -1202,9 +1202,6 @@ void AReproj_Dx12::PresenterMain()
                     break;
                 }
 
-                // If a present overran its slot, resume from now instead of
-                // bursting catch-up warps.
-                slotDeadline = std::max(slotDeadline, Util::MillisecondsNow());
             }
         }
 

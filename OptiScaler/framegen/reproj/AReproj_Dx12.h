@@ -148,8 +148,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool StartAsyncPresenter();
     void StopAsyncPresenter();
     void PresenterMain();
-    bool WaitForPacketDeadline(int packetIndex, double deadlineMs);
-    HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated);
+    HRESULT WaitForPresentSlot() const;
+    HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot = true);
     double TargetRefreshHz();
     uint32_t WarpCountForFrame(double refreshHz) const;
     uint32_t WarpCountForPeriod(double realFrameMs, double refreshHz) const;
