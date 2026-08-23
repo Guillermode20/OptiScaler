@@ -102,6 +102,18 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("MAX_TOTAL_EARLY_CORRECTION_MS", presenter)
         self.assertIn("totalEarlyCorrectionMs += appliedDeltaMs", presenter)
 
+    def test_presenter_watchdog_downgrades_on_jammed_presents(self):
+        # Present(1) is an unbounded blocking call; sustained jams or one
+        # multi-second wedge must fail the worker so the game thread's Failed
+        # handling downgrades to the synchronous presenter instead of freezing.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
+            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        self.assertIn("WATCHDOG_CONSECUTIVE_JAMS", presenter)
+        self.assertIn("WATCHDOG_WEDGE_MS", presenter)
+        self.assertGreater(presenter.count("_presenterState.store(PresenterState::Failed)"), 1)
+
     def test_runtime_and_precompiled_shader_sources_match(self):
         root = Path(__file__).resolve().parents[2]
         common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")

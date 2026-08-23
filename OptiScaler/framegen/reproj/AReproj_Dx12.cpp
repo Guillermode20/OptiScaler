@@ -1370,6 +1370,7 @@ void AReproj_Dx12::PresenterMain()
     // then-present blocks ever longer inside DXGI until the pipeline wedges.
     constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 4.0;
     double totalEarlyCorrectionMs = 0.0;
+    uint32_t consecutiveJammedPresents = 0;
 
     while (!_stopPresenter.load())
     {
@@ -1525,13 +1526,35 @@ void AReproj_Dx12::PresenterMain()
 
         // Display-clock mode emits exactly one vblank-synchronized output for
         // every software slot, with no tearing or DO_NOT_WAIT flags.
+        const auto presentCallStartMs = Util::MillisecondsNow();
         const auto result = PresentCompositorFrame(1, 0, !newAnchor, false);
         const auto presentedAt = Util::MillisecondsNow();
+        const auto presentDurationMs = presentedAt - presentCallStartMs;
         const auto poseAge = static_cast<float>(std::max(0.0, targetDisplayMs - packet.sourcePoseTimestamp));
         RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
         if (result != S_OK)
         {
             LOG_ERROR("Reproj: display-clock present failed: {:X}", (UINT) result);
+            _presenterState.store(PresenterState::Failed);
+            break;
+        }
+
+        // Watchdog: Present(1) is the one call this loop cannot bound — when the
+        // display queue jams it blocks inside DXGI for as long as latency allows.
+        // A healthy cadence never blocks past roughly one refresh (the previous
+        // output retires at the last vblank), so sustained overshoots or a single
+        // multi-second wedge mean pacing pathology. Fail the worker so the game
+        // thread's Failed handling downgrades to the synchronous presenter
+        // instead of freezing the swapchain and starving the renderer.
+        constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;
+        constexpr double WATCHDOG_WEDGE_MS = 2000.0;
+        const bool jammedPresent = presentDurationMs > refreshPeriodMs * 1.5;
+        consecutiveJammedPresents = jammedPresent ? consecutiveJammedPresents + 1 : 0;
+        if (presentDurationMs > WATCHDOG_WEDGE_MS || consecutiveJammedPresents >= WATCHDOG_CONSECUTIVE_JAMS)
+        {
+            LOG_ERROR("Reproj: presenter watchdog tripped: present blocked {:.2f} ms ({} consecutive jams); "
+                      "downgrading to the synchronous presenter",
+                      presentDurationMs, consecutiveJammedPresents);
             _presenterState.store(PresenterState::Failed);
             break;
         }
