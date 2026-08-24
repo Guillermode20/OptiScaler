@@ -1387,7 +1387,13 @@ void AReproj_Dx12::PresenterMain()
         // grid phase can never run away.
         if (SampleDisplayClock(Util::MillisecondsNow()) && nextDeadlineMs > 0.0)
         {
-            refreshPeriodMs = _measuredRefreshPeriodMs;
+            // Wine/Proton's FRAME_STATISTICS advance per PRESENTED output rather than per
+            // scanout, so every missed slot inflates the derived period - which stretches
+            // the deadline grid, causing more misses (a self-reinforcing judder loop;
+            // observed drifting 8.4 -> 9.6 ms on a 120 Hz display in KCD2). Only accept a
+            // measured period SHORTER than the configured/target one; inflated values are
+            // miss pollution, not scanout truth.
+            refreshPeriodMs = std::min(_measuredRefreshPeriodMs, refreshPeriodMs);
             const auto nearestVblankMs =
                 _displayClockAnchorMs +
                 std::round((nextDeadlineMs - _displayClockAnchorMs) / refreshPeriodMs) * refreshPeriodMs;
