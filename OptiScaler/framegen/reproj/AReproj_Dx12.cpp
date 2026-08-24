@@ -623,6 +623,8 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
+    cb.cameraNear = _cameraNear[fIndex];
+    cb.cameraFar = _cameraFar[fIndex];
 
     std::memcpy(cb.cameraPosition, _cameraPosition[fIndex], 3 * sizeof(float));
     std::memcpy(cb.cameraUp, _cameraUp[fIndex], 3 * sizeof(float));
