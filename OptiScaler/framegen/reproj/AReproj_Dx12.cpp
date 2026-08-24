@@ -1236,6 +1236,12 @@ bool AReproj_Dx12::StartAsyncPresenter()
     }
     _presenterState.store(PresenterState::Running);
     _presentThread = std::thread(&AReproj_Dx12::PresenterMain, this);
+
+    // The presenter must win CPU scheduling against the game's worker threads; a late
+    // wake directly converts into a skipped vblank slot, which reads as judder.
+#if defined(_WIN32)
+    SetThreadPriority(_presentThread.native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
+#endif
     return true;
 }
 
@@ -1376,7 +1382,7 @@ void AReproj_Dx12::PresenterMain()
     {
         const auto refreshHz = TargetRefreshHz();
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
-        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, 5.0);
+        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, 8.0);
 
         // Lock the software display clock to the measured vblank grid when DXGI
         // reports one: BufferDesc.RefreshRate drifts against fractional or VRR
@@ -1427,6 +1433,16 @@ void AReproj_Dx12::PresenterMain()
                 std::scoped_lock metricsLock(_metricsMutex);
                 _metricsMissedDisplaySlots += skipped;
             }
+
+            // Adapt the wake lead to observed scheduling pressure: waking late means the
+            // slot's warp work started too close to scanout, so give the next slot more
+            // headroom. Decay back when we wake on time so latency does not ratchet up.
+            constexpr double LEAD_GROW_MS = 0.5;
+            constexpr double LEAD_DECAY_MS = 0.1;
+            if (lateness > 0.5)
+                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, 8.0);
+            else if (lateness < -1.0)
+                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
 
             if (!WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs))
                 break;
