@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.2 (2026-08-24)
+* Fix Deactivate packet leak (freeze on toggle), FillConstants near/far, add Versioning docs + auto-update scripts
+
 ## v0.7.8
 * Everything after 0.7.7-pre9 including major FSR4, HUDfix, UI improvements, SL spoof, ASI loading support, auto game patches etc.
 * More OptiFG improvements
