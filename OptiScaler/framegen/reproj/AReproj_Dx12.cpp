@@ -2420,6 +2420,34 @@ void AReproj_Dx12::Deactivate()
         DestroyAsyncPresenter();
     }
 
+    // Fix freeze on disable/re-enable: clear stale async packets that were
+    // left in Ready/Presenting/Retired. Their fences refer to the old
+    // presenter run and will never become Free via RetirePackets, so the
+    // next Activate would see queueDepth==4 and AcquirePacket would always
+    // fail, dropping every new anchor and leaving PresenterMain stuck in
+    // WaitableTimeout (display 0, missed 76) as observed in KCD2 21:17:43.
+    // Force-free all packets and reset the publish/ready counters so the
+    // new presenter starts from a clean epoch.
+    for (auto& pkt : _packets)
+    {
+        auto st = pkt.state.load();
+        if (st != PacketState::Free)
+        {
+            pkt.state.store(PacketState::Free);
+            pkt.captureFenceValue = 0;
+            pkt.retirementFenceValue = 0;
+            pkt.frameId = 0;
+            pkt.hasDepth = false;
+            pkt.hasCamera = false;
+            pkt.hasUi = false;
+            pkt.warpAllowed = false;
+        }
+    }
+    _publishedFrameId.store(0);
+    _readyFrameId.store(0);
+    _presenterState.store(PresenterState::Stopped);
+    _currentTelemetrySlot = nullptr;
+
     auto fIndex = GetIndex();
 
     if (_uiCommandListResetted[fIndex] && _gameCommandQueue != nullptr && _uiFence != nullptr)
