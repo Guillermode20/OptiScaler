@@ -543,12 +543,13 @@ void ResTrack_Dx12::hkCreateShaderResourceView(ID3D12Device* This, ID3D12Resourc
 
     // KCD2 under VKD3D can submit a low-address placeholder (observed as 0x3)
     // while rebuilding its swapchain SRVs. It is not a valid COM resource pointer;
-    // forwarding it into VKD3D causes an immediate startup access violation. D3D12
-    // permits a null resource for a null SRV, which is the intended placeholder.
+    // forwarding it into VKD3D (including as nullptr) causes an immediate startup
+    // access violation. There is no resource to track or a valid descriptor to create,
+    // so leave the descriptor untouched and let KCD2 continue rebuilding its views.
     if (pResource != nullptr && reinterpret_cast<uintptr_t>(pResource) < 0x10000)
     {
-        LOG_WARN("Reproj: replacing invalid low-address SRV resource {:X} with nullptr", (size_t) pResource);
-        pResource = nullptr;
+        LOG_WARN("Reproj: ignoring invalid low-address SRV resource {:X}", (size_t) pResource);
+        return;
     }
 
     // force hdr for swapchain buffer
