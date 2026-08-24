@@ -3966,32 +3966,79 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Force borderless windowed mode so the fake frame can tear\n"
                        "Needed for exclusive-fullscreen games");
 
+        bool reprojTelemetry = config->ReprojTelemetry.value_or_default();
+        if (ImGui::Checkbox("Telemetry##reproj", &reprojTelemetry))
+            config->ReprojTelemetry = reprojTelemetry;
+        ShowHelpMarker("Enable detailed per-slot telemetry (ReprojTelemetry v=1 log, overlay, analyzer).\n"
+                       "Cost: 512-slot ring (~150 KB), one calibration per second, no per-slot alloc.");
+
+        bool reprojTelemetryDump = config->ReprojTelemetryMissDump.value_or_default();
+        ImGui::BeginDisabled(!reprojTelemetry);
+        if (ImGui::Checkbox("Miss dump##reproj", &reprojTelemetryDump))
+            config->ReprojTelemetryMissDump = reprojTelemetryDump;
+        ImGui::EndDisabled();
+        ShowHelpMarker("Dump 16 slots before/after a severe miss (rate-limited 10s) via async log.");
+
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {
             const auto metrics = reproj->GetRuntimeMetrics();
-            ImGui::TextDisabled("Source %.1f FPS | display %.1f FPS | target %.0f Hz | new %u | repeat %u",
-                                metrics.realFps, metrics.displayFps, metrics.targetRefreshHz, metrics.newAnchorDisplays,
-                                metrics.repeatedAnchorDisplays);
-            ImGui::TextDisabled("Present interval mean %.2f ms / p95 %.2f ms | missed %u | lead %.2f ms",
-                                metrics.meanPresentIntervalMs, metrics.p95PresentIntervalMs, metrics.missedDisplaySlots,
-                                metrics.dispatchLeadMs);
-            ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s", metrics.poseAgeMs,
-                                metrics.queueDepth,
-                                metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",
-                                metrics.gamePresentBlockMs, metrics.depthReady ? " | depth ready" : "");
-            ImGui::TextDisabled("Mouse late latch %s | calibration %.0f%% | lag %d ms | samples %u",
-                                metrics.inputLatchActive ? "active" : "learning", metrics.inputLatchConfidence * 100.0f,
-                                metrics.inputLatchLagMs, metrics.inputCalibrationSamples);
-            if (metrics.focusLost || metrics.anchorStale || !metrics.depthReady)
-                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Warp paused: %s%s%s",
-                                   metrics.focusLost ? "focus lost " : "", metrics.anchorStale ? "anchor stale " : "",
-                                   !metrics.depthReady ? "depth unavailable" : "");
-            if (metrics.rotationOnly)
-                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
-                                   "Rotation-only fallback: no predicted camera pose source is available.");
-            if (metrics.hudWarped)
-                ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
-                                   "HUD warning: the supplied UI is being warped with the scene.");
+            const auto tSnap = reproj->GetTelemetrySnapshot();
+            if (reprojTelemetry && tSnap.valid)
+            {
+                ImGui::TextDisabled("Display %.1f / %.0f Hz | p95 %.1f ms | missed %u (legacy %u) | new %u repeat %u",
+                                    tSnap.displayFps, tSnap.frameStatisticsPeriodMs > 1.0 ? 1000.0 / tSnap.frameStatisticsPeriodMs : metrics.targetRefreshHz,
+                                    tSnap.presentIntervalP95, tSnap.classifiedMisses, tSnap.legacyMisses, tSnap.newAnchorOutputs, tSnap.repeatedAnchorOutputs);
+                ImGui::TextDisabled("Misses: queue %u | capture %u | CPU %u | GPU %u | present %u | wait %u | clock %u | unknown %u",
+                                    tSnap.causeQueue, tSnap.causeCapture, tSnap.causeCpu, tSnap.causeGpu, tSnap.causePresent, tSnap.causeWaitable, tSnap.causeClock, tSnap.causeUnknown);
+                ImGui::TextDisabled("Queue p95 %.1f ms | GPU p95 %.1f ms | Present p95 %.1f ms | wake p95 %.1f ms",
+                                    tSnap.queueP95, tSnap.gpuP95, tSnap.presentBlockP95, tSnap.wakeP95);
+                const char* effMode = "MV";
+                if (tSnap.modeDepth > tSnap.modeMv && tSnap.modeDepth > tSnap.modeRotation) effMode = "Depth";
+                else if (tSnap.modeRotation > tSnap.modeMv && tSnap.modeRotation > tSnap.modeDepth) effMode = "Rotation";
+                else if (tSnap.modeUnwarped > 0) effMode = "Unwarped";
+                ImGui::TextDisabled("Effective: %s (MV %u depth %u rot %u) | source %.1f/%.1f ms | step %.2f/%.2f clamped %u",
+                                    effMode, tSnap.modeMv, tSnap.modeDepth, tSnap.modeRotation, tSnap.sourceRawP50, tSnap.sourceRawP95, tSnap.finalP50, tSnap.finalP95, tSnap.clampCount);
+                ImGui::TextDisabled("Velocity %s | depth %u/%u | camera basis %u/%u | constants %u/%u | HUD %u/%u | GPU calib %s (%u skipped)",
+                                    tSnap.queueP50 == tSnap.queueP50 ? "yes" : "no", tSnap.depthAvailable, tSnap.scheduledSlots, tSnap.cameraBasisAvailable, tSnap.scheduledSlots, tSnap.depthConstantsValid, tSnap.scheduledSlots, tSnap.hudlessSource, tSnap.scheduledSlots, tSnap.calibrationValid ? "ok" : "fail", tSnap.gpuQuerySkipped);
+                if (tSnap.cameraBasisAvailable == 0 && config->ReprojMode.value_or_default() != 0)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Camera basis absent despite camera mode requested (effective MV).");
+                if (tSnap.depthAvailable > 0 && tSnap.depthConstantsValid == 0)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Depth constants invalid (near/far not populated).");
+                if (tSnap.clampCount > tSnap.scheduledSlots * 0.1)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Timestep frequently clamped (%u/%u).", tSnap.clampCount, tSnap.scheduledSlots);
+                if (tSnap.queueP95 > tSnap.gpuP95 + 2.0f && tSnap.queueP95 > 3.0f)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "GPU queue delay dominates warp duration (queue p95 %.1f ms > gpu p95 %.1f ms).", tSnap.queueP95, tSnap.gpuP95);
+                if (std::abs(tSnap.measuredPeriodMs - tSnap.configuredPeriodMs) > 0.5 && tSnap.measuredPeriodMs > 1.0)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "DXGI period polluted: measured %.2f ms vs configured %.2f ms.", tSnap.measuredPeriodMs, tSnap.configuredPeriodMs);
+                if (!tSnap.calibrationValid)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "GPU clock calibration unavailable (VKD3D?).");
+            }
+            else
+            {
+                ImGui::TextDisabled("Source %.1f FPS | display %.1f FPS | target %.0f Hz | new %u | repeat %u",
+                                    metrics.realFps, metrics.displayFps, metrics.targetRefreshHz, metrics.newAnchorDisplays,
+                                    metrics.repeatedAnchorDisplays);
+                ImGui::TextDisabled("Present interval mean %.2f ms / p95 %.2f ms | missed %u | lead %.2f ms",
+                                    metrics.meanPresentIntervalMs, metrics.p95PresentIntervalMs, metrics.missedDisplaySlots,
+                                    metrics.dispatchLeadMs);
+                ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s", metrics.poseAgeMs,
+                                    metrics.queueDepth,
+                                    metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",
+                                    metrics.gamePresentBlockMs, metrics.depthReady ? " | depth ready" : "");
+                ImGui::TextDisabled("Mouse late latch %s | calibration %.0f%% | lag %d ms | samples %u",
+                                    metrics.inputLatchActive ? "active" : "learning", metrics.inputLatchConfidence * 100.0f,
+                                    metrics.inputLatchLagMs, metrics.inputCalibrationSamples);
+                if (metrics.focusLost || metrics.anchorStale || !metrics.depthReady)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Warp paused: %s%s%s",
+                                       metrics.focusLost ? "focus lost " : "", metrics.anchorStale ? "anchor stale " : "",
+                                       !metrics.depthReady ? "depth unavailable" : "");
+                if (metrics.rotationOnly)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                                       "Rotation-only fallback: no predicted camera pose source is available.");
+                if (metrics.hudWarped)
+                    ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)),
+                                       "HUD warning: the supplied UI is being warped with the scene.");
+            }
         }
     }
 

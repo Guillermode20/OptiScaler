@@ -2,6 +2,7 @@
 #include "SysUtils.h"
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
+#include "ReprojTelemetry.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -136,6 +137,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12QueryHeap* _warpTimestampHeap = nullptr;
     ID3D12Resource* _warpTimestampReadback = nullptr;
     UINT64 _presentTimestampFrequency = 0;
+    ReprojTelemetry _telemetry;
+    ReprojSlotRecord* _currentTelemetrySlot = nullptr;
     class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use
     HANDLE _presentWaitableObject = nullptr;
     bool _asyncDowngraded = false;
@@ -152,8 +155,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] + MV (+depth) -> current backbuffer
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
-    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0);
-    bool DisplayPacket(int packetIndex, bool composeUi);
+    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0, uint32_t telemetryQueryStart = UINT32_MAX);
+    bool DisplayPacket(int packetIndex, bool composeUi, uint32_t telemetryQueryStart = UINT32_MAX);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
@@ -248,6 +251,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     // FGHooks may raise the private real-chain count before CreateSwapchain runs.
     void SetGameBufferCount(UINT count) { _gameBufferCount = count; }
     RuntimeMetrics GetRuntimeMetrics() const;
+    ReprojTelemetrySnapshot GetTelemetrySnapshot() const { return _telemetry.GetSnapshot(); }
+    ReprojTelemetry* GetTelemetry() { return &_telemetry; }
 
     // IFGFeature_Dx12
     void* FrameGenerationContext() override final;

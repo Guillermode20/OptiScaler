@@ -630,6 +630,8 @@ class Config
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
     CustomOptional<bool> ReprojCenterCropDebug { false }; // show only central 50% of the viewport
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
+    CustomOptional<bool> ReprojTelemetry { false };
+    CustomOptional<bool> ReprojTelemetryMissDump { false };
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033
