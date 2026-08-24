@@ -141,6 +141,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool _asyncDowngraded = false;
 
     UINT _bufferCount = 0;
+    UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
     UINT64 _scFenceValue = 0; // monotonic SC fence value (fence outlives context recreate)
 
     bool CopyLastFrame(int fIndex, ID3D12Resource* source);
@@ -244,6 +245,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool Shutdown() override final;
 
     bool SetInterpolatedFrameCount(UINT interpolatedFrameCount) override final;
+    // FGHooks may raise the private real-chain count before CreateSwapchain runs.
+    void SetGameBufferCount(UINT count) { _gameBufferCount = count; }
     RuntimeMetrics GetRuntimeMetrics() const;
 
     // IFGFeature_Dx12

@@ -2278,8 +2278,8 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
             const bool alreadyWrapped =
                 SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
             if (!alreadyWrapped)
-                wrapped =
-                    new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false, originalBufferCount);
+                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, _hwnd, desc->Flags, false,
+                                                     _gameBufferCount != 0 ? _gameBufferCount : originalBufferCount);
 
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();
@@ -2452,8 +2452,8 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
             const bool alreadyWrapped =
                 SUCCEEDED(rawSwapChain->QueryInterface(__uuidof(WrappedIDXGISwapChain4), (void**) &wrapped));
             if (!alreadyWrapped)
-                wrapped =
-                    new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false, originalBufferCount);
+                wrapped = new WrappedIDXGISwapChain4(rawSwapChain, realQueue, hwnd, desc->Flags, false,
+                                                     _gameBufferCount != 0 ? _gameBufferCount : originalBufferCount);
 
             _swapChain = wrapped->RealSwapChain3();
             _swapChain->AddRef();

@@ -133,6 +133,8 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
 
     // Create FG swapchain
     auto fg = State::Instance().currentFG;
+    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        dynamic_cast<AReproj_Dx12*>(fg)->SetGameBufferCount(pDesc->BufferCount);
     bool scResult = false;
 
     {
@@ -248,12 +250,14 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
 
     // Create FG swapchain
     auto fg = State::Instance().currentFG;
+    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        dynamic_cast<AReproj_Dx12*>(fg)->SetGameBufferCount(pDesc->BufferCount);
     bool scResult = false;
 
     {
         ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
 
-        if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
+        if (Config::Instance().FGDontUseSwapchainBuffers.value_or_default())
             State::Instance().skipHeapCapture = true;
 
         if (State::Instance().activeFgOutput == FGOutput::XeFG && pFullscreenDesc != nullptr &&
