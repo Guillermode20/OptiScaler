@@ -257,7 +257,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
     {
         ScopedSkipDxgiLoadChecks skipDxgiLoadChecks {};
 
-        if (Config::Instance().FGDontUseSwapchainBuffers.value_or_default())
+        if (Config::Instance()->FGDontUseSwapchainBuffers.value_or_default())
             State::Instance().skipHeapCapture = true;
 
         if (State::Instance().activeFgOutput == FGOutput::XeFG && pFullscreenDesc != nullptr &&
