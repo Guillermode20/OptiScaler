@@ -1237,9 +1237,13 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         if (FAILED(_device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &readbackDesc,
                                                     D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                     IID_PPV_ARGS(&_warpTimestampReadback))))
+        {
             SAFE_RELEASE(_warpTimestampHeap);
+        }
         else
+        {
             _telemetry.SetTimestampResources(_warpTimestampHeap, _warpTimestampReadback, _scFence, _presentTimestampFrequency);
+        }
     }
     LOG_INFO("Reproj: main-swapchain async presenter created");
     return true;
