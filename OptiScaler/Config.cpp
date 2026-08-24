@@ -1028,6 +1028,7 @@ bool Config::SaveIni()
         ini.SetValue("Reproj", "Mode", GetIntValue(Instance()->ReprojMode.value_for_config()).c_str());
         ini.SetValue("Reproj", "Strength", GetFloatValue(Instance()->ReprojStrength.value_for_config()).c_str());
         ini.SetValue("Reproj", "TimeStep", GetFloatValue(Instance()->ReprojTimeStep.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MaxTimeStep", GetFloatValue(Instance()->ReprojMaxTimeStep.value_for_config()).c_str());
         ini.SetValue("Reproj", "InvertMV", GetBoolValue(Instance()->ReprojInvertMV.value_for_config()).c_str());
         ini.SetValue("Reproj", "UseJitterCancel",
                      GetBoolValue(Instance()->ReprojUseJitterCancel.value_for_config()).c_str());

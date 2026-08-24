@@ -4025,9 +4025,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                                     metrics.queueDepth,
                                     metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",
                                     metrics.gamePresentBlockMs, metrics.depthReady ? " | depth ready" : "");
-                ImGui::TextDisabled("Mouse late latch %s | calibration %.0f%% | lag %d ms | samples %u",
-                                    metrics.inputLatchActive ? "active" : "learning", metrics.inputLatchConfidence * 100.0f,
-                                    metrics.inputLatchLagMs, metrics.inputCalibrationSamples);
+                ImGui::TextDisabled("Pose prediction uses the last two rendered camera poses.");
                 if (metrics.focusLost || metrics.anchorStale || !metrics.depthReady)
                     ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Warp paused: %s%s%s",
                                        metrics.focusLost ? "focus lost " : "", metrics.anchorStale ? "anchor stale " : "",

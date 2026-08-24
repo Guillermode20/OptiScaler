@@ -39,10 +39,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         float meanPresentIntervalMs = 0.0f;
         float p95PresentIntervalMs = 0.0f;
         float dispatchLeadMs = 3.0f;
-        float inputLatchConfidence = 0.0f;
-        int inputLatchLagMs = 0;
-        uint32_t inputCalibrationSamples = 0;
-        bool inputLatchActive = false;
         uint32_t newAnchorDisplays = 0;
         uint32_t repeatedAnchorDisplays = 0;
         uint32_t missedDisplaySlots = 0;
@@ -69,20 +65,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         Failed,
     };
 
-    struct MouseCalibrationBin
-    {
-        double xx = 0.0;
-        double xy = 0.0;
-        double yy = 0.0;
-        double xYaw = 0.0;
-        double yYaw = 0.0;
-        double xPitch = 0.0;
-        double yPitch = 0.0;
-        double yaw2 = 0.0;
-        double pitch2 = 0.0;
-        uint32_t samples = 0;
-    };
-
     struct ReprojFramePacket
     {
         ID3D12Resource* color = nullptr;
@@ -107,11 +89,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool hasCamera = false;
         bool hasUi = false;
         bool warpAllowed = false;
-        std::int64_t sourceMouseX = 0;
-        std::int64_t sourceMouseY = 0;
-        double sourceMouseTimestamp = 0.0;
-        double mouseToPose[4] = {};
-        bool inputLatchReady = false;
         std::atomic<PacketState> state { PacketState::Free };
     };
 
@@ -162,9 +139,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
     void FillConstants(int fIndex, RP_Constants& constants);
-    void UpdateMouseCalibration(int fIndex);
-    void CaptureLateInput(ReprojFramePacket& packet, double sourcePoseTimestamp);
-    bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet) const;
     int AcquirePacket();
     void RetirePackets();
     uint32_t PacketQueueDepth() const;
@@ -222,16 +196,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _lastStatsQueryMs = 0.0;
     UINT64 _lastStatsSyncRefreshCount = 0;
     LONGLONG _lastStatsSyncQpc = 0;
-    static constexpr int MOUSE_CALIBRATION_LAG_STEP_MS = 4;
-    static constexpr int MOUSE_CALIBRATION_LAG_BINS = 26;
-    MouseCalibrationBin _mouseCalibration[MOUSE_CALIBRATION_LAG_BINS] {};
-    double _mouseToPose[4] = {};
-    mutable std::mutex _mouseCalibrationMutex;
-    double _lastMouseCalibrationTimestamp = 0.0;
-    float _mouseCalibrationConfidence = 0.0f;
-    int _mouseCalibrationLagMs = 0;
-    uint32_t _mouseCalibrationSamples = 0;
-
   protected:
     void ReleaseObjects() override final;
     void CreateObjects(ID3D12Device* InDevice) override final;
