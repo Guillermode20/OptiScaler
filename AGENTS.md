@@ -33,8 +33,33 @@ This is an MSVC-only project. It **cannot** be built on a Linux box (no `windows
 Notes:
 - The `Build` (signed) workflow needs a `SIGNPATH_API_TOKEN` secret. Use **"Build (No Signing)"** on forks.
 - `gh` must be authed with `repo` + `workflow` scopes to trigger runs and download artifacts.
-- Compile errors are not caught locally; read them with `gh run view <run_id> --log-failed`.
 - **Required reprojection workflow:** commit every change, push it, run and wait for **Build (No Signing)**, then install the successful artifact into Deep Rock Galactic for live validation. Do not claim a reprojection change is validated before that game test; ask for its install path if it is not known.
+
+## Versioning & Release (auto-update)
+
+- **Single source of truth:** `OptiScaler/resource.h` — `VER_MAJOR_VERSION`, `VER_MINOR_VERSION`, `VER_HOTFIX_VERSION`, `VER_BUILD_NUMBER` (current `10.0.0.1`). `OptiScaler.rc` and `version_check.cpp` derive `VER_FILE_VERSION` / `CurrentVersion()` from it. `resource_build_date.h` / `resource_build_commit.h` are *generated* at build time by the MSVC pre-build PowerShell (date `yyyyMMdd_HHmmss` + `git rev-parse --short HEAD`) — never edit them by hand.
+- **Workflow naming:** all `.github/workflows/*.yml` (`build.yml`, `just_build*.yml`, `release_debug.yml`, `test.yml`) run the same *Extract OptiScaler Version* PowerShell — it `Select-String` the four `VER_*` defines (first match) and produces `vMAJOR.MINOR.HOTFIX-preBUILD` → filename `OptiScaler_v10.0.0-pre1_YYYYMMDD.7z` (uploaded with `archive:false`, see Building).
+- **Canonical bump script:** `scripts/bump_version.py` (Python 3, no extra deps).
+  ```bash
+  python scripts/bump_version.py --current                 # 10.0.0.1 (v10.0.0-pre1)
+  python scripts/bump_version.py --bump-build              # 10.0.0.1 → 10.0.0.2 (most common: nightly)
+  python scripts/bump_version.py --bump-hotfix             # 10.0.0.2 → 10.0.1.1
+  python scripts/bump_version.py --bump-minor              # 10.0.1.1 → 10.1.0.0
+  python scripts/bump_version.py --bump-major              # 10.1.0.0 → 11.0.0.1
+  python scripts/bump_version.py --set 10.0.1.5            # explicit
+  python scripts/bump_version.py --bump-build --changelog "Reproj telemetry phase 2"
+  python scripts/bump_version.py --bump-build --dry-run    # preview without writing
+  ```
+  It rewrites only the four defines (preserving whitespace/comments), validates `0..65535`, and optionally prepends `Changelog.md` with `## vX.Y.Z (YYYY-MM-DD)`. Dry-run prints `[dry-run]` and touches nothing. Commit the two files it touches:
+  ```bash
+  git add OptiScaler/resource.h Changelog.md && git commit -m "Bump version to v10.0.0.2"
+  ```
+- **When to bump:**
+  - `build` (pre) for every merge to `async-timewarp` / nightly — the normal case.
+  - `hotfix` for a user-visible fix, `minor` for a feature (e.g., reproj telemetry), `major` for a breaking drop (rare — current `10`).
+  - `AGENTS.md` and `docs/` describe *behavior*, not the version number — update them manually when behavior changes; the script only guarantees `resource.h` ↔ workflow filename ↔ `Changelog.md` stay in sync.
+- **AGENTS.md auto-update hook:** the script can be extended to patch `AGENTS.md` if you add a marker `<!-- VERSION: 10.0.0.1 -->`. Today it only prints a hint (`git add …`) — keep AGENTS.md factual about architecture, not about the numeric version.
+- **CI gate:** `build.yml` nightly checks `resource.h` → filename; a mismatch fails `Extract Version`. If you edit `resource.h` by hand, run the script with `--dry-run` to sanity-check.
 
 ## Shaders
 
@@ -63,6 +88,15 @@ Register new files in `OptiScaler/OptiScaler.vcxproj` and `OptiScaler/OptiScaler
 1. For **Unreal Engine** games, install next to the *real* executable — usually `<game>/<Project>/Binaries/Win64/` — not the root launcher `.exe`.
 2. Copy `OptiScaler.dll` -> `dxgi.dll` (default injection name), plus `OptiScaler.ini`, `OptiScaler/`, and `Licenses/` into that folder.
 3. Add to Steam launch options: `WINEDLLOVERRIDES=dxgi=n,b %COMMAND%`.
+
+**Auto-update script:** `scripts/install_latest.py` automates the Building → Installing flow (find latest successful `Build (No Signing)` run, `gh api …/zip > build.7z` (raw .7z, `archive:false`), `7z x`, copy to both games, backup old `dxgi.dll`):
+```bash
+python scripts/install_latest.py --both                  # DRG+KCD2, branch async-timewarp, fork Guillermode20/OptiScaler
+python scripts/install_latest.py --both --dry-run          # preview
+python scripts/install_latest.py --drg --ref my-feature --repo myfork/OptiScaler
+python scripts/install_latest.py --both --run-id 32769762279  # explicit run
+```
+It respects `GH_TOKEN`/`gh auth` (`repo`+`workflow`), requires `7z`, and leaves `OptiScaler.ini` untouched (patch `[Reproj] Telemetry` manually or via `scripts/bump_version.py`). For the reprojection workflow always run the full chain: `git push` → `gh workflow run` → `gh run watch` → `python scripts/install_latest.py --both` → launch DRG.
 
 ## Config / hotkey
 
