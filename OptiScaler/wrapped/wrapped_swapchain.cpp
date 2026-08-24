@@ -438,6 +438,18 @@ DXGI_FORMAT WrappedIDXGISwapChain4::ReprojectionResourceFormat(DXGI_FORMAT forma
     }
 }
 
+UINT WrappedIDXGISwapChain4::EffectiveGameBufferCount() const
+{
+    if (_gameBufferCount != 0)
+        return _gameBufferCount;
+
+    // The wrapper may have been created by a generic hook site (constructor default of 0)
+    // before AReproj attached - KCD2's factory path pre-wraps the raw chain, and AReproj
+    // then reuses it via QueryInterface. Fall back to the game's original request recorded
+    // by FGHooks before the private chain was coerced to 3 buffers.
+    return State::Instance().reprojRequestedBufferCount;
+}
+
 bool WrappedIDXGISwapChain4::PopulateSwapchainBuffers(bool virtualized)
 {
     State::Instance().scBuffers.clear();
@@ -497,11 +509,12 @@ bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
     // The game only ever sees (and caches) this many buffers; async keeps an extra real
     // buffer as the worker's free present slot. Mismatching these makes engines that
     // enumerate by GetDesc() read past their own arrays (KCD2 crash).
+    const auto gameCount = EffectiveGameBufferCount();
     const auto visibleCount =
-        _gameBufferCount != 0 && _gameBufferCount < desc.BufferCount ? _gameBufferCount : desc.BufferCount;
+        gameCount != 0 && gameCount < desc.BufferCount ? gameCount : desc.BufferCount;
     std::vector<VirtualBackBuffer> buffers(visibleCount);
     HRESULT result = S_OK;
-    for (UINT i = 0; i < desc.BufferCount; ++i)
+    for (UINT i = 0; i < visibleCount; ++i)
     {
         ID3D12Resource* realBuffer = nullptr;
         result = _real->GetBuffer(i, IID_PPV_ARGS(&realBuffer));
@@ -1035,8 +1048,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc(DXGI_SWAP_CHAIN_DESC* 
 {
     auto result = _real->GetDesc(pDesc);
     // Async reprojection may own more real buffers than the game expects; keep its view consistent.
-    if (result == S_OK && _gameBufferCount != 0 && pDesc->BufferCount > _gameBufferCount)
-        pDesc->BufferCount = _gameBufferCount;
+    if (result == S_OK && EffectiveGameBufferCount() != 0 && pDesc->BufferCount > EffectiveGameBufferCount())
+        pDesc->BufferCount = EffectiveGameBufferCount();
     return result;
 }
 
@@ -1307,8 +1320,8 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetLastPresentCount(UINT* pLas
 HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetDesc1(DXGI_SWAP_CHAIN_DESC1* pDesc)
 {
     auto result = _real1->GetDesc1(pDesc);
-    if (result == S_OK && _gameBufferCount != 0 && pDesc->BufferCount > _gameBufferCount)
-        pDesc->BufferCount = _gameBufferCount;
+    if (result == S_OK && EffectiveGameBufferCount() != 0 && pDesc->BufferCount > EffectiveGameBufferCount())
+        pDesc->BufferCount = EffectiveGameBufferCount();
     return result;
 }
 

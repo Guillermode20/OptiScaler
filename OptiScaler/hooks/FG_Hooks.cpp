@@ -134,7 +134,10 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
     // Create FG swapchain
     auto fg = State::Instance().currentFG;
     if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    {
         dynamic_cast<AReproj_Dx12*>(fg)->SetGameBufferCount(pDesc->BufferCount);
+        State::Instance().reprojRequestedBufferCount = pDesc->BufferCount;
+    }
     bool scResult = false;
 
     {
@@ -251,7 +254,10 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
     // Create FG swapchain
     auto fg = State::Instance().currentFG;
     if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    {
         dynamic_cast<AReproj_Dx12*>(fg)->SetGameBufferCount(pDesc->BufferCount);
+        State::Instance().reprojRequestedBufferCount = pDesc->BufferCount;
+    }
     bool scResult = false;
 
     {

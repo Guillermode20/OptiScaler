@@ -343,6 +343,7 @@ class State
     ID3D12CommandQueue* currentCommandQueue = nullptr;
     VkDevice currentVkDevice = nullptr;
     DXGI_SWAP_CHAIN_DESC currentSwapchainDesc {};
+    UINT reprojRequestedBufferCount = 0; // game's original request before async coerces the private chain to 3
 
     std::vector<ID3D12Device*> d3d12Devices;
     std::vector<ID3D11Device*> d3d11Devices;
