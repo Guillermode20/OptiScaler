@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.3 (2026-08-24)
+* KCD2 wobble: dedicated present queue (remove game Wait), raw-interval timestep, TargetRefresh grid reset
+
 ## v10.0.0.2 (2026-08-24)
 * Fix Deactivate packet leak (freeze on toggle), FillConstants near/far, add Versioning docs + auto-update scripts
 

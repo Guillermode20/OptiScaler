@@ -100,6 +100,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         double renderTimestamp = 0.0;
         double sourcePoseTimestamp = 0.0;
         double frameDelta = 0.0;
+        double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
         UINT syncInterval = 0;
         UINT presentFlags = 0;
         bool hasDepth = false;

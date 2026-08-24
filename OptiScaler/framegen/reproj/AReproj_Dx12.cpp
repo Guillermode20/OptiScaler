@@ -801,6 +801,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     else if (saneFrameDelta < _realPeriodEmaMs * 4.0 && saneFrameDelta > _realPeriodEmaMs * 0.25)
         _realPeriodEmaMs = _realPeriodEmaMs * 0.8 + saneFrameDelta * 0.2;
     packet.frameDelta = _realPeriodEmaMs;
+    packet.rawFrameDelta = saneFrameDelta;
     _lastRealFrameTimestamp = now;
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
@@ -1438,6 +1439,21 @@ void AReproj_Dx12::PresenterMain()
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
         const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, 8.0);
 
+        // Handle TargetRefresh change without restart: reset EMA and grid
+        // so 240→120 doesn't stay stuck at 4ms period with early correction drift.
+        static double lastSeenRefreshHz = 0.0;
+        if (lastSeenRefreshHz > 1.0 && std::abs(refreshHz - lastSeenRefreshHz) > 0.5)
+        {
+            _measuredRefreshPeriodMs = refreshPeriodMs;
+            _displayClockAnchorMs = 0.0;
+            totalEarlyCorrectionMs = 0.0;
+            _dispatchLeadMs = 3.0;
+            nextDeadlineMs = 0.0;
+            _lastStatsSyncRefreshCount = 0;
+            _lastStatsSyncQpc = 0;
+        }
+        lastSeenRefreshHz = refreshHz;
+
         // Telemetry per-slot record (only if enabled, otherwise dummy to avoid overhead)
         ReprojSlotRecord* tSlot = nullptr;
         const bool telemetryEnabled = Config::Instance()->ReprojTelemetry.value_or_default();
@@ -1712,7 +1728,8 @@ void AReproj_Dx12::PresenterMain()
         auto& packet = _packets[activePacketIndex];
         const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
         const auto targetDisplayMs = nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
-        const auto realPeriodMs = std::max(packet.frameDelta, refreshPeriodMs);
+        const auto rawPeriod = packet.rawFrameDelta > 1.0 ? packet.rawFrameDelta : packet.frameDelta;
+        const auto realPeriodMs = std::max(rawPeriod, refreshPeriodMs);
         const bool poseOriginValid = packet.hasCamera && packet.sourcePoseTimestamp > 0.0 &&
                                      packet.sourcePoseTimestamp <= targetDisplayMs;
         const auto warpOriginMs = poseOriginValid ? packet.sourcePoseTimestamp : packet.renderTimestamp;
@@ -1727,8 +1744,8 @@ void AReproj_Dx12::PresenterMain()
         {
             tSlot->packetRenderTimestampMs = packet.renderTimestamp;
             tSlot->sourcePoseTimestampMs = packet.sourcePoseTimestamp;
-            tSlot->rawCaptureIntervalMs = static_cast<float>(packet.frameDelta);
-            tSlot->selectedFrameIntervalMs = static_cast<float>(_realPeriodEmaMs > 0 ? _realPeriodEmaMs : packet.frameDelta);
+            tSlot->rawCaptureIntervalMs = static_cast<float>(packet.rawFrameDelta);
+            tSlot->selectedFrameIntervalMs = static_cast<float>(packet.frameDelta);
             tSlot->sourceProvidedFrameIntervalMs = static_cast<float>(State::Instance().lastFGFrameTime);
             tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
             tSlot->anchorAgeMs = static_cast<float>(anchorAgeMs);
@@ -1808,8 +1825,7 @@ void AReproj_Dx12::PresenterMain()
             _currentTelemetrySlot = nullptr;
         }
 
-        if (!dispatched || _gameCommandQueue == nullptr ||
-            FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
+        if (!dispatched)
         {
             LOG_ERROR("Reproj: scheduled output failed for anchor {}", packet.frameId);
             _presenterState.store(PresenterState::Failed);
