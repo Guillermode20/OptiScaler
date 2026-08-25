@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.11 (2026-08-25)
+* KCD2 CCamera layout: validated near plane, hunt far plane
+
 ## v10.0.0.10 (2026-08-25)
 * Fix MSVC build of KCD2 projection extraction
 

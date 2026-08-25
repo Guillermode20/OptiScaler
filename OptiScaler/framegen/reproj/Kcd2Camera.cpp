@@ -30,12 +30,18 @@ struct Pose
     float up[3] {};
     float forward[3] {};
     float verticalFov = 0.0f;
-    // Raw CCamera floats at +0x30..+0x64 (14 floats, stride 4). Stock CryEngine layout:
-    // [0]=fov [1]=width [2]=height [3]=projRatio [4]=pixelAspect
-    // [5..7]=m_edge_nlt xyz (y @0x48 == near plane) [8..10]=m_edge_plt xyz
-    // [11..13]=m_edge_flt xyz (y @0x60 == far plane). KCD2's fork may differ; the raw
-    // block is published so live telemetry can confirm or correct the mapping.
-    static constexpr int PROJECTION_FLOAT_COUNT = 14;
+    // Raw CCamera floats at +0x30..+0x7C (20 floats, stride 4). Live-validated mapping (retail
+    // 1.5.6, see "KCD2 camera projection" log line):
+    //   [0] @0x30 = vertical FOV (rad)
+    //   [1],[2] @0x34/0x38 = repurposed (reads 1,0 - NOT viewport dims)
+    //   [4] @0x40 = pixel aspect (16/9 -> 1.7778)
+    //   [8..10] @0x50..0x58 = near-edge vector: y @0x54 = near plane (0.05),
+    //                       x/z = near*tan(half-h/v FOV) (sign-flipped x)
+    //   [11..13] @0x5C..0x64 = projection-plane edge: y @0x60 = (1/tan(fov/2))*height/2,
+    //                       x/z = +/- half extents (e.g. -1280, 720 for 2560x1440)
+    //   [14..19] @0x68..0x7C = unmapped; captured to locate the far plane.
+    // Stock CryEngine stores these one Vec3 earlier; KCD2 shifted the block.
+    static constexpr int PROJECTION_FLOAT_COUNT = 20;
     float projectionRaw[PROJECTION_FLOAT_COUNT] {};
     double timestampMs = 0.0;
 };
@@ -235,25 +241,19 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     std::memcpy(constants.prevCameraUp, previous.up, sizeof(previous.up));
     std::memcpy(constants.prevCameraForward, previous.forward, sizeof(previous.forward));
     constants.cameraVFov = current.verticalFov;
-    // Prefer the game's own viewport dimensions over the render-target fallback.
-    const auto projWidth = static_cast<int>(current.projectionRaw[1]);
-    const auto projHeight = static_cast<int>(current.projectionRaw[2]);
-    if (projWidth >= 16 && projWidth <= 16384 && projHeight >= 16 && projHeight <= 16384)
-        constants.cameraAspect = static_cast<float>(projWidth) / static_cast<float>(projHeight);
+    // Live-validated near plane: y component of the near-edge vector at +0x54.
+    // Aspect: the game's own pixel-aspect field (+0x40); the w/h ints at +0x34/38 are
+    // repurposed in KCD2 and must not be used.
+    const auto pixAspect = current.projectionRaw[4];
+    if (std::isfinite(pixAspect) && pixAspect > 0.5f && pixAspect < 4.0f)
+        constants.cameraAspect = pixAspect;
     else
         constants.cameraAspect = fallbackAspect;
-    // Near/far candidates from the stock CryEngine CCamera layout. Published into the constants
-    // for telemetry visibility only: mode stays rotation-only until these values are validated
-    // against in-game view distance and clipping behaviour.
-    const float nearCandidate = current.projectionRaw[6]; // m_edge_nlt.y @ +0x48
-    const float farCandidate = current.projectionRaw[12]; // m_edge_flt.y @ +0x60
-    if (std::isfinite(nearCandidate) && nearCandidate > 0.0f && nearCandidate < 100.0f &&
-        std::isfinite(farCandidate) && farCandidate > 100.0f && farCandidate < 200000.0f &&
-        farCandidate > nearCandidate)
-    {
+    const float nearCandidate = current.projectionRaw[9]; // near-edge y @ +0x54
+    if (std::isfinite(nearCandidate) && nearCandidate > 0.0f && nearCandidate < 100.0f)
         constants.cameraNear = nearCandidate;
-        constants.cameraFar = farCandidate;
-    }
+    // Far plane not yet located (probe dump covers +0x30..+0x7C); keep any far supplied by
+    // upscaler inputs until validated.
     // KCD2 currently supplies depth but no trustworthy near/far projection constants. Mode 1 combines
     // camera/depth with motion vectors and produced severe double-warp wobble/artifacts. Validate the
     // acquired pose independently in camera rotation-only mode; enable depth only after its projection
@@ -272,10 +272,9 @@ bool DescribeProjection(char* buffer, size_t size)
 
     const auto& r = current.projectionRaw;
     std::snprintf(buffer, size,
-                  "fov=%.4f dim=%dx%d ratio=%.4f pixA=%.4f | "
-                  "edge_nlt=(%.3f,%.3f,%.3f) edge_plt=(%.3f,%.3f,%.3f) edge_flt=(%.3f,%.3f,%.3f)",
-                  r[0], static_cast<int>(r[1]), static_cast<int>(r[2]), r[3], r[4], r[5], r[6], r[7], r[8], r[9],
-                  r[10], r[11], r[12], r[13]);
+                  "fov=%.4f pixA=%.4f | nearEdge@50=(%.4f,%.4f,%.4f) | "
+                  "projEdge@5c=(%.3f,%.3f,%.3f) | tail@68=(%.2f,%.2f,%.2f,%.2f,%.2f,%.2f)",
+                  r[0], r[4], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15], r[16], r[17], r[18], r[19]);
     return true;
 }
 } // namespace Kcd2Camera
