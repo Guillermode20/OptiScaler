@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.12 (2026-08-25)
+* Validated KCD2 far plane (8000) and optional pose smoothing
+
 ## v10.0.0.11 (2026-08-25)
 * KCD2 CCamera layout: validated near plane, hunt far plane
 

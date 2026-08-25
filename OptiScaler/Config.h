@@ -631,6 +631,7 @@ class Config
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
     CustomOptional<bool> ReprojCenterCropDebug { false }; // show only central 50% of the viewport
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
+    CustomOptional<float> ReprojSmoothing { 0.0f }; // 0=off, 0..0.95 EMA on camera angular velocity
     CustomOptional<bool> ReprojTelemetry { false };
     CustomOptional<bool> ReprojTelemetryMissDump { false };
 

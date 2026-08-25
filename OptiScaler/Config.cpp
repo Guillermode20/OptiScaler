@@ -201,6 +201,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
             ReprojCenterCropDebug.set_from_config(readBool("Reproj", "CenterCropDebug"));
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
+            ReprojSmoothing.set_from_config(readFloat("Reproj", "Smoothing"));
             ReprojTelemetry.set_from_config(readBool("Reproj", "Telemetry"));
             ReprojTelemetryMissDump.set_from_config(readBool("Reproj", "TelemetryMissDump"));
         }
@@ -1048,6 +1049,7 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojCenterCropDebug.value_for_config()).c_str());
         ini.SetValue("Reproj", "ForceBorderless",
                      GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());
+        ini.SetValue("Reproj", "Smoothing", GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
         ini.SetValue("Reproj", "Telemetry", GetBoolValue(Instance()->ReprojTelemetry.value_for_config()).c_str());
         ini.SetValue("Reproj", "TelemetryMissDump",
                      GetBoolValue(Instance()->ReprojTelemetryMissDump.value_for_config()).c_str());

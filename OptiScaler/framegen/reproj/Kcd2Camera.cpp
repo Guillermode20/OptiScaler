@@ -241,7 +241,7 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     std::memcpy(constants.prevCameraUp, previous.up, sizeof(previous.up));
     std::memcpy(constants.prevCameraForward, previous.forward, sizeof(previous.forward));
     constants.cameraVFov = current.verticalFov;
-    // Live-validated near plane: y component of the near-edge vector at +0x54.
+    // Live-validated: near = near-edge y @0x54, far = far-edge y @0x6C (see tail@68 dump).
     // Aspect: the game's own pixel-aspect field (+0x40); the w/h ints at +0x34/38 are
     // repurposed in KCD2 and must not be used.
     const auto pixAspect = current.projectionRaw[4];
@@ -252,8 +252,70 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     const float nearCandidate = current.projectionRaw[9]; // near-edge y @ +0x54
     if (std::isfinite(nearCandidate) && nearCandidate > 0.0f && nearCandidate < 100.0f)
         constants.cameraNear = nearCandidate;
-    // Far plane not yet located (probe dump covers +0x30..+0x7C); keep any far supplied by
-    // upscaler inputs until validated.
+    const float farCandidate = current.projectionRaw[15]; // far-edge y @ +0x6C (=8000 in 1.5.6)
+    if (std::isfinite(farCandidate) && farCandidate > 100.0f && farCandidate < 200000.0f &&
+        farCandidate > constants.cameraNear)
+        constants.cameraFar = farCandidate;
+    // Optional EMA smoothing on angular velocity to counter pose jitter. 0=off.
+    // Smoothed delta replaces the raw (current-previous) used for extrapolation, so
+    // high-frequency shake is attenuated at the cost of a few ms of lag.
+    {
+        const float rawSmoothing = Config::Instance()->ReprojSmoothing.value_or_default();
+        const float smoothing = std::clamp(rawSmoothing, 0.0f, 0.95f);
+        if (smoothing > 0.001f)
+        {
+            static float smoothedDeltaRight[3] {}, smoothedDeltaUp[3] {}, smoothedDeltaForward[3] {},
+                smoothedDeltaPos[3] {};
+            static bool smoothedInit = false;
+            static float lastSmoothing = -1.0f;
+            if (!smoothedInit || std::abs(smoothing - lastSmoothing) > 0.01f)
+            {
+                for (int i = 0; i < 3; ++i)
+                {
+                    smoothedDeltaRight[i] = current.right[i] - previous.right[i];
+                    smoothedDeltaUp[i] = current.up[i] - previous.up[i];
+                    smoothedDeltaForward[i] = current.forward[i] - previous.forward[i];
+                    smoothedDeltaPos[i] = current.position[i] - previous.position[i];
+                }
+                smoothedInit = true;
+                lastSmoothing = smoothing;
+            }
+            else
+            {
+                const float a = smoothing;
+                const float b = 1.0f - smoothing;
+                for (int i = 0; i < 3; ++i)
+                {
+                    const float dR = current.right[i] - previous.right[i];
+                    const float dU = current.up[i] - previous.up[i];
+                    const float dF = current.forward[i] - previous.forward[i];
+                    const float dP = current.position[i] - previous.position[i];
+                    smoothedDeltaRight[i] = smoothedDeltaRight[i] * a + dR * b;
+                    smoothedDeltaUp[i] = smoothedDeltaUp[i] * a + dU * b;
+                    smoothedDeltaForward[i] = smoothedDeltaForward[i] * a + dF * b;
+                    smoothedDeltaPos[i] = smoothedDeltaPos[i] * a + dP * b;
+                }
+            }
+            for (int i = 0; i < 3; ++i)
+            {
+                constexpr float SMOOTHED_EPS = 1e-6f;
+                // If smoothed delta is tiny, snap to zero to avoid perpetual micro-creep
+                // when the player stops moving (EMA would otherwise decay slowly).
+                if (std::abs(smoothedDeltaRight[i]) < SMOOTHED_EPS)
+                    smoothedDeltaRight[i] = 0.0f;
+                if (std::abs(smoothedDeltaUp[i]) < SMOOTHED_EPS)
+                    smoothedDeltaUp[i] = 0.0f;
+                if (std::abs(smoothedDeltaForward[i]) < SMOOTHED_EPS)
+                    smoothedDeltaForward[i] = 0.0f;
+                if (std::abs(smoothedDeltaPos[i]) < SMOOTHED_EPS)
+                    smoothedDeltaPos[i] = 0.0f;
+                constants.prevCameraRight[i] = current.right[i] - smoothedDeltaRight[i];
+                constants.prevCameraUp[i] = current.up[i] - smoothedDeltaUp[i];
+                constants.prevCameraForward[i] = current.forward[i] - smoothedDeltaForward[i];
+                constants.prevCameraPosition[i] = current.position[i] - smoothedDeltaPos[i];
+            }
+        }
+    }
     // KCD2 currently supplies depth but no trustworthy near/far projection constants. Mode 1 combines
     // camera/depth with motion vectors and produced severe double-warp wobble/artifacts. Validate the
     // acquired pose independently in camera rotation-only mode; enable depth only after its projection
