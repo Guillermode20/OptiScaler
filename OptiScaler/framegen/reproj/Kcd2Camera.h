@@ -12,7 +12,8 @@ bool Initialize();
 
 // Replaces missing API camera constants with the latest gameplay CView pose.
 // Returns the QPC-compatible millisecond timestamp of that pose, or 0 when unavailable/stale.
-double ApplyToConstants(RP_Constants& constants, float fallbackAspect);
+// poseIntervalMs receives the exact interval represented by the current/previous camera pair.
+double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* poseIntervalMs = nullptr);
 
 bool IsAvailable();
 } // namespace Kcd2Camera

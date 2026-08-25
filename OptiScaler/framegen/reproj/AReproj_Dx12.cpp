@@ -623,7 +623,10 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.constants.hudlessSource = packet.hasUi ? 1u : 0u;
     const auto colorDesc = packet.color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
-    const auto kcd2CameraTimestamp = Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect);
+    double kcd2PoseIntervalMs = 0.0;
+    const auto kcd2CameraTimestamp =
+        Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
+    packet.sourcePoseInterval = kcd2PoseIntervalMs;
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.
@@ -819,11 +822,9 @@ void AReproj_Dx12::UpdateWarpGpuDuration(int outputIndex)
         {
             std::scoped_lock metricsLock(_metricsMutex);
             _warpDurationEmaMs = _warpDurationEmaMs * 0.9 + durationMs * 0.1;
-            // Full-screen GPU work is not the whole submission path: command
-            // recording, queue handoff and DXGI present also need headroom.
-            // One millisecond repeatedly missed 120 Hz slots on Proton.
-            // Clamp widened 3-5->3-8 to match PresenterMain adaptive range; UpdateWarp must not clobber growth to 8.
-            _dispatchLeadMs = std::clamp(_warpDurationEmaMs + 1.0, 3.0, 8.0);
+            // PresenterMain owns the dispatch lead. Do not reset it from the GPU-only duration:
+            // on Proton the timer can wake several milliseconds late even though the warp itself is
+            // sub-millisecond. Resetting here silently defeated the presenter's scheduler adaptation.
         }
     }
     D3D12_RANGE written { 0, 0 };
@@ -1370,13 +1371,6 @@ void AReproj_Dx12::PresenterMain()
                 }
             }
 
-            constexpr double LEAD_GROW_MS = 0.5;
-            constexpr double LEAD_DECAY_MS = 0.1;
-            if (lateness > 0.5)
-                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, 8.0);
-            else if (lateness < -1.0)
-                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
-
             if (tSlot)
             {
                 const double deadlineMs = nextDeadlineMs;
@@ -1392,8 +1386,22 @@ void AReproj_Dx12::PresenterMain()
             }
 
             const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
+            const auto wakeCompletedMs = Util::MillisecondsNow();
             if (tSlot)
                 tSlot->wakeCompletedQpc = _telemetry.NowQpc();
+
+            // Adapt from usable headroom after the actual wake, not from loop-top lateness. Present(1)
+            // normally blocks for most of a refresh, so loop-top is early even when Wine's timer then
+            // overshoots the requested wake by 3-10 ms. UpdateWarpGpuDuration used to reset this to 3 ms
+            // every slot, making the old adaptation ineffective (telemetry always reported lead=3.00).
+            constexpr double LEAD_GROW_MS = 0.5;
+            constexpr double LEAD_DECAY_MS = 0.05;
+            const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
+            if (wakeHeadroomMs < 2.0)
+                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, 8.0);
+            else if (wakeHeadroomMs > 4.0)
+                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
+
             if (!deadlineOk)
             {
                 if (tSlot)
@@ -1560,7 +1568,11 @@ void AReproj_Dx12::PresenterMain()
         const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
         const auto targetDisplayMs = nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
         const auto rawPeriod = packet.rawFrameDelta > 1.0 ? packet.rawFrameDelta : packet.frameDelta;
-        const auto realPeriodMs = std::max(rawPeriod, refreshPeriodMs);
+        // Rotation extrapolates the exact previous/current camera pair. Its own interval is the only
+        // correct denominator; source-present pacing can differ substantially from the camera callback
+        // cadence, especially when a cap is enabled. Falling back preserves non-KCD2 behavior.
+        const auto representedPeriod = packet.sourcePoseInterval > 1.0 ? packet.sourcePoseInterval : rawPeriod;
+        const auto realPeriodMs = std::max(representedPeriod, refreshPeriodMs);
         const bool poseOriginValid = packet.hasCamera && packet.sourcePoseTimestamp > 0.0 &&
                                      packet.sourcePoseTimestamp <= targetDisplayMs;
         const auto warpOriginMs = poseOriginValid ? packet.sourcePoseTimestamp : packet.renderTimestamp;

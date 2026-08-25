@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.7 (2026-08-25)
+* Smooth async timewarp pacing and KCD2 camera prediction
+
 ## v10.0.0.6 (2026-08-25)
 * Add async reprojection source FPS cap
 

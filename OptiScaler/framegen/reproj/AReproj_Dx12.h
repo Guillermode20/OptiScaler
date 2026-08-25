@@ -81,6 +81,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         UINT64 retirementFenceValue = 0;
         double renderTimestamp = 0.0;
         double sourcePoseTimestamp = 0.0;
+        double sourcePoseInterval = 0.0; // exact interval represented by camera current/previous poses
         double frameDelta = 0.0;
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
         UINT syncInterval = 0;

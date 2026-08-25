@@ -50,6 +50,26 @@ bool IsFiniteBasis(const Pose& p)
            std::abs(dot(p.up, p.forward)) < 0.1f;
 }
 
+bool PoseChanged(const Pose& current, const Pose& next)
+{
+    // The gameplay CView can build the same frustum several times per rendered frame. Timestamp-only
+    // filtering occasionally promoted a delayed duplicate to "previous", producing a zero-velocity
+    // camera pair and a visible hitch. Matrix values are copied from the same CView, so a tiny squared
+    // delta reliably separates exact duplicate callbacks while retaining slow camera movement.
+    double delta2 = 0.0;
+    for (int i = 0; i < 3; ++i)
+    {
+        const double positionDelta = static_cast<double>(next.position[i]) - current.position[i];
+        const double rightDelta = static_cast<double>(next.right[i]) - current.right[i];
+        const double upDelta = static_cast<double>(next.up[i]) - current.up[i];
+        const double forwardDelta = static_cast<double>(next.forward[i]) - current.forward[i];
+        delta2 += positionDelta * positionDelta + rightDelta * rightDelta + upDelta * upDelta +
+                  forwardDelta * forwardDelta;
+    }
+    const double fovDelta = static_cast<double>(next.verticalFov) - current.verticalFov;
+    return delta2 + fovDelta * fovDelta > 1.0e-12;
+}
+
 bool IsCViewVtable(uintptr_t vtable)
 {
     if (vtable < 0x10000)
@@ -93,9 +113,11 @@ void PublishPose(uintptr_t camera)
             return;
 
         g_sequence.fetch_add(1, std::memory_order_acq_rel); // odd: write in progress
-        // Frustum construction can run twice back-to-back for one rendered view. Do not turn that into
-        // a zero-motion previous pose; only advance history when this is a distinct render-time sample.
-        if (g_current.timestampMs <= 0.0 || pose.timestampMs - g_current.timestampMs > 2.0)
+        // Frustum construction can run repeatedly for one rendered view. Do not turn a delayed duplicate
+        // into a zero-motion previous pose; advance history only when the gameplay pose actually changed.
+        if (g_current.timestampMs <= 0.0)
+            g_previous = pose;
+        else if (PoseChanged(g_current, pose))
             g_previous = g_current;
         g_current = pose;
         g_sequence.fetch_add(1, std::memory_order_release); // even: published
@@ -178,14 +200,18 @@ bool IsAvailable()
     return ReadPoses(current, previous) && Util::MillisecondsNow() - current.timestampMs < 250.0;
 }
 
-double ApplyToConstants(RP_Constants& constants, float fallbackAspect)
+double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* poseIntervalMs)
 {
+    if (poseIntervalMs)
+        *poseIntervalMs = 0.0;
     if (g_initState.load(std::memory_order_acquire) == 0)
         Initialize();
     Pose current, previous;
     if (!ReadPoses(current, previous) || Util::MillisecondsNow() - current.timestampMs > 250.0)
         return 0.0;
 
+    if (poseIntervalMs)
+        *poseIntervalMs = current.timestampMs - previous.timestampMs;
     std::memcpy(constants.cameraPosition, current.position, sizeof(current.position));
     std::memcpy(constants.cameraRight, current.right, sizeof(current.right));
     std::memcpy(constants.cameraUp, current.up, sizeof(current.up));
