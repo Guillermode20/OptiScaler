@@ -1550,7 +1550,12 @@ void AReproj_Dx12::PresenterMain()
                                      packet.sourcePoseTimestamp <= targetDisplayMs;
         const auto warpOriginMs = poseOriginValid ? packet.sourcePoseTimestamp : packet.renderTimestamp;
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
-        const auto maxTimeStep = std::max(0.25f, Config::Instance()->ReprojMaxTimeStep.value_or_default());
+        auto maxTimeStep = std::max(0.25f, Config::Instance()->ReprojMaxTimeStep.value_or_default());
+        // KCD2's rendered camera path is accurate, but source stalls can leave an anchor 2-3 frames
+        // old. Large rotational extrapolation then feels floaty and amplifies pose discontinuities.
+        // Keep the generic cap for other games; use a conservative KCD2 cap while the source is stalled.
+        if (Kcd2Camera::IsAvailable())
+            maxTimeStep = std::min(maxTimeStep, 1.5f);
         const auto timeStep =
             std::clamp(static_cast<float>((anchorAgeMs / realPeriodMs) *
                                           Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
