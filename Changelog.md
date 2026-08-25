@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.10 (2026-08-25)
+* Fix MSVC build of KCD2 projection extraction
+
 ## v10.0.0.9 (2026-08-25)
 * KCD2 CCamera projection extraction and corrected depth-shader math
 

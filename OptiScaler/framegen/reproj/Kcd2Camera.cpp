@@ -117,7 +117,7 @@ void PublishPose(uintptr_t camera)
         }
         pose.verticalFov = *reinterpret_cast<const float*>(camera + 0x30);
         std::memcpy(pose.projectionRaw, reinterpret_cast<const float*>(camera + 0x30),
-                    sizeof(float) * PROJECTION_FLOAT_COUNT);
+                    sizeof(float) * Pose::PROJECTION_FLOAT_COUNT);
         pose.timestampMs = Util::MillisecondsNow();
         if (!IsFiniteBasis(pose))
             return;
