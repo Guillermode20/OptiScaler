@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "AReproj_Dx12.h"
+#include "Kcd2Camera.h"
 
 #include <algorithm>
 #include <bit>
@@ -620,7 +621,10 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
     packet.constants.hudlessSource = packet.hasUi ? 1u : 0u;
-    const auto cameraTimestamp = _cameraTimestamp[sourceIndex];
+    const auto colorDesc = packet.color->GetDesc();
+    const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
+    const auto kcd2CameraTimestamp = Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect);
+    const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.
     const double sourceTimestamp =

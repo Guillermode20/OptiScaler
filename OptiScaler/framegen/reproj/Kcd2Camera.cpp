@@ -1,0 +1,191 @@
+#include "pch.h"
+#include "Kcd2Camera.h"
+
+#include "Logger.h"
+#include "Util.h"
+#include "shaders/reprojection/RP_Common.h"
+#include "scanner/scanner.h"
+#include <detours/detours.h>
+
+#include <atomic>
+#include <cmath>
+#include <cstring>
+
+namespace Kcd2Camera
+{
+namespace
+{
+constexpr uintptr_t CViewCameraOffset = 0xE8;
+using FrustumBuildFn = uintptr_t(__fastcall*)(uintptr_t camera);
+FrustumBuildFn g_original = nullptr;
+std::atomic<uint64_t> g_sequence { 0 };
+
+struct Pose
+{
+    float position[3] {};
+    float right[3] {};
+    float up[3] {};
+    float forward[3] {};
+    float verticalFov = 0.0f;
+    double timestampMs = 0.0;
+};
+
+// Seqlock: the render thread writes; game/presenter capture threads read without blocking.
+Pose g_current {};
+Pose g_previous {};
+
+bool IsFiniteBasis(const Pose& p)
+{
+    const auto length2 = [](const float* v) { return v[0] * v[0] + v[1] * v[1] + v[2] * v[2]; };
+    const auto dot = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
+    for (float value : p.position)
+        if (!std::isfinite(value))
+            return false;
+    return std::isfinite(p.verticalFov) && p.verticalFov > 0.05f && p.verticalFov < 3.0f &&
+           length2(p.right) > 0.8f && length2(p.right) < 1.2f && length2(p.up) > 0.8f &&
+           length2(p.up) < 1.2f && length2(p.forward) > 0.8f && length2(p.forward) < 1.2f &&
+           std::abs(dot(p.right, p.up)) < 0.1f && std::abs(dot(p.right, p.forward)) < 0.1f &&
+           std::abs(dot(p.up, p.forward)) < 0.1f;
+}
+
+bool IsCViewVtable(uintptr_t vtable)
+{
+    if (vtable < 0x10000)
+        return false;
+    __try
+    {
+        // MSVC x64 vtable[-1] is _RTTICompleteObjectLocator. Its pTypeDescriptor is an image-relative RVA.
+        const auto locator = reinterpret_cast<const uint32_t*>(reinterpret_cast<const uintptr_t*>(vtable)[-1]);
+        if (!locator || locator[0] != 1)
+            return false;
+        const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"WHGame.dll"));
+        const auto type = reinterpret_cast<const char*>(module + locator[3] + 16); // TypeDescriptor::name
+        return std::strcmp(type, ".?AVCView@@") == 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+void PublishPose(uintptr_t camera)
+{
+    __try
+    {
+        const auto cview = camera - CViewCameraOffset;
+        if (!IsCViewVtable(*reinterpret_cast<const uintptr_t*>(cview)))
+            return;
+
+        const auto matrix = reinterpret_cast<const float(*)[4]>(camera);
+        Pose pose {};
+        for (int i = 0; i < 3; ++i)
+        {
+            pose.right[i] = matrix[i][0];
+            pose.forward[i] = matrix[i][1];
+            pose.up[i] = matrix[i][2];
+            pose.position[i] = matrix[i][3];
+        }
+        pose.verticalFov = *reinterpret_cast<const float*>(camera + 0x30);
+        pose.timestampMs = Util::MillisecondsNow();
+        if (!IsFiniteBasis(pose))
+            return;
+
+        g_sequence.fetch_add(1, std::memory_order_acq_rel); // odd: write in progress
+        // Frustum construction can run twice back-to-back for one rendered view. Do not turn that into
+        // a zero-motion previous pose; only advance history when this is a distinct render-time sample.
+        if (g_current.timestampMs <= 0.0 || pose.timestampMs - g_current.timestampMs > 2.0)
+            g_previous = g_current;
+        g_current = pose;
+        g_sequence.fetch_add(1, std::memory_order_release); // even: published
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+uintptr_t __fastcall Hook(uintptr_t camera)
+{
+    PublishPose(camera);
+    return g_original(camera);
+}
+
+bool ReadPoses(Pose& current, Pose& previous)
+{
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const auto before = g_sequence.load(std::memory_order_acquire);
+        if ((before & 1) != 0 || before == 0)
+            continue;
+        current = g_current;
+        previous = g_previous;
+        const auto after = g_sequence.load(std::memory_order_acquire);
+        if (before == after)
+            return previous.timestampMs > 0.0;
+    }
+    return false;
+}
+} // namespace
+
+bool Initialize()
+{
+    const auto module = GetModuleHandleW(L"WHGame.dll");
+    if (!module || g_original)
+        return g_original != nullptr;
+
+    static constexpr const char* patterns[] = {
+        "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 68 ? 48 81 EC ? ? 00 00 F3 0F 10 09 48 8B D9",
+        "55 53 56 57 41 54 41 55 41 56 41 57 48 8D 68 ? 48 81 EC ? ? 00 00 F3 0F 10 09 48 8B D9 F3 0F 10 59 08",
+        "F3 0F 10 09 48 8B D9 F3 0F 10 59 08 F3 0F 10 51 10 F3 0F 10 41 24 F3 0F 10 61 28"
+    };
+    static constexpr ptrdiff_t offsets[] = { 0, -3, -0x1A };
+    uintptr_t address = 0;
+    for (size_t i = 0; i < std::size(patterns) && !address; ++i)
+        address = scanner::GetAddress(module, patterns[i], offsets[i]);
+    if (!address)
+    {
+        LOG_WARN("KCD2 camera: CCamera::UpdateFrustumPlanes signature not found");
+        return false;
+    }
+
+    g_original = reinterpret_cast<FrustumBuildFn>(address);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(reinterpret_cast<PVOID*>(&g_original), Hook);
+    const auto result = DetourTransactionCommit();
+    if (result != NO_ERROR)
+    {
+        LOG_ERROR("KCD2 camera: detour failed: {}", result);
+        g_original = nullptr;
+        return false;
+    }
+    LOG_INFO("KCD2 camera: gameplay CView acquisition installed at {:X}", address);
+    return true;
+}
+
+bool IsAvailable()
+{
+    Pose current, previous;
+    return ReadPoses(current, previous) && Util::MillisecondsNow() - current.timestampMs < 250.0;
+}
+
+double ApplyToConstants(RP_Constants& constants, float fallbackAspect)
+{
+    Pose current, previous;
+    if (!ReadPoses(current, previous) || Util::MillisecondsNow() - current.timestampMs > 250.0)
+        return 0.0;
+
+    std::memcpy(constants.cameraPosition, current.position, sizeof(current.position));
+    std::memcpy(constants.cameraRight, current.right, sizeof(current.right));
+    std::memcpy(constants.cameraUp, current.up, sizeof(current.up));
+    std::memcpy(constants.cameraForward, current.forward, sizeof(current.forward));
+    std::memcpy(constants.prevCameraPosition, previous.position, sizeof(previous.position));
+    std::memcpy(constants.prevCameraRight, previous.right, sizeof(previous.right));
+    std::memcpy(constants.prevCameraUp, previous.up, sizeof(previous.up));
+    std::memcpy(constants.prevCameraForward, previous.forward, sizeof(previous.forward));
+    constants.cameraVFov = current.verticalFov;
+    constants.cameraAspect = fallbackAspect;
+    if (constants.mode == 0)
+        constants.mode = 1;
+    return current.timestampMs;
+}
+} // namespace Kcd2Camera

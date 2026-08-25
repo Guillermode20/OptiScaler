@@ -40,6 +40,7 @@
 #include <hooks/Crypt32_Hooks.h>
 #include <hooks/Advapi32_Hooks.h>
 #include <hooks/Streamline_Hooks.h>
+#include <framegen/reproj/Kcd2Camera.h>
 
 #include <nvapi/NvApiHooks.h>
 
@@ -2095,6 +2096,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             State::Instance().startupDiagnostic += " | Overlay disabled: " + State::Instance().overlayDisableReason;
         }
         CheckMemoryForProxies();
+        Kcd2Camera::Initialize();
 
         // OptiFG & Overlay Checks
         if ((Config::Instance()->FGInput.value_or_default() == FGInput::Upscaler) &&
