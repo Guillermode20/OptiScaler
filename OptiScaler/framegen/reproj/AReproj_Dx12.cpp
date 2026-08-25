@@ -822,7 +822,8 @@ void AReproj_Dx12::UpdateWarpGpuDuration(int outputIndex)
             // Full-screen GPU work is not the whole submission path: command
             // recording, queue handoff and DXGI present also need headroom.
             // One millisecond repeatedly missed 120 Hz slots on Proton.
-            _dispatchLeadMs = std::clamp(_warpDurationEmaMs + 1.0, 3.0, 5.0);
+            // Clamp widened 3-5->3-8 to match PresenterMain adaptive range; UpdateWarp must not clobber growth to 8.
+            _dispatchLeadMs = std::clamp(_warpDurationEmaMs + 1.0, 3.0, 8.0);
         }
     }
     D3D12_RANGE written { 0, 0 };
@@ -982,17 +983,31 @@ void AReproj_Dx12::WaitUntil(double deadlineMs) const
 
 bool AReproj_Dx12::WaitForPresenterDeadline(double deadlineMs)
 {
-    // Keep stop/join preemptible, then spin only for the final fraction of a
-    // millisecond so ordinary scheduler jitter does not move the display phase.
+    // High-res wait that remains stop-preemptible. condition_variable::wait_for on Wine/Proton
+    // overshoots 3-10ms for 5ms sleeps (wake.p50 7-11ms in telemetry). Use FrameLimit's
+    // waitable-timer (QPC-based ns) for the bulk, then spin the final 0.2ms.
     while (!_stopPresenter.load())
     {
         const auto remaining = deadlineMs - Util::MillisecondsNow();
         if (remaining <= 0.2)
             break;
-
-        std::unique_lock lock(_presentMutex);
-        _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(remaining - 0.2),
-                            [&] { return _stopPresenter.load(); });
+        // Sleep in 5ms chunks so _stopPresenter can preempt within 5ms
+        const double chunk = std::min(remaining - 0.2, 5.0);
+        if (chunk > 2.0)
+        {
+            // Use high-res timer (QPC ns) - matches presenter display clock domain
+            FrameLimit::sleepForMs(chunk);
+            if (_stopPresenter.load())
+                return false;
+        }
+        else
+        {
+            std::unique_lock lock(_presentMutex);
+            _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(chunk),
+                                [&] { return _stopPresenter.load(); });
+            if (_stopPresenter.load())
+                return false;
+        }
     }
 
     while (!_stopPresenter.load() && Util::MillisecondsNow() < deadlineMs)
@@ -1240,7 +1255,7 @@ void AReproj_Dx12::PresenterMain()
     UINT64 activeFrame = 0;
     double nextDeadlineMs = 0.0;
     constexpr double VBLANK_SAFETY_LEAD_MS = 2.0;
-    constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 4.0;
+    constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 16.0; // 4->16: 8ms drift needs >4ms to recover
     double totalEarlyCorrectionMs = 0.0;
     uint32_t consecutiveJammedPresents = 0;
 

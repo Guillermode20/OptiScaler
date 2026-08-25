@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.5 (2026-08-25)
+* Fix FrameLimit 1fps lock and reprojection stutter (QPC monotonic, early correction, lead clamp, high-res presenter wait)
+
 ## v10.0.0.4 (2026-08-24)
 * Stabilize reprojection with rendered-pose rotation warp
 
