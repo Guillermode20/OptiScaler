@@ -23,7 +23,7 @@ TELEMETRY_RE = re.compile(
     r"gpu\.p50=(?P<gp50>[-\d\.NaN]+) gpu\.p95=(?P<gp95>[-\d\.NaN]+) gpu\.p99=(?P<gp99>[-\d\.NaN]+) gpu\.max=(?P<gmax>[-\d\.NaN]+) gpuMargin\.p50=(?P<gm50>[-\d\.NaN]+) gpuSkipped=(?P<gskipped>\d+) calibFail=(?P<calibFail>\d+) calibValid=(?P<calibValid>\d) "
     r"present\.p50=(?P<pp50>[-\d\.NaN]+) present\.p95=(?P<pp95>[-\d\.NaN]+) present\.p99=(?P<pp99>[-\d\.NaN]+) present\.max=(?P<pmax>[-\d\.NaN]+) "
     r"mode\.mv=(?P<mmv>\d+) mode\.depth=(?P<mdepth>\d+) mode\.rotation=(?P<mrot>\d+) mode\.unwarped=(?P<munwarp>\d+) "
-    r"source\.raw\.p50=(?P<sr50>[-\d\.NaN]+) source\.raw\.p95=(?P<sr95>[-\d\.NaN]+) source\.selected\.p50=(?P<ss50>[-\d\.NaN]+) source\.selected\.p95=(?P<ss95>[-\d\.NaN]+) ratio\.p50=(?P<rp50>[-\d\.NaN]+) ratio\.p95=(?P<rp95>[-\d\.NaN]+) "
+    r"source\.raw\.p50=(?P<sr50>[-\d\.NaN]+) source\.raw\.p95=(?P<sr95>[-\d\.NaN]+) source\.selected\.p50=(?P<ss50>[-\d\.NaN]+) source\.selected\.p95=(?P<ss95>[-\d\.NaN]+) ratio\.p50=(?P<rp50>[-\d\.NaN]+) ratio\.p95=(?P<rp95>[-\d\.NaN]+) source\.capHz=(?P<sourceCapHz>[-\d\.NaN]+) source\.capError=(?P<sourceCapError>[-\d\.NaN]+) "
     r"anchorAge\.p50=(?P<ap50>[-\d\.NaN]+) anchorAge\.p95=(?P<ap95>[-\d\.NaN]+) anchorAge\.max=(?P<amax>[-\d\.NaN]+) "
     r"step\.raw\.p50=(?P<stepRaw50>[-\d\.NaN]+) step\.raw\.p95=(?P<stepRaw95>[-\d\.NaN]+) step\.raw\.max=(?P<stepRawMax>[-\d\.NaN]+) step\.final\.p50=(?P<stepF50>[-\d\.NaN]+) step\.final\.p95=(?P<stepF95>[-\d\.NaN]+) step\.final\.max=(?P<stepFMax>[-\d\.NaN]+) step\.clamped=(?P<clamped>\d+) "
     r"camera=(?P<camAvail>\d+)/(?P<camTotal>\d+) depth=(?P<depthAvail>\d+)/(?P<depthTotal>\d+) depthConstants=(?P<dcAvail>\d+)/(?P<dcTotal>\d+) hudless=(?P<hAvail>\d+)/(?P<hTotal>\d+) "
@@ -130,6 +130,10 @@ def analyze(path):
     # Source rate
     sr50 = [t["sr50"] for t in telemetry if t.get("sr50") is not None]
     print(f"Source raw p50: {percentile(sr50,0.5):.1f} ms ({(1000/percentile(sr50,0.5) if percentile(sr50,0.5) else 0):.1f} FPS)" if sr50 else "No source")
+    cap_hz = [t["sourceCapHz"] for t in telemetry if t.get("sourceCapHz")]
+    cap_error = [t["sourceCapError"] for t in telemetry if t.get("sourceCapError") is not None]
+    if cap_hz:
+        print(f"Source cap: {percentile(cap_hz,0.5):.1f} Hz | last timing error p95 {percentile(cap_error,0.95):.2f} ms")
 
     # Timestep
     stepF95 = [t["stepF95"] for t in telemetry if t.get("stepF95") is not None]

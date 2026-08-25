@@ -3088,7 +3088,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
                                                 "No frame-interpolation dispatch is issued. Requires DX12, FG Input = Upscaler, "
                                                 "and an active FSR/FFX upscaler.\n"
                                                 "Rotation-only mouse late latch is used until a predicted camera source is available.\n"
-                                                "Set FramerateLimit = refresh rate, then enable [AsyncTimewarp]." },
+                                                "Set Target refresh to the display rate; Source FPS cap controls only game anchors." },
     };
 
     // clang-format on
@@ -3911,6 +3911,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojTargetRefresh = std::max(0.0f, targetRefresh);
         ShowHelpMarker("0 = FramerateLimit, then the active monitor refresh rate");
 
+        float sourceFpsCap = config->ReprojSourceFramerateLimit.value_or_default();
+        if (ImGui::InputFloat("Source FPS cap##reproj", &sourceFpsCap, 1.0f, 10.0f, "%.1f Hz"))
+            config->ReprojSourceFramerateLimit = std::clamp(sourceFpsCap, 0.0f, 1000.0f);
+        ShowHelpMarker("Async + virtualized only. 0 = uncapped. 60 targets one new anchor and one repeat per 120 Hz "
+                       "display cycle without changing global FramerateLimit, Reflex, or XeLL pacing.");
+
         float maxPoseAge = config->ReprojMaxPoseAgeMs.value_or_default();
         if (ImGui::InputFloat("Max pose age##reproj", &maxPoseAge, 1.0f, 5.0f, "%.0f ms"))
             config->ReprojMaxPoseAgeMs = std::clamp(maxPoseAge, 1.0f, 1000.0f);
@@ -3996,8 +4002,10 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 if (tSnap.modeDepth > tSnap.modeMv && tSnap.modeDepth > tSnap.modeRotation) effMode = "Depth";
                 else if (tSnap.modeRotation > tSnap.modeMv && tSnap.modeRotation > tSnap.modeDepth) effMode = "Rotation";
                 else if (tSnap.modeUnwarped > 0) effMode = "Unwarped";
-                ImGui::TextDisabled("Effective: %s (MV %u depth %u rot %u) | source %.1f/%.1f ms | step %.2f/%.2f clamped %u",
-                                    effMode, tSnap.modeMv, tSnap.modeDepth, tSnap.modeRotation, tSnap.sourceRawP50, tSnap.sourceRawP95, tSnap.finalP50, tSnap.finalP95, tSnap.clampCount);
+                ImGui::TextDisabled(
+                    "Effective: %s (MV %u depth %u rot %u) | source %.1f/%.1f ms | cap %.1f Hz err %.2f ms | step %.2f/%.2f clamped %u",
+                    effMode, tSnap.modeMv, tSnap.modeDepth, tSnap.modeRotation, tSnap.sourceRawP50, tSnap.sourceRawP95,
+                    tSnap.sourceCapHz, tSnap.sourceCapTimingErrorMs, tSnap.finalP50, tSnap.finalP95, tSnap.clampCount);
                 ImGui::TextDisabled("Velocity %s | depth %u/%u | camera basis %u/%u | constants %u/%u | HUD %u/%u | GPU calib %s (%u skipped)",
                                     tSnap.queueP50 == tSnap.queueP50 ? "yes" : "no", tSnap.depthAvailable, tSnap.scheduledSlots, tSnap.cameraBasisAvailable, tSnap.scheduledSlots, tSnap.depthConstantsValid, tSnap.scheduledSlots, tSnap.hudlessSource, tSnap.scheduledSlots, tSnap.calibrationValid ? "ok" : "fail", tSnap.gpuQuerySkipped);
                 if (tSnap.cameraBasisAvailable == 0 && config->ReprojMode.value_or_default() != 0)

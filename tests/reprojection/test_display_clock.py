@@ -26,6 +26,29 @@ class DisplayClock:
         self.deadline += self.period
 
 
+class SourcePacer:
+    """Model the game-thread absolute-deadline cap without platform sleeping."""
+
+    def __init__(self):
+        self.deadline = None
+        self.cap = 0.0
+
+    def publish(self, now_ms, cap_hz, active=True):
+        cap_hz = cap_hz if active and cap_hz > 0 else 0.0
+        if not cap_hz:
+            self.deadline = None
+            self.cap = 0.0
+            return None
+        period = 1000.0 / cap_hz
+        if self.deadline is None or abs(self.cap - cap_hz) > 0.001 or now_ms >= self.deadline:
+            self.deadline = now_ms + period
+            self.cap = cap_hz
+            return None
+        deadline = self.deadline
+        self.deadline += period
+        return deadline
+
+
 class ReprojectionTests(unittest.TestCase):
     def test_packet_replacement_happens_only_on_slot(self):
         clock = DisplayClock(8.0)
@@ -125,6 +148,35 @@ class ReprojectionTests(unittest.TestCase):
             marker = f'{symbol} = R"(\n'
             embedded = common.split(marker, 1)[1].split('\n)";', 1)[0]
             self.assertEqual(embedded.strip(), source_path.read_text(encoding="utf-8").strip())
+
+    def test_source_cap_uses_an_absolute_deadline_grid(self):
+        pacer = SourcePacer()
+        self.assertIsNone(pacer.publish(0.0, 60.0))
+        self.assertEqual(pacer.publish(5.0, 60.0), 1000 / 60)
+        # The next deadline stays on the original grid, not 5 ms after completion.
+        self.assertEqual(pacer.publish(20.0, 60.0), 2000 / 60)
+
+    def test_source_cap_resets_on_late_frame_or_setting_change(self):
+        pacer = SourcePacer()
+        pacer.publish(0.0, 60.0)
+        self.assertIsNone(pacer.publish(20.0, 60.0))  # missed 16.67 ms deadline
+        self.assertIsNone(pacer.publish(21.0, 50.0))
+        self.assertEqual(pacer.publish(25.0, 50.0), 41.0)
+
+    def test_source_cap_disable_cannot_create_a_catchup_burst(self):
+        pacer = SourcePacer()
+        pacer.publish(0.0, 60.0)
+        self.assertIsNone(pacer.publish(1000.0, 0.0, active=False))
+        self.assertIsNone(pacer.publish(1001.0, 60.0))
+
+    def test_runtime_source_pacer_is_async_virtualized_only(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        publish = source.split("if (captured && submitted && advanced)", 1)[1].split(
+            "// Hard publication failures", 1)[0]
+        self.assertIn("FrameLimit::paceReprojectionSource(true)", publish)
+        self.assertLess(publish.index("FrameLimit::paceReprojectionSource(true)"), publish.index("return true"))
+        self.assertIn("FrameLimit::paceReprojectionSource(false)", source)
 
 
 if __name__ == "__main__":

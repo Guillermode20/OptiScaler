@@ -8,6 +8,7 @@
 
 #include <Config.h>
 #include <Logger.h>
+#include <misc/FrameLimit.h>
 #include <Util.h>
 
 ReprojTelemetry::ReprojTelemetry()
@@ -626,6 +627,9 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.sourceSelectedP95 = Percentile(selectedIntervals, nSelected, 0.95);
     snap.sourceRatioP50 = Percentile(ratios, nRatio, 0.50);
     snap.sourceRatioP95 = Percentile(ratios, nRatio, 0.95);
+    const auto sourcePacing = FrameLimit::reprojectionSourcePacingStats();
+    snap.sourceCapHz = sourcePacing.capHz;
+    snap.sourceCapTimingErrorMs = sourcePacing.timingErrorMs;
     snap.anchorAgeP50 = Percentile(anchorAges, nAge, 0.50);
     snap.anchorAgeP95 = Percentile(anchorAges, nAge, 0.95);
     snap.anchorAgeMax = Percentile(anchorAges, nAge, 1.0);
@@ -689,7 +693,7 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
         "gpu.p50={:.2f} gpu.p95={:.2f} gpu.p99={:.2f} gpu.max={:.2f} gpuMargin.p50={:.2f} gpuSkipped={} calibFail={} calibValid={} "
         "present.p50={:.2f} present.p95={:.2f} present.p99={:.2f} present.max={:.2f} "
         "mode.mv={} mode.depth={} mode.rotation={} mode.unwarped={} "
-        "source.raw.p50={:.2f} source.raw.p95={:.2f} source.selected.p50={:.2f} source.selected.p95={:.2f} ratio.p50={:.2f} ratio.p95={:.2f} "
+        "source.raw.p50={:.2f} source.raw.p95={:.2f} source.selected.p50={:.2f} source.selected.p95={:.2f} ratio.p50={:.2f} ratio.p95={:.2f} source.capHz={:.2f} source.capError={:.2f} "
         "anchorAge.p50={:.2f} anchorAge.p95={:.2f} anchorAge.max={:.2f} "
         "step.raw.p50={:.2f} step.raw.p95={:.2f} step.raw.max={:.2f} step.final.p50={:.2f} step.final.p95={:.2f} step.final.max={:.2f} step.clamped={} "
         "camera={}/{} depth={}/{} depthConstants={}/{} hudless={}/{} "
@@ -703,6 +707,7 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
         snap.calibrationFailures, snap.calibrationValid ? 1 : 0, snap.presentBlockP50, snap.presentBlockP95, snap.presentBlockP99,
         snap.presentBlockMax, snap.modeMv, snap.modeDepth, snap.modeRotation, snap.modeUnwarped, snap.sourceRawP50,
         snap.sourceRawP95, snap.sourceSelectedP50, snap.sourceSelectedP95, snap.sourceRatioP50, snap.sourceRatioP95,
+        snap.sourceCapHz, snap.sourceCapTimingErrorMs,
         snap.anchorAgeP50, snap.anchorAgeP95, snap.anchorAgeMax, snap.unclampedP50, snap.unclampedP95, snap.unclampedMax,
         snap.finalP50, snap.finalP95, snap.finalMax, snap.clampCount, snap.cameraBasisAvailable, snap.scheduledSlots,
         snap.depthAvailable, snap.scheduledSlots, snap.depthConstantsValid, snap.scheduledSlots, snap.hudlessSource,
@@ -761,9 +766,9 @@ void ReprojTelemetry::FillOverlayText(char* buffer, size_t size) const
              "Display %.1f Hz | p95 %.1f ms | missed %u (legacy %u)\n"
              "Misses: queue %u | capture %u | CPU %u | GPU %u | present %u\n"
              "Queue p95 %.1f ms | GPU p95 %.1f ms | Present p95 %.1f ms\n"
-             "Effective: MV %u depth %u rot %u | source %.1f/%.1f ms | step %.2f/%.2f",
+             "Effective: MV %u depth %u rot %u | source %.1f/%.1f ms cap %.1f Hz err %.2f ms | step %.2f/%.2f",
              snap.displayFps, snap.presentIntervalP95, snap.classifiedMisses, snap.legacyMisses, snap.causeQueue,
              snap.causeCapture, snap.causeCpu, snap.causeGpu, snap.causePresent, snap.queueP95, snap.gpuP95,
              snap.presentBlockP95, snap.modeMv, snap.modeDepth, snap.modeRotation, snap.sourceRawP50, snap.sourceRawP95,
-             snap.finalP50, snap.finalP95);
+             snap.sourceCapHz, snap.sourceCapTimingErrorMs, snap.finalP50, snap.finalP95);
 }

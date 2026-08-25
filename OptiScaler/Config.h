@@ -624,6 +624,7 @@ class Config
         1
     }; // bounds blocking warps in synchronous mode; async mode fills every refresh slot instead
     CustomOptional<float> ReprojTargetRefresh { 0.0f };   // 0 = FramerateLimit, then active display refresh
+    CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // async + virtualized only; 0 = uncapped
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { true };     // safer default: no generic late camera translation exists
     CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose

@@ -268,6 +268,8 @@ struct ReprojTelemetrySnapshot
     float sourceSelectedP95 = std::numeric_limits<float>::quiet_NaN();
     float sourceRatioP50 = std::numeric_limits<float>::quiet_NaN();
     float sourceRatioP95 = std::numeric_limits<float>::quiet_NaN();
+    float sourceCapHz = 0.0f;
+    float sourceCapTimingErrorMs = std::numeric_limits<float>::quiet_NaN();
     float anchorAgeP50 = std::numeric_limits<float>::quiet_NaN();
     float anchorAgeP95 = std::numeric_limits<float>::quiet_NaN();
     float anchorAgeMax = std::numeric_limits<float>::quiet_NaN();

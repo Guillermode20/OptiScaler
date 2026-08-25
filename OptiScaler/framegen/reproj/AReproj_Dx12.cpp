@@ -1995,6 +1995,11 @@ bool AReproj_Dx12::Present()
     if (virtualized)
         _wrappedSwapChain = wrapped;
 
+    // A disable, context transition, or loss of virtual ownership must discard
+    // the game-thread pacing grid. The next eligible publication starts fresh.
+    if (!virtualized || !IsActive() || IsPaused() || !Config::Instance()->ReprojAsync.value_or_default())
+        FrameLimit::paceReprojectionSource(false);
+
     UINT virtualBufferIndex = 0;
     ID3D12Resource* gameBackBuffer = nullptr;
     if (virtualized)
@@ -2023,6 +2028,7 @@ bool AReproj_Dx12::Present()
 
     if (_presenterState.load() == PresenterState::Failed)
     {
+        FrameLimit::paceReprojectionSource(false);
         StopAsyncPresenter();
         DrainGpuWork();
         DestroyAsyncPresenter();
@@ -2135,6 +2141,9 @@ bool AReproj_Dx12::Present()
             packet.state.store(PacketState::Ready);
             _readyFrameId.store(packet.frameId);
             _presentCv.notify_one();
+            // Pace only the virtualized game thread after its anchor is published.
+            // The presenter remains display-clocked and must never be source-paced.
+            FrameLimit::paceReprojectionSource(true);
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
             _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
@@ -2169,6 +2178,7 @@ bool AReproj_Dx12::Present()
 
     // Synchronous path.  With virtualization the game source is copied to the real
     // anchor while the worker is stopped; otherwise retain the legacy raw-buffer path.
+    FrameLimit::paceReprojectionSource(false);
     HRESULT realResult = E_FAIL;
     if (virtualized)
     {

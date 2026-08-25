@@ -4,6 +4,16 @@
 #include "Config.h"
 // #include "hooks/D3D11Hooks.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+
+namespace
+{
+std::atomic<float> g_reprojectionSourceCapHz { 0.0f };
+std::atomic<float> g_reprojectionSourceTimingErrorMs { 0.0f };
+}
+
 inline uint64_t FrameLimit::get_timestamp()
 {
     // Monotonic QPC in nanoseconds - wall clock (GetSystemTimePreciseAsFileTime) drifts under Wine/Proton
@@ -29,7 +39,11 @@ inline uint64_t FrameLimit::get_timestamp()
 // https://learn.microsoft.com/en-us/windows/win32/sync/using-waitable-timer-objects
 inline int FrameLimit::timer_sleep(int64_t hundred_ns)
 {
-    static HANDLE timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    // The presenter and game threads can sleep concurrently. A waitable timer is
+    // mutable, so sharing one would let either thread overwrite the other's due time.
+    // Intentionally leaked per-thread waitable timer (threads live for process lifetime).
+    static thread_local HANDLE timer =
+        CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
     LARGE_INTEGER due_time;
 
     due_time.QuadPart = -hundred_ns;
@@ -125,4 +139,58 @@ void FrameLimit::sleepForMs(double ms)
     // combined_sleep takes nanoseconds
     if (auto res = combined_sleep((int64_t) (ms * 1'000'000.0)); res)
         LOG_ERROR("Sleep command failed: {}", res);
+}
+
+void FrameLimit::paceReprojectionSource(bool active)
+{
+    struct SourcePacer
+    {
+        uint64_t nextDeadlineNs = 0;
+        float capHz = 0.0f;
+    };
+    thread_local SourcePacer pacer;
+
+    const float requestedCap = active ? Config::Instance()->ReprojSourceFramerateLimit.value_or_default() : 0.0f;
+    float capHz = std::isfinite(requestedCap) && requestedCap > 0.0f ? requestedCap : 0.0f;
+    // Clamp absurd INI values; 1000 Hz is well above any display/present rate and keeps interval sane.
+    capHz = std::clamp(capHz, 0.0f, 1000.0f);
+    if (capHz <= 0.0f)
+    {
+        pacer = {};
+        g_reprojectionSourceCapHz.store(0.0f, std::memory_order_relaxed);
+        g_reprojectionSourceTimingErrorMs.store(0.0f, std::memory_order_relaxed);
+        return;
+    }
+
+    const uint64_t intervalNs = std::clamp(static_cast<uint64_t>(1'000'000'000.0 / capHz), 1ULL, 100'000'000'000ULL);
+    const uint64_t nowNs = get_timestamp();
+    g_reprojectionSourceCapHz.store(capHz, std::memory_order_relaxed);
+
+    // First frame, cap changes, and long stalls all establish a new absolute grid.
+    // Resetting on a missed deadline avoids a catch-up burst after resize, alt-tab,
+    // or a frame that took longer than its cap interval.
+    if (pacer.nextDeadlineNs == 0 || std::abs(pacer.capHz - capHz) > 0.001f || nowNs >= pacer.nextDeadlineNs)
+    {
+        const float errorMs = pacer.nextDeadlineNs != 0
+                                  ? static_cast<float>(static_cast<double>(nowNs - pacer.nextDeadlineNs) / 1'000'000.0)
+                                  : 0.0f;
+        pacer.nextDeadlineNs = nowNs + intervalNs;
+        pacer.capHz = capHz;
+        g_reprojectionSourceTimingErrorMs.store(errorMs, std::memory_order_relaxed);
+        return;
+    }
+
+    const uint64_t deadlineNs = pacer.nextDeadlineNs;
+    if (const auto res = combined_sleep(static_cast<int64_t>(deadlineNs - nowNs)); res)
+        LOG_ERROR("Reprojection source sleep failed: {}", res);
+    const uint64_t completedNs = get_timestamp();
+    g_reprojectionSourceTimingErrorMs.store(
+        static_cast<float>(static_cast<double>(completedNs - deadlineNs) / 1'000'000.0), std::memory_order_relaxed);
+    pacer.nextDeadlineNs = deadlineNs + intervalNs;
+}
+
+FrameLimit::SourcePacingStats FrameLimit::reprojectionSourcePacingStats()
+{
+    return { g_reprojectionSourceCapHz.load(std::memory_order_relaxed),
+             g_reprojectionSourceTimingErrorMs.load(std::memory_order_relaxed) };
 }
