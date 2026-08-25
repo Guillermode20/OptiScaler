@@ -196,8 +196,11 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect)
     std::memcpy(constants.prevCameraForward, previous.forward, sizeof(previous.forward));
     constants.cameraVFov = current.verticalFov;
     constants.cameraAspect = fallbackAspect;
-    if (constants.mode == 0)
-        constants.mode = 1;
+    // KCD2 currently supplies depth but no trustworthy near/far projection constants. Mode 1 combines
+    // camera/depth with motion vectors and produced severe double-warp wobble/artifacts. Validate the
+    // acquired pose independently in camera rotation-only mode; enable depth only after its projection
+    // convention and near/far values are extracted and verified.
+    constants.mode = 2;
     return current.timestampMs;
 }
 } // namespace Kcd2Camera
