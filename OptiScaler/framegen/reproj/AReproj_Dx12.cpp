@@ -1552,14 +1552,37 @@ void AReproj_Dx12::PresenterMain()
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
         auto maxTimeStep = std::max(0.25f, Config::Instance()->ReprojMaxTimeStep.value_or_default());
         // KCD2's rendered camera path is accurate, but source stalls can leave an anchor 2-3 frames
-        // old. Large rotational extrapolation then feels floaty and amplifies pose discontinuities.
-        // Keep the generic cap for other games; use a conservative KCD2 cap while the source is stalled.
-        if (Kcd2Camera::IsAvailable())
+        // old. A hard displacement cap freezes the image mid-turn (every slot re-renders the same
+        // maximum warp) and then snaps forward on anchor arrival. For KCD2 the cap instead bounds the
+        // warp VELOCITY: each slot may advance at most maxTimeStep frame-units per source frame, so
+        // motion continues smoothly during stalls and catches up gradually.
+        const bool rateLimitedWarp = Kcd2Camera::IsAvailable();
+        if (rateLimitedWarp)
             maxTimeStep = std::min(maxTimeStep, 1.5f);
-        const auto timeStep =
-            std::clamp(static_cast<float>((anchorAgeMs / realPeriodMs) *
-                                          Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f),
-                       0.0f, maxTimeStep);
+        const auto unclampedStep = static_cast<float>((anchorAgeMs / realPeriodMs) *
+                                                      Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f);
+        auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
+        if (rateLimitedWarp)
+        {
+            if (_warpRateFrameId != packet.frameId)
+            {
+                // New anchor: start from its natural age, still within the absolute cap.
+                _warpRateFrameId = packet.frameId;
+                _lastWarpTimeStep = timeStep;
+            }
+            else
+            {
+                // Same anchor: allow the step to grow by at most maxTimeStep frame-units per source
+                // period scaled to the elapsed slot time, so rotation speed stays bounded but nonzero.
+                const double slotDeltaMs = _lastDisplayPresentMs > 0.0
+                                               ? std::clamp(targetDisplayMs - _lastDisplayPresentMs, 1.0,
+                                                            refreshPeriodMs * 4.0)
+                                               : refreshPeriodMs;
+                const float growthAllowance = maxTimeStep * static_cast<float>(slotDeltaMs / realPeriodMs);
+                timeStep = std::min(unclampedStep, _lastWarpTimeStep + growthAllowance);
+                _lastWarpTimeStep = timeStep;
+            }
+        }
 
         if (tSlot)
         {

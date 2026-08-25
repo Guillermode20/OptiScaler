@@ -192,6 +192,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _lastRealFrameTimestamp = 0.0;
     double _realPeriodEmaMs = 0.0;         // smoothed source-frame period used for warp scaling
     double _measuredRefreshPeriodMs = 0.0; // scanout period measured from DXGI_FRAME_STATISTICS
+    uint64_t _warpRateFrameId = 0;         // frame the rate-limited warp step belongs to
+    float _lastWarpTimeStep = 0.0f;        // last dispatched warp step (rate limiting)
     double _displayClockAnchorMs = 0.0;    // MillisecondsNow()-domain estimate of the last reported vblank
     double _lastStatsQueryMs = 0.0;
     UINT64 _lastStatsSyncRefreshCount = 0;
