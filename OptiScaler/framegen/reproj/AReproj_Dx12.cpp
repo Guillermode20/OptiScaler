@@ -1555,10 +1555,10 @@ void AReproj_Dx12::PresenterMain()
         // old. A hard displacement cap freezes the image mid-turn (every slot re-renders the same
         // maximum warp) and then snaps forward on anchor arrival. For KCD2 the cap instead bounds the
         // warp VELOCITY: each slot may advance at most maxTimeStep frame-units per source frame, so
-        // motion continues smoothly during stalls and catches up gradually.
+        // motion continues smoothly during stalls and catches up gradually. The absolute cap keeps the
+        // generic value; only growth is limited, because KCD2's natural per-slot step (age/period with
+        // 16-32ms alternating frames and 27-45ms anchor ages) legitimately exceeds 1.5 in normal play.
         const bool rateLimitedWarp = Kcd2Camera::IsAvailable();
-        if (rateLimitedWarp)
-            maxTimeStep = std::min(maxTimeStep, 1.5f);
         const auto unclampedStep = static_cast<float>((anchorAgeMs / realPeriodMs) *
                                                       Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f);
         auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
