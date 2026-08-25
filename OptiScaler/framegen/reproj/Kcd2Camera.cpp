@@ -113,11 +113,15 @@ void PublishPose(uintptr_t camera)
             return;
 
         g_sequence.fetch_add(1, std::memory_order_acq_rel); // odd: write in progress
-        // Frustum construction can run repeatedly for one rendered view. Do not turn a delayed duplicate
-        // into a zero-motion previous pose; advance history only when the gameplay pose actually changed.
+        // Frustum construction can run repeatedly for one rendered view. Exact duplicates inside the
+        // callback burst must not become a false zero-velocity pair, but a stationary camera still needs
+        // a fresh zero-velocity pair on the next rendered frame or the last nonzero turn delta keeps being
+        // extrapolated as a slow creep. KCD2's capped source frames are ~16.7 ms apart; 8 ms separates
+        // callback bursts without the overly aggressive old 2 ms threshold.
+        constexpr double DISTINCT_FRAME_GAP_MS = 8.0;
         if (g_current.timestampMs <= 0.0)
             g_previous = pose;
-        else if (PoseChanged(g_current, pose))
+        else if (PoseChanged(g_current, pose) || pose.timestampMs - g_current.timestampMs >= DISTINCT_FRAME_GAP_MS)
             g_previous = g_current;
         g_current = pose;
         g_sequence.fetch_add(1, std::memory_order_release); // even: published

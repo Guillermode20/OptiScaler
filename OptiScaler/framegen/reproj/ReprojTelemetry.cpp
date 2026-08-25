@@ -391,6 +391,7 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     std::array<float, TRACE_SLOT_COUNT> rawIntervals {};
     std::array<float, TRACE_SLOT_COUNT> selectedIntervals {};
     std::array<float, TRACE_SLOT_COUNT> ratios {};
+    std::array<float, TRACE_SLOT_COUNT> poseIntervals {};
     std::array<float, TRACE_SLOT_COUNT> anchorAges {};
     std::array<float, TRACE_SLOT_COUNT> unclampedSteps {};
     std::array<float, TRACE_SLOT_COUNT> finalSteps {};
@@ -398,7 +399,8 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     std::array<float, TRACE_SLOT_COUNT> shadowSource {};
 
     size_t nPresent = 0, nWake = 0, nWait = 0, nCmd = 0, nQueue = 0, nGpu = 0, nMargin = 0, nBlock = 0;
-    size_t nRaw = 0, nSelected = 0, nRatio = 0, nAge = 0, nUnclamped = 0, nFinal = 0, nShadowRaw = 0, nShadowSource = 0;
+    size_t nRaw = 0, nSelected = 0, nRatio = 0, nPoseInterval = 0, nAge = 0, nUnclamped = 0, nFinal = 0,
+           nShadowRaw = 0, nShadowSource = 0;
 
     uint32_t scheduled = 0, presented = 0, missed = 0, skippedRep = 0, newAnchor = 0, repeated = 0;
     uint32_t lateWakes = 0, clampCount = 0;
@@ -453,6 +455,9 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
             if (std::isfinite(slot->rawCaptureIntervalMs) && std::isfinite(slot->selectedFrameIntervalMs) &&
                 slot->selectedFrameIntervalMs > 0.0f && nRatio < TRACE_SLOT_COUNT)
                 ratios[nRatio++] = slot->rawCaptureIntervalMs / slot->selectedFrameIntervalMs;
+            if (std::isfinite(slot->poseIntervalMs) && slot->poseIntervalMs > 0.0f &&
+                nPoseInterval < TRACE_SLOT_COUNT)
+                poseIntervals[nPoseInterval++] = slot->poseIntervalMs;
             if (std::isfinite(slot->anchorAgeMs) && nAge < TRACE_SLOT_COUNT)
                 anchorAges[nAge++] = slot->anchorAgeMs;
             if (std::isfinite(slot->unclampedTimeStep) && nUnclamped < TRACE_SLOT_COUNT)
@@ -627,6 +632,8 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.sourceSelectedP95 = Percentile(selectedIntervals, nSelected, 0.95);
     snap.sourceRatioP50 = Percentile(ratios, nRatio, 0.50);
     snap.sourceRatioP95 = Percentile(ratios, nRatio, 0.95);
+    snap.poseIntervalP50 = Percentile(poseIntervals, nPoseInterval, 0.50);
+    snap.poseIntervalP95 = Percentile(poseIntervals, nPoseInterval, 0.95);
     const auto sourcePacing = FrameLimit::reprojectionSourcePacingStats();
     snap.sourceCapHz = sourcePacing.capHz;
     snap.sourceCapTimingErrorMs = sourcePacing.timingErrorMs;
@@ -697,7 +704,7 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
         "anchorAge.p50={:.2f} anchorAge.p95={:.2f} anchorAge.max={:.2f} "
         "step.raw.p50={:.2f} step.raw.p95={:.2f} step.raw.max={:.2f} step.final.p50={:.2f} step.final.p95={:.2f} step.final.max={:.2f} step.clamped={} "
         "camera={}/{} depth={}/{} depthConstants={}/{} hudless={}/{} "
-        "fps={:.1f}",
+        "fps={:.1f} poseInterval.p50={:.2f} poseInterval.p95={:.2f}",
         snap.scheduledSlots, snap.presented, snap.classifiedMisses, snap.legacyMisses, snap.newAnchorOutputs,
         snap.repeatedAnchorOutputs, snap.skippedRepresentedSlots, snap.causeCpu, snap.causeWaitable, snap.causeCapture,
         snap.causeQueue, snap.causeGpu, snap.causePresent, snap.causeClock, snap.causeUnknown, snap.presentIntervalP50,
@@ -711,7 +718,7 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
         snap.anchorAgeP50, snap.anchorAgeP95, snap.anchorAgeMax, snap.unclampedP50, snap.unclampedP95, snap.unclampedMax,
         snap.finalP50, snap.finalP95, snap.finalMax, snap.clampCount, snap.cameraBasisAvailable, snap.scheduledSlots,
         snap.depthAvailable, snap.scheduledSlots, snap.depthConstantsValid, snap.scheduledSlots, snap.hudlessSource,
-        snap.scheduledSlots, snap.displayFps);
+        snap.scheduledSlots, snap.displayFps, snap.poseIntervalP50, snap.poseIntervalP95);
 }
 
 bool ReprojTelemetry::ShouldDumpMiss(const ReprojTelemetrySnapshot& snap) const

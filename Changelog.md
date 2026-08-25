@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.8 (2026-08-25)
+* Stop stationary KCD2 camera extrapolation creep
+
 ## v10.0.0.7 (2026-08-25)
 * Smooth async timewarp pacing and KCD2 camera prediction
 
