@@ -18,6 +18,8 @@ namespace
 constexpr uintptr_t CViewCameraOffset = 0xE8;
 using FrustumBuildFn = uintptr_t(__fastcall*)(uintptr_t camera);
 FrustumBuildFn g_original = nullptr;
+// 0 waits for WHGame.dll, 1 installs, 2 installed, 3 permanent signature/detour failure.
+std::atomic<int> g_initState { 0 };
 std::atomic<uint64_t> g_sequence { 0 };
 
 struct Pose
@@ -128,9 +130,14 @@ bool ReadPoses(Pose& current, Pose& previous)
 
 bool Initialize()
 {
+    if (g_initState.load(std::memory_order_acquire) == 2)
+        return true;
     const auto module = GetModuleHandleW(L"WHGame.dll");
-    if (!module || g_original)
-        return g_original != nullptr;
+    if (!module)
+        return false; // KCD2 loads WHGame.dll after OptiScaler initialization; retry from packet capture.
+    int expected = 0;
+    if (!g_initState.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+        return expected == 2;
 
     static constexpr const char* patterns[] = {
         "48 8B C4 55 53 56 57 41 54 41 55 41 56 41 57 48 8D 68 ? 48 81 EC ? ? 00 00 F3 0F 10 09 48 8B D9",
@@ -144,6 +151,7 @@ bool Initialize()
     if (!address)
     {
         LOG_WARN("KCD2 camera: CCamera::UpdateFrustumPlanes signature not found");
+        g_initState.store(3, std::memory_order_release);
         return false;
     }
 
@@ -156,8 +164,10 @@ bool Initialize()
     {
         LOG_ERROR("KCD2 camera: detour failed: {}", result);
         g_original = nullptr;
+        g_initState.store(3, std::memory_order_release);
         return false;
     }
+    g_initState.store(2, std::memory_order_release);
     LOG_INFO("KCD2 camera: gameplay CView acquisition installed at {:X}", address);
     return true;
 }
@@ -170,6 +180,8 @@ bool IsAvailable()
 
 double ApplyToConstants(RP_Constants& constants, float fallbackAspect)
 {
+    if (g_initState.load(std::memory_order_acquire) == 0)
+        Initialize();
     Pose current, previous;
     if (!ReadPoses(current, previous) || Util::MillisecondsNow() - current.timestampMs > 250.0)
         return 0.0;
