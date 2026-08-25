@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.13 (2026-08-25)
+* Expose smoothing in menu and bypass overlay
+
 ## v10.0.0.12 (2026-08-25)
 * Validated KCD2 far plane (8000) and optional pose smoothing
 

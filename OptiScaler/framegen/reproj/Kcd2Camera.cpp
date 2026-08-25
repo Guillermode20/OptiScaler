@@ -4,6 +4,7 @@
 #include "Logger.h"
 #include "Util.h"
 #include "shaders/reprojection/RP_Common.h"
+#include "menu/menu_common.h"
 #include "scanner/scanner.h"
 #include <detours/detours.h>
 
@@ -49,6 +50,15 @@ struct Pose
 // Seqlock: the render thread writes; game/presenter capture threads read without blocking.
 Pose g_current {};
 Pose g_previous {};
+
+// EMA smoothing state for camera angular velocity (0=off). Lives in the anonymous namespace
+// so the menu-visible reset can clear it.
+float g_smoothedDeltaPos[3] {};
+float g_smoothedDeltaRight[3] {};
+float g_smoothedDeltaUp[3] {};
+float g_smoothedDeltaForward[3] {};
+bool g_smoothingInit = false;
+float g_lastSmoothing = -1.0f;
 
 bool IsFiniteBasis(const Pose& p)
 {
@@ -259,26 +269,29 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     // Optional EMA smoothing on angular velocity to counter pose jitter. 0=off.
     // Smoothed delta replaces the raw (current-previous) used for extrapolation, so
     // high-frequency shake is attenuated at the cost of a few ms of lag.
+    // Bypass while the overlay is visible: the menu cursor must stay raw, and the
+    // background world behind the menu should not accumulate smoothed momentum.
+    if (MenuCommon::IsVisible())
+    {
+        g_smoothingInit = false;
+    }
+    else
     {
         const float rawSmoothing = Config::Instance()->ReprojSmoothing.value_or_default();
         const float smoothing = std::clamp(rawSmoothing, 0.0f, 0.95f);
         if (smoothing > 0.001f)
         {
-            static float smoothedDeltaRight[3] {}, smoothedDeltaUp[3] {}, smoothedDeltaForward[3] {},
-                smoothedDeltaPos[3] {};
-            static bool smoothedInit = false;
-            static float lastSmoothing = -1.0f;
-            if (!smoothedInit || std::abs(smoothing - lastSmoothing) > 0.01f)
+            if (!g_smoothingInit || std::abs(smoothing - g_lastSmoothing) > 0.01f)
             {
                 for (int i = 0; i < 3; ++i)
                 {
-                    smoothedDeltaRight[i] = current.right[i] - previous.right[i];
-                    smoothedDeltaUp[i] = current.up[i] - previous.up[i];
-                    smoothedDeltaForward[i] = current.forward[i] - previous.forward[i];
-                    smoothedDeltaPos[i] = current.position[i] - previous.position[i];
+                    g_smoothedDeltaRight[i] = current.right[i] - previous.right[i];
+                    g_smoothedDeltaUp[i] = current.up[i] - previous.up[i];
+                    g_smoothedDeltaForward[i] = current.forward[i] - previous.forward[i];
+                    g_smoothedDeltaPos[i] = current.position[i] - previous.position[i];
                 }
-                smoothedInit = true;
-                lastSmoothing = smoothing;
+                g_smoothingInit = true;
+                g_lastSmoothing = smoothing;
             }
             else
             {
@@ -290,30 +303,33 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
                     const float dU = current.up[i] - previous.up[i];
                     const float dF = current.forward[i] - previous.forward[i];
                     const float dP = current.position[i] - previous.position[i];
-                    smoothedDeltaRight[i] = smoothedDeltaRight[i] * a + dR * b;
-                    smoothedDeltaUp[i] = smoothedDeltaUp[i] * a + dU * b;
-                    smoothedDeltaForward[i] = smoothedDeltaForward[i] * a + dF * b;
-                    smoothedDeltaPos[i] = smoothedDeltaPos[i] * a + dP * b;
+                    g_smoothedDeltaRight[i] = g_smoothedDeltaRight[i] * a + dR * b;
+                    g_smoothedDeltaUp[i] = g_smoothedDeltaUp[i] * a + dU * b;
+                    g_smoothedDeltaForward[i] = g_smoothedDeltaForward[i] * a + dF * b;
+                    g_smoothedDeltaPos[i] = g_smoothedDeltaPos[i] * a + dP * b;
                 }
             }
             for (int i = 0; i < 3; ++i)
             {
                 constexpr float SMOOTHED_EPS = 1e-6f;
-                // If smoothed delta is tiny, snap to zero to avoid perpetual micro-creep
-                // when the player stops moving (EMA would otherwise decay slowly).
-                if (std::abs(smoothedDeltaRight[i]) < SMOOTHED_EPS)
-                    smoothedDeltaRight[i] = 0.0f;
-                if (std::abs(smoothedDeltaUp[i]) < SMOOTHED_EPS)
-                    smoothedDeltaUp[i] = 0.0f;
-                if (std::abs(smoothedDeltaForward[i]) < SMOOTHED_EPS)
-                    smoothedDeltaForward[i] = 0.0f;
-                if (std::abs(smoothedDeltaPos[i]) < SMOOTHED_EPS)
-                    smoothedDeltaPos[i] = 0.0f;
-                constants.prevCameraRight[i] = current.right[i] - smoothedDeltaRight[i];
-                constants.prevCameraUp[i] = current.up[i] - smoothedDeltaUp[i];
-                constants.prevCameraForward[i] = current.forward[i] - smoothedDeltaForward[i];
-                constants.prevCameraPosition[i] = current.position[i] - smoothedDeltaPos[i];
+                if (std::abs(g_smoothedDeltaRight[i]) < SMOOTHED_EPS)
+                    g_smoothedDeltaRight[i] = 0.0f;
+                if (std::abs(g_smoothedDeltaUp[i]) < SMOOTHED_EPS)
+                    g_smoothedDeltaUp[i] = 0.0f;
+                if (std::abs(g_smoothedDeltaForward[i]) < SMOOTHED_EPS)
+                    g_smoothedDeltaForward[i] = 0.0f;
+                if (std::abs(g_smoothedDeltaPos[i]) < SMOOTHED_EPS)
+                    g_smoothedDeltaPos[i] = 0.0f;
+                constants.prevCameraRight[i] = current.right[i] - g_smoothedDeltaRight[i];
+                constants.prevCameraUp[i] = current.up[i] - g_smoothedDeltaUp[i];
+                constants.prevCameraForward[i] = current.forward[i] - g_smoothedDeltaForward[i];
+                constants.prevCameraPosition[i] = current.position[i] - g_smoothedDeltaPos[i];
             }
+        }
+        else
+        {
+            // Smoothing disabled: ensure next enable re-seeds cleanly.
+            g_smoothingInit = false;
         }
     }
     // KCD2 currently supplies depth but no trustworthy near/far projection constants. Mode 1 combines

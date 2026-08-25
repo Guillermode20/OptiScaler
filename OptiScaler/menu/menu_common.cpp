@@ -3900,6 +3900,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Warp fraction (0.5 = midpoint between real frames)\n"
                        "Scales the adaptive display-deadline warp positions");
 
+        float reprojSmoothing = config->ReprojSmoothing.value_or_default();
+        if (ImGui::SliderFloat("Smoothing##reproj", &reprojSmoothing, 0.0f, 0.95f, "%.2f"))
+            config->ReprojSmoothing = std::clamp(reprojSmoothing, 0.0f, 0.95f);
+        ShowHelpMarker("EMA on KCD2 camera angular velocity (0=off). Counters pose jitter with a few ms lag.\n"
+                       "Bypasses automatically while the overlay is open.");
+
         int maxWarpFrames = config->ReprojMaxWarpFrames.value_or_default();
         if (ImGui::SliderInt("Max warp frames##reproj", &maxWarpFrames, 1, 8))
             config->ReprojMaxWarpFrames = maxWarpFrames;
