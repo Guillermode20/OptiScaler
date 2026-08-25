@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace Kcd2Camera
@@ -29,6 +30,13 @@ struct Pose
     float up[3] {};
     float forward[3] {};
     float verticalFov = 0.0f;
+    // Raw CCamera floats at +0x30..+0x64 (14 floats, stride 4). Stock CryEngine layout:
+    // [0]=fov [1]=width [2]=height [3]=projRatio [4]=pixelAspect
+    // [5..7]=m_edge_nlt xyz (y @0x48 == near plane) [8..10]=m_edge_plt xyz
+    // [11..13]=m_edge_flt xyz (y @0x60 == far plane). KCD2's fork may differ; the raw
+    // block is published so live telemetry can confirm or correct the mapping.
+    static constexpr int PROJECTION_FLOAT_COUNT = 14;
+    float projectionRaw[PROJECTION_FLOAT_COUNT] {};
     double timestampMs = 0.0;
 };
 
@@ -108,6 +116,8 @@ void PublishPose(uintptr_t camera)
             pose.position[i] = matrix[i][3];
         }
         pose.verticalFov = *reinterpret_cast<const float*>(camera + 0x30);
+        std::memcpy(pose.projectionRaw, reinterpret_cast<const float*>(camera + 0x30),
+                    sizeof(float) * PROJECTION_FLOAT_COUNT);
         pose.timestampMs = Util::MillisecondsNow();
         if (!IsFiniteBasis(pose))
             return;
@@ -225,12 +235,47 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     std::memcpy(constants.prevCameraUp, previous.up, sizeof(previous.up));
     std::memcpy(constants.prevCameraForward, previous.forward, sizeof(previous.forward));
     constants.cameraVFov = current.verticalFov;
-    constants.cameraAspect = fallbackAspect;
+    // Prefer the game's own viewport dimensions over the render-target fallback.
+    const auto projWidth = static_cast<int>(current.projectionRaw[1]);
+    const auto projHeight = static_cast<int>(current.projectionRaw[2]);
+    if (projWidth >= 16 && projWidth <= 16384 && projHeight >= 16 && projHeight <= 16384)
+        constants.cameraAspect = static_cast<float>(projWidth) / static_cast<float>(projHeight);
+    else
+        constants.cameraAspect = fallbackAspect;
+    // Near/far candidates from the stock CryEngine CCamera layout. Published into the constants
+    // for telemetry visibility only: mode stays rotation-only until these values are validated
+    // against in-game view distance and clipping behaviour.
+    const float nearCandidate = current.projectionRaw[6]; // m_edge_nlt.y @ +0x48
+    const float farCandidate = current.projectionRaw[12]; // m_edge_flt.y @ +0x60
+    if (std::isfinite(nearCandidate) && nearCandidate > 0.0f && nearCandidate < 100.0f &&
+        std::isfinite(farCandidate) && farCandidate > 100.0f && farCandidate < 200000.0f &&
+        farCandidate > nearCandidate)
+    {
+        constants.cameraNear = nearCandidate;
+        constants.cameraFar = farCandidate;
+    }
     // KCD2 currently supplies depth but no trustworthy near/far projection constants. Mode 1 combines
     // camera/depth with motion vectors and produced severe double-warp wobble/artifacts. Validate the
     // acquired pose independently in camera rotation-only mode; enable depth only after its projection
     // convention and near/far values are extracted and verified.
     constants.mode = 2;
     return current.timestampMs;
+}
+
+bool DescribeProjection(char* buffer, size_t size)
+{
+    if (buffer == nullptr || size == 0)
+        return false;
+    Pose current, previous;
+    if (!ReadPoses(current, previous))
+        return false;
+
+    const auto& r = current.projectionRaw;
+    std::snprintf(buffer, size,
+                  "fov=%.4f dim=%dx%d ratio=%.4f pixA=%.4f | "
+                  "edge_nlt=(%.3f,%.3f,%.3f) edge_plt=(%.3f,%.3f,%.3f) edge_flt=(%.3f,%.3f,%.3f)",
+                  r[0], static_cast<int>(r[1]), static_cast<int>(r[2]), r[3], r[4], r[5], r[6], r[7], r[8], r[9],
+                  r[10], r[11], r[12], r[13]);
+    return true;
 }
 } // namespace Kcd2Camera

@@ -627,6 +627,21 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
+    // Rate-limited raw CCamera projection dump: lets a live session confirm the near/far field
+    // mapping (stock CryEngine layout assumed) against in-game view distance before depth mode
+    // is enabled. Values also land in telemetry slots via packet.constants.cameraNear/Far.
+    if (kcd2CameraTimestamp > 0.0 && Config::Instance()->ReprojTelemetry.value_or_default())
+    {
+        static double lastProjectionLogMs = 0.0;
+        const auto nowLogMs = Util::MillisecondsNow();
+        if (nowLogMs - lastProjectionLogMs > 10000.0)
+        {
+            lastProjectionLogMs = nowLogMs;
+            char projectionDescription[256];
+            if (Kcd2Camera::DescribeProjection(projectionDescription, sizeof(projectionDescription)))
+                LOG_INFO("KCD2 camera projection: {}", projectionDescription);
+        }
+    }
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.

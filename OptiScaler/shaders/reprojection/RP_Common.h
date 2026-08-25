@@ -161,20 +161,22 @@ RWTexture2D<float4> Output  : register(u0);
 
 SamplerState Bilinear : register(s0);
 
-// Standard perspective depth -> view-space Z (positive distance from camera plane).
-// Invalid far planes/depth values are handled by the confidence test below.
+// D3D clip-space convention: d is in [0,1], 0 at the near plane and 1 at the far plane.
+// Returns the positive AXIAL view-space distance along the forward axis.
 float LinearizeDepth(float d, float nearZ, float farZ, uint inverted)
 {
     float z = inverted ? 1.0f - d : d;
-    return (2.0f * nearZ * farZ) / (farZ + nearZ - (2.0f * z - 1.0f) * (farZ - nearZ));
+    return (nearZ * farZ) / (farZ - z * (farZ - nearZ));
 }
 
 float3 ReconstructWorld(float2 ndc, float viewZ,
                         float3 camPos, float3 right, float3 up, float3 forward,
                         float tanHalf, float aspect)
 {
-    float3 viewDir = normalize(right * ndc.x * aspect * tanHalf + up * ndc.y * tanHalf + forward);
-    return camPos + viewDir * viewZ;
+    // viewZ is axial along forward, so scale the unnormalized frustum ray by
+    // t = viewZ / dot(ray, forward) instead of renormalizing the ray.
+    float3 ray = right * ndc.x * aspect * tanHalf + up * ndc.y * tanHalf + forward;
+    return camPos + ray * (viewZ / max(dot(ray, forward), 1.0e-4f));
 }
 
 float3 RotateAxis(float3 v, float3 axis, float angle)

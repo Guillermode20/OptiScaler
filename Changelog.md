@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.9 (2026-08-25)
+* KCD2 CCamera projection extraction and corrected depth-shader math
+
 ## v10.0.0.8 (2026-08-25)
 * Stop stationary KCD2 camera extrapolation creep
 

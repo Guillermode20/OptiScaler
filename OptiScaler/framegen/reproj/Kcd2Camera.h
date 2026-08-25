@@ -16,4 +16,9 @@ bool Initialize();
 double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* poseIntervalMs = nullptr);
 
 bool IsAvailable();
+
+// Human-readable dump of the raw CCamera projection block (0x30..0x64) from the latest pose.
+// Used for live validation of the CryEngine CCamera layout in this retail build. Returns false
+// while no pose has been published yet.
+bool DescribeProjection(char* buffer, size_t size);
 } // namespace Kcd2Camera
