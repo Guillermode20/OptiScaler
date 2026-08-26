@@ -203,6 +203,13 @@ bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
     return true;
 }
 
+bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source, int frameIndex,
+                 D3D12_CPU_DESCRIPTOR_HANDLE* replacementRtv)
+{
+    (void)frameIndex;
+    return TryRedirect(commandList, source, replacementRtv);
+}
+
 void OnEndDisplay()
 {
     std::scoped_lock lock(g_mutex);
