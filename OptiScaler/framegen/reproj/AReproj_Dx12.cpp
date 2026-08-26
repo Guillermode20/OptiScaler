@@ -1199,9 +1199,11 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         if (FAILED(realSwapChain2->SetMaximumFrameLatency(maximumFrameLatency)))
             LOG_WARN("Reproj: failed to set maximum frame latency {}", maximumFrameLatency);
     }
+    else
+    {
+        LOG_INFO("Reproj: present waitable unavailable, using software display clock only");
+    }
     realSwapChain2->Release();
-    if (_presentWaitableObject == nullptr)
-        return false;
 
     D3D12_COMMAND_QUEUE_DESC queueDesc {};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -1301,7 +1303,21 @@ void AReproj_Dx12::StopAsyncPresenter()
 HRESULT AReproj_Dx12::WaitForPresentSlot()
 {
     if (_presentWaitableObject == nullptr)
-        return E_FAIL;
+        return S_OK;
+
+    // Wine's waitable for KCD2 is known to be permanently unsignaled (d3d12core AV
+    // path and VKD3D queue accounting mismatch). Software display clock is
+    // authoritative — don't let a starved waitable stall the presenter.
+    if (State::Instance().isRunningOnLinux)
+    {
+        // Poll without blocking: if the queue has capacity we consume the signal,
+        // otherwise proceed via software pacing. Never block the presenter on
+        // a starved waitable (KCD2: wait=77, display 0 FPS before this fix).
+        const auto waitResult = WaitForSingleObject(_presentWaitableObject, 0);
+        if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_TIMEOUT)
+            return S_OK;
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
 
     const auto refreshHz = TargetRefreshHz();
     const DWORD timeout = refreshHz > 10.0 ? static_cast<DWORD>(1000.0 / refreshHz + 5.0) : 25;
@@ -1313,8 +1329,10 @@ HRESULT AReproj_Dx12::WaitForPresentSlot()
 
 HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot)
 {
-    if (_swapChain == nullptr || _presentWaitableObject == nullptr)
+    if (_swapChain == nullptr)
         return E_FAIL;
+    if (waitForSlot && _presentWaitableObject == nullptr)
+        waitForSlot = false;
 
     // The caller may consume the waitable object before late-latching and dispatch
     // so input is sampled as close to scanout as possible. Never wait both before

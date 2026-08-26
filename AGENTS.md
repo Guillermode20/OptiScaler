@@ -33,7 +33,7 @@ This is an MSVC-only project. It **cannot** be built on a Linux box (no `windows
 Notes:
 - The `Build` (signed) workflow needs a `SIGNPATH_API_TOKEN` secret. Use **"Build (No Signing)"** on forks.
 - `gh` must be authed with `repo` + `workflow` scopes to trigger runs and download artifacts.
-- **Required reprojection workflow:** commit every change, push it, run and wait for **Build (No Signing)**, then install the successful artifact into Deep Rock Galactic for live validation. Do not claim a reprojection change is validated before that game test; ask for its install path if it is not known.
+- **Required reprojection workflow (always): rebuild → reinstall → start KCD2:** commit every change, push it, run and wait for **Build (No Signing)**, then install the successful artifact into KCD2 (DRG as regression) via `scripts/install_latest.py --both` and launch KCD2 for live validation. Do not claim a reprojection change is validated before that game test; ask for its install path if it is not known.
 
 ## Versioning & Release (auto-update)
 
@@ -96,7 +96,7 @@ python scripts/install_latest.py --both --dry-run          # preview
 python scripts/install_latest.py --drg --ref my-feature --repo myfork/OptiScaler
 python scripts/install_latest.py --both --run-id 32769762279  # explicit run
 ```
-It respects `GH_TOKEN`/`gh auth` (`repo`+`workflow`), requires `7z`, and leaves `OptiScaler.ini` untouched (patch `[Reproj] Telemetry` manually or via `scripts/bump_version.py`). For the reprojection workflow always run the full chain: `git push` → `gh workflow run` → `gh run watch` → `python scripts/install_latest.py --both` → launch DRG.
+It respects `GH_TOKEN`/`gh auth` (`repo`+`workflow`), requires `7z`, and leaves `OptiScaler.ini` untouched (patch `[Reproj] Telemetry` manually or via `scripts/bump_version.py`). For the reprojection workflow always run the full chain: `git push` → `gh workflow run` → `gh run watch` → `python scripts/install_latest.py --both` → launch KCD2 (DRG as regression).
 
 ## Config / hotkey
 

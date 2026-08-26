@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.23 (2026-08-26)
+* Reproj: make async waitable optional (KCD2 software pacing)
+
 ## v10.0.0.22 (2026-08-26)
 * Fix Mode 2 camera rotation warp suppression when HudlessSource=0
 

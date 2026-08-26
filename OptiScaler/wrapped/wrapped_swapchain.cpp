@@ -501,9 +501,7 @@ bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
     _reprojectionWaitableObject = _real2->GetFrameLatencyWaitableObject();
     if (_reprojectionWaitableObject == nullptr)
     {
-        device->Release();
-        queue->Release();
-        return false;
+        LOG_INFO("Reproj: waitable object unavailable, virtualization will use software display clock only");
     }
 
     // The game only ever sees (and caches) this many buffers; async keeps an extra real
