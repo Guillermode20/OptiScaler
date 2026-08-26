@@ -84,8 +84,8 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     cmdList->SetComputeRootSignature(_rootSignature);
 
-    // v2 (depth-aware) requires depth; otherwise fall back to the MV-only PSO
-    auto pso = (depth != nullptr && constants.mode != 0) ? _pipelineStateDepth : _pipelineState;
+    // v2 (depth-aware/camera rotation) uses depth pipeline; mode 0 uses MV-only PSO
+    auto pso = (constants.mode == 2 || (depth != nullptr && constants.mode != 0)) ? _pipelineStateDepth : _pipelineState;
     cmdList->SetPipelineState(pso);
 
     cmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());

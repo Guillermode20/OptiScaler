@@ -100,8 +100,6 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         bool covered = pSource.z > 0.0f && all(reprojUV >= 0.0f) && all(reprojUV <= 1.0f);
         float2 edgePixels = min(reprojUV, 1.0f - reprojUV) * float2(DisplaySize);
         float conf = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
-        if (!HudlessSource)
-            conf *= saturate((length(delta) - 0.02f) * 8.0f);
 
         float4 warped = LastColor.SampleLevel(Bilinear, clamp(reprojUV, 0.0f, 1.0f), 0);
         float4 result = lerp(original, warped, Strength * conf);

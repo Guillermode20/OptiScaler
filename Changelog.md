@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.22 (2026-08-26)
+* Fix Mode 2 camera rotation warp suppression when HudlessSource=0
+
 ## v10.0.0.21 (2026-08-26)
 * Fix pitch orientation and make tracked sensitivity atomic in late latch
 
