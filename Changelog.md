@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.16 (2026-08-26)
+* Show KCD2 HUD isolation while Timewarp initializes
+
 ## v10.0.0.15 (2026-08-26)
 * KCD2 stable HUD isolation
 

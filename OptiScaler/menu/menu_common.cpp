@@ -3852,6 +3852,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (state.swapchainApi != API::DX12 && state.swapchainApi != API::NotSelected)
             ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.4f, 0.3f, 1.f)), "Current API: %s (DX12 required)",
                                magic_enum::enum_name(state.swapchainApi).data());
+
+        bool kcd2HudIsolation = config->ReprojKcd2HudIsolation.value_or_default();
+        if (ImGui::Checkbox("KCD2 stable Scaleform HUD##reproj-inactive", &kcd2HudIsolation))
+            config->ReprojKcd2HudIsolation = kcd2HudIsolation;
+        ShowHelpMarker("KCD2 only. Redirects the late Scaleform pass into a transparent texture, then composites it "
+                       "after the warped world. Requires Composite supplied UI once Timewarp becomes active.");
         ImGui::Spacing();
     }
 
