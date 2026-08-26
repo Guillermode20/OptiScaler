@@ -5,6 +5,7 @@
 #include <State.h>
 #include <Util.h>
 #include <framegen/reproj/Kcd2HudIsolation.h>
+#include <framegen/reproj/Kcd2Scaleform.h>
 
 #include <menu/menu_overlay_dx.h>
 
@@ -1203,6 +1204,8 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
         // Valid resource found, update state
         capturedBuffer.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
         capturedBuffer.captureInfo = CaptureInfo::OMSetRTV;
+        ID3D12Resource* traceTarget[] = { capturedBuffer.buffer };
+        Kcd2Scaleform::TraceOmSetRenderTargets(This, 1, traceTarget);
 
         // Check for immediate capture
         bool capturedImmediately = false;

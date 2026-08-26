@@ -599,6 +599,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="proxies\XeSS_Proxy.h" />
     <ClInclude Include="framegen\reproj\Kcd2Camera.h" />
     <ClInclude Include="framegen\reproj\Kcd2HudIsolation.h" />
+    <ClInclude Include="framegen\reproj\Kcd2Scaleform.h" />
     <ClInclude Include="NVNGX_Parameter.h" />
   </ItemGroup>
   <ItemGroup>
@@ -610,6 +611,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="framegen\reproj\AReproj_Dx12.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2Camera.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2HudIsolation.cpp" />
+    <ClCompile Include="framegen\reproj\Kcd2Scaleform.cpp" />
     <ClCompile Include="framegen\reproj\ReprojTelemetry.cpp" />
     <ClCompile Include="framegen\IFGFeature.cpp" />
     <ClCompile Include="framegen\IFGFeature_Dx12.cpp" />

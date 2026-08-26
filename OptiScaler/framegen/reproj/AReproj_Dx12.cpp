@@ -2,6 +2,7 @@
 #include "AReproj_Dx12.h"
 #include "Kcd2Camera.h"
 #include "Kcd2HudIsolation.h"
+#include "Kcd2Scaleform.h"
 
 #include <algorithm>
 #include <bit>
@@ -632,6 +633,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     const auto colorDesc = packet.color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
     double kcd2PoseIntervalMs = 0.0;
+    // Keep the HUD trace lazy: WHGame.dll is loaded after OptiScaler in KCD2. This is read-only
+    // and fails closed on an unknown game build.
+    Kcd2Scaleform::Initialize();
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
