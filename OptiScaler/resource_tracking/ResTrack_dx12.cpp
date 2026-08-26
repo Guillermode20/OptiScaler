@@ -1149,6 +1149,36 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
                                          BOOL RTsSingleHandleToDescriptorRange,
                                          D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
+    // KCD2's Scaleform pass is bracketed by CScaleformPlayback, but it can occur while the
+    // generic HUD detector is intentionally inactive. Trace it before that detector's gate and
+    // never alter the command list or descriptor handles. This establishes whether the UI uses
+    // a normal OM binding, a bundle, or a renderer-private output path.
+    if (Kcd2Scaleform::IsActiveOnThisThread() && NumRenderTargetDescriptors > 0 && pRenderTargetDescriptors != nullptr)
+    {
+        std::array<ID3D12Resource*, 8> traceTargets {};
+        const auto traceCount = std::min<UINT>(NumRenderTargetDescriptors, static_cast<UINT>(traceTargets.size()));
+        for (UINT i = 0; i < traceCount; ++i)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE handle {};
+            std::shared_ptr<HeapInfo> heap;
+            if (RTsSingleHandleToDescriptorRange)
+            {
+                heap = GetHeapByCpuHandleRTV(pRenderTargetDescriptors[0].ptr);
+                if (heap != nullptr)
+                    handle.ptr = pRenderTargetDescriptors[0].ptr + i * heap->increment;
+            }
+            else
+            {
+                handle = pRenderTargetDescriptors[i];
+                heap = GetHeapByCpuHandleRTV(handle.ptr);
+            }
+            ResourceInfo info {};
+            if (heap != nullptr && heap->GetByCpuHandle(handle.ptr, info))
+                traceTargets[i] = info.buffer;
+        }
+        Kcd2Scaleform::TraceOmSetRenderTargets(This, traceCount, traceTargets.data());
+    }
+
     // Consistent early exit validation
     auto shouldTrack = !Config::Instance()->FGHudfixDisableOM.value_or_default() && NumRenderTargetDescriptors > 0 &&
                        pRenderTargetDescriptors != nullptr && IsHudFixActive() && !Hudfix_Dx12::SkipHudlessChecks() &&
@@ -1204,8 +1234,6 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
         // Valid resource found, update state
         capturedBuffer.state = D3D12_RESOURCE_STATE_RENDER_TARGET;
         capturedBuffer.captureInfo = CaptureInfo::OMSetRTV;
-        ID3D12Resource* traceTarget[] = { capturedBuffer.buffer };
-        Kcd2Scaleform::TraceOmSetRenderTargets(This, 1, traceTarget);
 
         // Check for immediate capture
         bool capturedImmediately = false;

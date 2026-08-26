@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.18 (2026-08-26)
+* Trace KCD2 Scaleform OM bindings outside Hudfix gating
+
 ## v10.0.0.17 (2026-08-26)
 * Trace KCD2 Scaleform HUD output targets
 
