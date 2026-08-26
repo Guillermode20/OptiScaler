@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.14 (2026-08-26)
+* Reproj: hudless-only pre-UI capture for KCD2 Scaleform (CaptureHudlessPreUI)
+
 ## v10.0.0.13 (2026-08-25)
 * Expose smoothing in menu and bypass overlay
 

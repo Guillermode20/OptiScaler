@@ -99,6 +99,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12Resource* _uiColor[BUFFER_COUNT] = {}; // sync-path UI capture composited after warping
     D3D12_RESOURCE_STATES _uiColorState[BUFFER_COUNT] = {};
     bool _syncHasUi[BUFFER_COUNT] = {};
+    bool _syncHudlessOnly[BUFFER_COUNT] = {}; // hudless captured without separate UI (KCD2 pre-UI FSR)
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
     bool _forceBorderless = false;
 

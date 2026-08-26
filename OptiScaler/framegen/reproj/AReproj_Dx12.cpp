@@ -181,6 +181,8 @@ bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
     // HUD composition (sync path): warp the HUD-less frame instead of the composed
     // backbuffer so the baked-in HUD is not timewarped; UI is composited after the warp.
     _syncHasUi[fIndex] = false;
+    _syncHudlessOnly[fIndex] = false;
+    bool syncHudlessOnly = false;
     if (Config::Instance()->FGDrawUIOverFG.value_or_default())
     {
         auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
@@ -209,6 +211,22 @@ bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
                     _uiColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
                     _syncHasUi[fIndex] = true;
                 }
+            }
+        }
+        else if (Config::Instance()->ReprojCaptureHudlessPreUI.value_or_default() && hudless &&
+                 IsResourceReady(FG_ResourceType::HudlessColor, fIndex))
+        {
+            const auto& hudlessDesc = hudless->GetResource()->GetDesc();
+            const auto sourceDesc = source->GetDesc();
+            if (hudlessDesc.Width == sourceDesc.Width && hudlessDesc.Height == sourceDesc.Height &&
+                NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(sourceDesc.Format))
+            {
+                ResourceBarrier(cmdList, hudless->GetResource(), hudless->state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                cmdList->CopyResource(_lastColor[fIndex], hudless->GetResource());
+                ResourceBarrier(cmdList, hudless->GetResource(), D3D12_RESOURCE_STATE_COPY_SOURCE, hudless->state);
+                syncHudlessOnly = true;
+                _syncHudlessOnly[fIndex] = true;
+                LOG_DEBUG("Reproj: sync hudless-only pre-UI capture for slot {}", fIndex);
             }
         }
     }
@@ -560,6 +578,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     ID3D12Resource* color = gameBackBuffer;
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
+    bool hudlessOnly = false;
 
     if (Config::Instance()->FGDrawUIOverFG.value_or_default() && hudless && ui &&
         IsResourceReady(FG_ResourceType::HudlessColor, sourceIndex) &&
@@ -573,6 +592,25 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             color = hudless->GetResource();
             colorState = hudless->state;
             packet.hasUi = true;
+        }
+    }
+    else if (Config::Instance()->ReprojCaptureHudlessPreUI.value_or_default() && hudless &&
+             IsResourceReady(FG_ResourceType::HudlessColor, sourceIndex))
+    {
+        // KCD2 Scaleform draws directly to the swapchain; generic hudfix captures the FSR
+        // output (2560x1440 R16G16...) as hudless but never provides a separate UIColor.
+        // When the new flag is set, warp the hudless FSR output directly and skip UI
+        // compositing — world timewarps without ghost, UI will be missing until the
+        // transparent UI extraction lands. Telemetry hudless=0 is expected until then.
+        const auto hudlessDesc = hudless->GetResource()->GetDesc();
+        const auto backBufferDesc = gameBackBuffer->GetDesc();
+        if (hudlessDesc.Width == backBufferDesc.Width && hudlessDesc.Height == backBufferDesc.Height &&
+            NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(backBufferDesc.Format))
+        {
+            color = hudless->GetResource();
+            colorState = hudless->state;
+            hudlessOnly = true;
+            LOG_DEBUG("Reproj: using hudless-only pre-UI FSR capture for packet {}", packetIndex);
         }
     }
 
@@ -620,7 +658,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     _lastRealFrameTimestamp = now;
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
-    packet.constants.hudlessSource = packet.hasUi ? 1u : 0u;
+    packet.constants.hudlessSource = (packet.hasUi || hudlessOnly) ? 1u : 0u;
     const auto colorDesc = packet.color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
     double kcd2PoseIntervalMs = 0.0;
@@ -894,7 +932,7 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     RP_Constants cb {};
     FillConstants(fIndex, cb);
     cb.timeStep = timeStep;
-    cb.hudlessSource = _syncHasUi[fIndex] ? 1u : 0u;
+    cb.hudlessSource = (_syncHasUi[fIndex] || _syncHudlessOnly[fIndex]) ? 1u : 0u;
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
