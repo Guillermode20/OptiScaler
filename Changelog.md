@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.21 (2026-08-26)
+* Fix pitch orientation and make tracked sensitivity atomic in late latch
+
 ## v10.0.0.20 (2026-08-26)
 * Late latch mouse motion for responsive async timewarp
 

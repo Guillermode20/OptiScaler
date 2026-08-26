@@ -422,8 +422,8 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
         const auto yawRight = CombineReprojVec3(right, yawCos, forward, -yawSin);
         const auto yawForward = CombineReprojVec3(forward, yawCos, right, yawSin);
         predictedRight = NormalizeReprojVec3(yawRight);
-        predictedUp = NormalizeReprojVec3(CombineReprojVec3(up, pitchCos, yawForward, pitchSin));
-        predictedForward = NormalizeReprojVec3(CombineReprojVec3(yawForward, pitchCos, up, -pitchSin));
+        predictedUp = NormalizeReprojVec3(CombineReprojVec3(up, pitchCos, yawForward, -pitchSin));
+        predictedForward = NormalizeReprojVec3(CombineReprojVec3(yawForward, pitchCos, up, pitchSin));
     }
     else
     {
@@ -458,10 +458,12 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
 
     float sensX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
     float sensY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();
+    const float trackedX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
+    const float trackedY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
     if (sensX <= 0.0f)
-        sensX = _trackedMouseSensitivityX > 1e-5f ? _trackedMouseSensitivityX : 0.001f;
+        sensX = trackedX > 1e-5f ? trackedX : 0.001f;
     if (sensY <= 0.0f)
-        sensY = _trackedMouseSensitivityY > 1e-5f ? _trackedMouseSensitivityY : 0.001f;
+        sensY = trackedY > 1e-5f ? trackedY : 0.001f;
 
     double yaw = deltaX * sensX;
     double pitch = -deltaY * sensY;
@@ -490,8 +492,8 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
     const auto dot = [](const float* a, const float* b) { return a[0] * a[0] + a[1] * a[1] + a[2] * a[2]; };
     const auto yaw = std::atan2(dot(_cameraForward[sourceIndex], _cameraRight[prevIndex]),
                                 dot(_cameraForward[sourceIndex], _cameraForward[prevIndex]));
-    const auto pitch = -std::atan2(dot(_cameraForward[sourceIndex], _cameraUp[prevIndex]),
-                                   dot(_cameraForward[sourceIndex], _cameraForward[prevIndex]));
+    const auto pitch = std::atan2(dot(_cameraForward[sourceIndex], _cameraUp[prevIndex]),
+                                  dot(_cameraForward[sourceIndex], _cameraForward[prevIndex]));
 
     OptiInput::RefreshMouseMotion();
     const auto currentMouse = OptiInput::GetRawMouseMotion();
@@ -505,25 +507,27 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
             const float measuredSensX = static_cast<float>(std::abs(yaw) / std::abs(dX));
             if (measuredSensX > 1e-5f && measuredSensX < 0.01f)
             {
-                if (!_hasTrackedMouseSensitivity)
+                if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed))
                 {
-                    _trackedMouseSensitivityX = measuredSensX;
-                    _trackedMouseSensitivityY = measuredSensX;
-                    _hasTrackedMouseSensitivity = true;
+                    _trackedMouseSensitivityX.store(measuredSensX, std::memory_order_relaxed);
+                    _trackedMouseSensitivityY.store(measuredSensX, std::memory_order_relaxed);
+                    _hasTrackedMouseSensitivity.store(true, std::memory_order_relaxed);
                 }
                 else
                 {
-                    _trackedMouseSensitivityX = _trackedMouseSensitivityX * 0.9f + measuredSensX * 0.1f;
+                    const float oldX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
+                    _trackedMouseSensitivityX.store(oldX * 0.9f + measuredSensX * 0.1f, std::memory_order_relaxed);
                 }
             }
         }
 
-        if (std::abs(dY) >= 4.0 && std::abs(pitch) > 1e-4 && (dY * pitch > 0.0))
+        if (std::abs(dY) >= 4.0 && std::abs(pitch) > 1e-4 && (-dY * pitch > 0.0))
         {
             const float measuredSensY = static_cast<float>(std::abs(pitch) / std::abs(dY));
             if (measuredSensY > 1e-5f && measuredSensY < 0.01f)
             {
-                _trackedMouseSensitivityY = _trackedMouseSensitivityY * 0.9f + measuredSensY * 0.1f;
+                const float oldY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
+                _trackedMouseSensitivityY.store(oldY * 0.9f + measuredSensY * 0.1f, std::memory_order_relaxed);
             }
         }
     }
