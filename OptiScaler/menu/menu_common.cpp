@@ -3939,6 +3939,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("In async mode, warp the supplied HUDless world image, then composite the game's UI in screen "
                        "space.\nFalls back to warping the full backbuffer when either resource is missing.");
 
+        bool kcd2HudIsolation = config->ReprojKcd2HudIsolation.value_or_default();
+        if (ImGui::Checkbox("KCD2 stable Scaleform HUD##reproj", &kcd2HudIsolation))
+        {
+            config->ReprojKcd2HudIsolation = kcd2HudIsolation;
+            state.fgChanged = true;
+        }
+        ShowHelpMarker("KCD2 only. Redirects the late Scaleform pass into a transparent texture, then composites it "
+                       "after the warped world. Requires Composite supplied UI.");
+
         bool reprojInvertMV = config->ReprojInvertMV.value_or_default();
         if (ImGui::Checkbox("Invert motion vectors##reproj", &reprojInvertMV))
             config->ReprojInvertMV = reprojInvertMV;

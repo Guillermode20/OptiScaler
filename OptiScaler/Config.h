@@ -634,7 +634,9 @@ class Config
     CustomOptional<float> ReprojSmoothing { 0.0f }; // 0=off, 0..0.95 EMA on camera angular velocity
     CustomOptional<bool> ReprojTelemetry { false };
     CustomOptional<bool> ReprojTelemetryMissDump { false };
-    CustomOptional<bool> ReprojCaptureHudlessPreUI { false }; // KCD2 pre-UI copy before Scaleform
+    // Experimental, version-sensitive KCD2 late-UI interception.  It remains
+    // opt-in until a retail build has been live-validated.
+    CustomOptional<bool> ReprojKcd2HudIsolation { false };
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

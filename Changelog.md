@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.15 (2026-08-26)
+* KCD2 stable HUD isolation
+
 ## v10.0.0.14 (2026-08-26)
 * Reproj: hudless-only pre-UI capture for KCD2 Scaleform (CaptureHudlessPreUI)
 

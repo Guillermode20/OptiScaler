@@ -4,6 +4,7 @@
 #include <Config.h>
 #include <State.h>
 #include <Util.h>
+#include <framegen/reproj/Kcd2HudIsolation.h>
 
 #include <menu/menu_overlay_dx.h>
 
@@ -1251,8 +1252,38 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
         }
     }
 
-    o_OMSetRenderTargets(This, NumRenderTargetDescriptors, pRenderTargetDescriptors, RTsSingleHandleToDescriptorRange,
-                         pDepthStencilDescriptor);
+    // KCD2 renders its Scaleform HUD late into the current virtual backbuffer.
+    // Once hudfix has captured the pre-UI world, route only that virtual buffer
+    // to the private transparent UI target.  Keep the caller's descriptor array
+    // immutable and leave MRT passes larger than our small fixed stack untouched.
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> replacementRtvs {};
+    bool replaced = NumRenderTargetDescriptors <= replacementRtvs.size();
+    if (replaced)
+    {
+        for (UINT i = 0; i < NumRenderTargetDescriptors; ++i)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE handle {};
+            std::shared_ptr<HeapInfo> heap;
+            if (RTsSingleHandleToDescriptorRange)
+            {
+                heap = GetHeapByCpuHandleRTV(pRenderTargetDescriptors[0].ptr);
+                if (heap != nullptr)
+                    handle.ptr = pRenderTargetDescriptors[0].ptr + i * heap->increment;
+            }
+            else
+            {
+                handle = pRenderTargetDescriptors[i];
+                heap = GetHeapByCpuHandleRTV(handle.ptr);
+            }
+            replacementRtvs[i] = handle;
+            ResourceInfo info {};
+            if (heap != nullptr && heap->GetByCpuHandle(handle.ptr, info))
+                Kcd2HudIsolation::TryRedirect(This, info.buffer, (int) fIndex, &replacementRtvs[i]);
+        }
+    }
+
+    o_OMSetRenderTargets(This, NumRenderTargetDescriptors,
+                         replaced ? replacementRtvs.data() : pRenderTargetDescriptors, FALSE, pDepthStencilDescriptor);
 }
 
 #pragma endregion

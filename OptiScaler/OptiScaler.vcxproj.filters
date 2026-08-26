@@ -812,6 +812,9 @@
     <ClInclude Include="framegen\reproj\Kcd2Camera.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\reproj\Kcd2HudIsolation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="NVNGX_Parameter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1194,6 +1197,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\reproj\Kcd2Camera.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="framegen\reproj\Kcd2HudIsolation.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\reproj\ReprojTelemetry.cpp">

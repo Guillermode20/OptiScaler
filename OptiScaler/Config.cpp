@@ -204,7 +204,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojSmoothing.set_from_config(readFloat("Reproj", "Smoothing"));
             ReprojTelemetry.set_from_config(readBool("Reproj", "Telemetry"));
             ReprojTelemetryMissDump.set_from_config(readBool("Reproj", "TelemetryMissDump"));
-            ReprojCaptureHudlessPreUI.set_from_config(readBool("Reproj", "CaptureHudlessPreUI"));
+            ReprojKcd2HudIsolation.set_from_config(readBool("Reproj", "Kcd2HudIsolation"));
         }
 
         // OptiFG
@@ -1054,8 +1054,8 @@ bool Config::SaveIni()
         ini.SetValue("Reproj", "Telemetry", GetBoolValue(Instance()->ReprojTelemetry.value_for_config()).c_str());
         ini.SetValue("Reproj", "TelemetryMissDump",
                      GetBoolValue(Instance()->ReprojTelemetryMissDump.value_for_config()).c_str());
-        ini.SetValue("Reproj", "CaptureHudlessPreUI",
-                     GetBoolValue(Instance()->ReprojCaptureHudlessPreUI.value_for_config()).c_str());
+        ini.SetValue("Reproj", "Kcd2HudIsolation",
+                     GetBoolValue(Instance()->ReprojKcd2HudIsolation.value_for_config()).c_str());
     }
 
     // XeFG output

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Hudfix_Dx12.h"
+#include <framegen/reproj/Kcd2HudIsolation.h>
 
 #include <Util.h>
 #include <State.h>
@@ -456,6 +457,11 @@ void Hudfix_Dx12::HudlessFound(ID3D12GraphicsCommandList* cmdList)
 
     // Increase counter
     _fgCounter = _upscaleCounter;
+
+    // KCD2's HUD is submitted after this HUD-less capture.  Arm the D3D12
+    // output-target redirect for this exact frame; it remains a no-op in every
+    // other game and when reprojection/UI composition is disabled.
+    Kcd2HudIsolation::ArmForFrame(index);
 
     _skipHudlessChecks = false;
 }
