@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Kcd2Scaleform.h"
+#include "Kcd2HudIsolation.h"
 
 #include "Logger.h"
 #include <detours/detours.h>
@@ -147,7 +148,11 @@ void __fastcall EndDisplayHook(void* playback)
     g_endOriginal(playback);
     const auto sequence = g_endCount.fetch_add(1, std::memory_order_relaxed) + 1;
     if (g_displayDepth > 0)
+    {
         --g_displayDepth;
+        if (g_displayDepth == 0)
+            Kcd2HudIsolation::OnEndDisplay();
+    }
     if (g_loggedScopes <= 4)
         LOG_INFO("KCD2 Scaleform trace: end #{} playback={:X} depth={}", sequence, reinterpret_cast<size_t>(playback),
                  g_displayDepth);

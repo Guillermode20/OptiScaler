@@ -1156,7 +1156,10 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
     if (Kcd2Scaleform::IsActiveOnThisThread() && NumRenderTargetDescriptors > 0 && pRenderTargetDescriptors != nullptr)
     {
         std::array<ID3D12Resource*, 8> traceTargets {};
+        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> replacementRtvs {};
         const auto traceCount = std::min<UINT>(NumRenderTargetDescriptors, static_cast<UINT>(traceTargets.size()));
+        bool anyRedirected = false;
+
         for (UINT i = 0; i < traceCount; ++i)
         {
             D3D12_CPU_DESCRIPTOR_HANDLE handle {};
@@ -1172,11 +1175,26 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
                 handle = pRenderTargetDescriptors[i];
                 heap = GetHeapByCpuHandleRTV(handle.ptr);
             }
+            replacementRtvs[i] = handle;
             ResourceInfo info {};
             if (heap != nullptr && heap->GetByCpuHandle(handle.ptr, info))
+            {
                 traceTargets[i] = info.buffer;
+                if (Config::Instance()->ReprojKcd2HudIsolation.value_or_default() ||
+                    Config::Instance()->FGDrawUIOverFG.value_or_default())
+                {
+                    if (Kcd2HudIsolation::TryRedirect(This, info.buffer, &replacementRtvs[i]))
+                        anyRedirected = true;
+                }
+            }
         }
         Kcd2Scaleform::TraceOmSetRenderTargets(This, traceCount, traceTargets.data());
+
+        if (anyRedirected)
+        {
+            o_OMSetRenderTargets(This, NumRenderTargetDescriptors, replacementRtvs.data(), FALSE, pDepthStencilDescriptor);
+            return;
+        }
     }
 
     // Consistent early exit validation

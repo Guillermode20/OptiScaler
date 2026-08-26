@@ -187,22 +187,32 @@ bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
     if (Config::Instance()->FGDrawUIOverFG.value_or_default())
     {
         auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
+        D3D12_RESOURCE_STATES kcd2HudlessState {};
+        auto* kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(source, &kcd2HudlessState);
+        if (!kcd2Hudless)
+            kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(fIndex, &kcd2HudlessState);
+        auto* hudlessResource = hudless ? hudless->GetResource() : kcd2Hudless;
+        const auto hudlessState = hudless ? hudless->state : kcd2HudlessState;
+        const bool hudlessReady = hudless ? IsResourceReady(FG_ResourceType::HudlessColor, fIndex) : kcd2Hudless != nullptr;
+
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
         D3D12_RESOURCE_STATES kcd2UiState {};
-        auto* kcd2Ui = Kcd2HudIsolation::GetUIColor(fIndex, &kcd2UiState);
+        auto* kcd2Ui = Kcd2HudIsolation::GetUIColor(source, &kcd2UiState);
+        if (!kcd2Ui)
+            kcd2Ui = Kcd2HudIsolation::GetUIColor(fIndex, &kcd2UiState);
         auto* uiResource = ui ? ui->GetResource() : kcd2Ui;
         const auto uiState = ui ? ui->state : kcd2UiState;
         const bool uiReady = ui ? IsResourceReady(FG_ResourceType::UIColor, fIndex) : kcd2Ui != nullptr;
-        if (hudless && uiResource && IsResourceReady(FG_ResourceType::HudlessColor, fIndex) && uiReady)
+        if (hudlessResource && uiResource && hudlessReady && uiReady)
         {
-            const auto& hudlessDesc = hudless->GetResource()->GetDesc();
+            const auto& hudlessDesc = hudlessResource->GetDesc();
             const auto sourceDesc = source->GetDesc();
             if (hudlessDesc.Width == sourceDesc.Width && hudlessDesc.Height == sourceDesc.Height &&
                 NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(sourceDesc.Format))
             {
-                ResourceBarrier(cmdList, hudless->GetResource(), hudless->state, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                cmdList->CopyResource(_lastColor[fIndex], hudless->GetResource());
-                ResourceBarrier(cmdList, hudless->GetResource(), D3D12_RESOURCE_STATE_COPY_SOURCE, hudless->state);
+                ResourceBarrier(cmdList, hudlessResource, hudlessState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                cmdList->CopyResource(_lastColor[fIndex], hudlessResource);
+                ResourceBarrier(cmdList, hudlessResource, D3D12_RESOURCE_STATE_COPY_SOURCE, hudlessState);
 
                 if (CreateBufferResource(_device, uiResource, D3D12_RESOURCE_STATE_COPY_DEST, &_uiColor[fIndex],
                                          false, false))
@@ -679,9 +689,19 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
 
     auto depth = GetResource(FG_ResourceType::Depth, sourceIndex);
     auto hudless = GetResource(FG_ResourceType::HudlessColor, sourceIndex);
+    D3D12_RESOURCE_STATES kcd2HudlessState {};
+    auto* kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(gameBackBuffer, &kcd2HudlessState);
+    if (!kcd2Hudless)
+        kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(sourceIndex, &kcd2HudlessState);
+    auto* hudlessResource = hudless ? hudless->GetResource() : kcd2Hudless;
+    const auto hudlessState = hudless ? hudless->state : kcd2HudlessState;
+    const bool hudlessReady = hudless ? IsResourceReady(FG_ResourceType::HudlessColor, sourceIndex) : kcd2Hudless != nullptr;
+
     auto ui = GetResource(FG_ResourceType::UIColor, sourceIndex);
     D3D12_RESOURCE_STATES kcd2UiState {};
-    auto* kcd2Ui = Kcd2HudIsolation::GetUIColor(sourceIndex, &kcd2UiState);
+    auto* kcd2Ui = Kcd2HudIsolation::GetUIColor(gameBackBuffer, &kcd2UiState);
+    if (!kcd2Ui)
+        kcd2Ui = Kcd2HudIsolation::GetUIColor(sourceIndex, &kcd2UiState);
     auto* uiResource = ui ? ui->GetResource() : kcd2Ui;
     const auto uiState = ui ? ui->state : kcd2UiState;
     const bool uiReady = ui ? IsResourceReady(FG_ResourceType::UIColor, sourceIndex) : kcd2Ui != nullptr;
@@ -690,16 +710,16 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
 
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default() && hudless && uiResource &&
-        IsResourceReady(FG_ResourceType::HudlessColor, sourceIndex) && uiReady)
+    if (Config::Instance()->FGDrawUIOverFG.value_or_default() && hudlessResource && uiResource &&
+        hudlessReady && uiReady)
     {
-        const auto hudlessDesc = hudless->GetResource()->GetDesc();
+        const auto hudlessDesc = hudlessResource->GetDesc();
         const auto backBufferDesc = gameBackBuffer->GetDesc();
         if (hudlessDesc.Width == backBufferDesc.Width && hudlessDesc.Height == backBufferDesc.Height &&
             NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(backBufferDesc.Format))
         {
-            color = hudless->GetResource();
-            colorState = hudless->state;
+            color = hudlessResource;
+            colorState = hudlessState;
             packet.hasUi = true;
         }
     }

@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.24 (2026-08-26)
+* Reproj: implement KCD2 Scaleform world snapshot, UI redirection, and post-warp composition
+
 ## v10.0.0.23 (2026-08-26)
 * Reproj: make async waitable optional (KCD2 software pacing)
 
