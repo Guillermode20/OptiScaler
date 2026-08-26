@@ -86,6 +86,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
         UINT syncInterval = 0;
         UINT presentFlags = 0;
+        int64_t sourceMouseX = 0;
+        int64_t sourceMouseY = 0;
+        double sourceMouseTimestamp = 0.0;
+        bool inputLatchReady = false;
         bool hasDepth = false;
         bool hasCamera = false;
         bool hasUi = false;
@@ -140,6 +144,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
     void FillConstants(int fIndex, RP_Constants& constants);
+    bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet);
+    void UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp);
     int AcquirePacket();
     void RetirePackets();
     uint32_t PacketQueueDepth() const;
@@ -199,6 +205,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _lastStatsQueryMs = 0.0;
     UINT64 _lastStatsSyncRefreshCount = 0;
     LONGLONG _lastStatsSyncQpc = 0;
+    double _lastCapturedMouseTimestamp = 0.0;
+    int64_t _lastCapturedMouseX = 0;
+    int64_t _lastCapturedMouseY = 0;
+    float _trackedMouseSensitivityX = 0.001f;
+    float _trackedMouseSensitivityY = 0.001f;
+    bool _hasTrackedMouseSensitivity = false;
   protected:
     void ReleaseObjects() override final;
     void CreateObjects(ID3D12Device* InDevice) override final;

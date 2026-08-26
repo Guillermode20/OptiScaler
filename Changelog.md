@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.20 (2026-08-26)
+* Late latch mouse motion for responsive async timewarp
+
 ## v10.0.0.19 (2026-08-26)
 * Reproj: initialize KCD2 Scaleform trace in sync reprojection
 

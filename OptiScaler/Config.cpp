@@ -202,6 +202,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojCenterCropDebug.set_from_config(readBool("Reproj", "CenterCropDebug"));
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
             ReprojSmoothing.set_from_config(readFloat("Reproj", "Smoothing"));
+            ReprojLateLatch.set_from_config(readBool("Reproj", "LateLatch"));
+            ReprojMouseSensitivityX.set_from_config(readFloat("Reproj", "MouseSensitivityX"));
+            ReprojMouseSensitivityY.set_from_config(readFloat("Reproj", "MouseSensitivityY"));
             ReprojTelemetry.set_from_config(readBool("Reproj", "Telemetry"));
             ReprojTelemetryMissDump.set_from_config(readBool("Reproj", "TelemetryMissDump"));
             ReprojKcd2HudIsolation.set_from_config(readBool("Reproj", "Kcd2HudIsolation"));
@@ -1051,6 +1054,11 @@ bool Config::SaveIni()
         ini.SetValue("Reproj", "ForceBorderless",
                      GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());
         ini.SetValue("Reproj", "Smoothing", GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
+        ini.SetValue("Reproj", "LateLatch", GetBoolValue(Instance()->ReprojLateLatch.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MouseSensitivityX",
+                     GetFloatValue(Instance()->ReprojMouseSensitivityX.value_for_config()).c_str());
+        ini.SetValue("Reproj", "MouseSensitivityY",
+                     GetFloatValue(Instance()->ReprojMouseSensitivityY.value_for_config()).c_str());
         ini.SetValue("Reproj", "Telemetry", GetBoolValue(Instance()->ReprojTelemetry.value_for_config()).c_str());
         ini.SetValue("Reproj", "TelemetryMissDump",
                      GetBoolValue(Instance()->ReprojTelemetryMissDump.value_for_config()).c_str());

@@ -387,6 +387,12 @@ ReprojVec3 ExtrapolateReprojVec3(ReprojVec3 previous, ReprojVec3 current, float 
                                  previous.z + (current.z - previous.z) * scale });
 }
 
+ReprojVec3 CombineReprojVec3(ReprojVec3 first, float firstScale, ReprojVec3 second, float secondScale)
+{
+    return { first.x * firstScale + second.x * secondScale, first.y * firstScale + second.y * secondScale,
+             first.z * firstScale + second.z * secondScale };
+}
+
 void StoreReprojVec3(float* target, ReprojVec3 value)
 {
     target[0] = value.x;
@@ -394,7 +400,8 @@ void StoreReprojVec3(float* target, ReprojVec3 value)
     target[2] = value.z;
 }
 
-void PrepareRotationConstants(RP_Constants& constants)
+void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false, float lateYaw = 0.0f,
+                              float latePitch = 0.0f)
 {
     if (constants.mode != 2)
         return;
@@ -406,10 +413,25 @@ void PrepareRotationConstants(RP_Constants& constants)
     ReprojVec3 predictedUp {};
     ReprojVec3 predictedForward {};
 
-    const float scale = 1.0f + constants.timeStep;
-    predictedRight = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraRight), right, scale);
-    predictedUp = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraUp), up, scale);
-    predictedForward = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraForward), forward, scale);
+    if (inputLatched)
+    {
+        const float yawSin = std::sin(lateYaw);
+        const float yawCos = std::cos(lateYaw);
+        const float pitchSin = std::sin(latePitch);
+        const float pitchCos = std::cos(latePitch);
+        const auto yawRight = CombineReprojVec3(right, yawCos, forward, -yawSin);
+        const auto yawForward = CombineReprojVec3(forward, yawCos, right, yawSin);
+        predictedRight = NormalizeReprojVec3(yawRight);
+        predictedUp = NormalizeReprojVec3(CombineReprojVec3(up, pitchCos, yawForward, pitchSin));
+        predictedForward = NormalizeReprojVec3(CombineReprojVec3(yawForward, pitchCos, up, -pitchSin));
+    }
+    else
+    {
+        const float scale = 1.0f + constants.timeStep;
+        predictedRight = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraRight), right, scale);
+        predictedUp = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraUp), up, scale);
+        predictedForward = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraForward), forward, scale);
+    }
 
     StoreReprojVec3(constants.prevCameraRight,
                     ReprojTransformRow(right, predictedRight, predictedUp, predictedForward));
@@ -419,6 +441,97 @@ void PrepareRotationConstants(RP_Constants& constants)
     constants.cameraVFov = std::tan(constants.cameraVFov * 0.5f);
 }
 } // namespace
+
+bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet)
+{
+    if (!Config::Instance()->ReprojLateLatch.value_or_default())
+        return false;
+
+    if (!packet.inputLatchReady || constants.mode != 2)
+        return false;
+
+    OptiInput::RefreshMouseMotion();
+    const auto current = OptiInput::GetRawMouseMotion();
+
+    const double deltaX = static_cast<double>(current.TotalX - packet.sourceMouseX);
+    const double deltaY = static_cast<double>(current.TotalY - packet.sourceMouseY);
+
+    float sensX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
+    float sensY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();
+    if (sensX <= 0.0f)
+        sensX = _trackedMouseSensitivityX > 1e-5f ? _trackedMouseSensitivityX : 0.001f;
+    if (sensY <= 0.0f)
+        sensY = _trackedMouseSensitivityY > 1e-5f ? _trackedMouseSensitivityY : 0.001f;
+
+    double yaw = deltaX * sensX;
+    double pitch = -deltaY * sensY;
+
+    if (!std::isfinite(yaw) || !std::isfinite(pitch))
+        return false;
+
+    constexpr double maxRotation = 0.35;
+    const double rotation = std::hypot(yaw, pitch);
+    if (rotation > maxRotation)
+    {
+        yaw *= maxRotation / rotation;
+        pitch *= maxRotation / rotation;
+    }
+
+    PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch));
+    return true;
+}
+
+void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp)
+{
+    const auto prevIndex = (sourceIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    if (_reset[sourceIndex] || _reset[prevIndex] || IsCameraAllZero(sourceIndex) || IsCameraAllZero(prevIndex))
+        return;
+
+    const auto dot = [](const float* a, const float* b) { return a[0] * a[0] + a[1] * a[1] + a[2] * a[2]; };
+    const auto yaw = std::atan2(dot(_cameraForward[sourceIndex], _cameraRight[prevIndex]),
+                                dot(_cameraForward[sourceIndex], _cameraForward[prevIndex]));
+    const auto pitch = -std::atan2(dot(_cameraForward[sourceIndex], _cameraUp[prevIndex]),
+                                   dot(_cameraForward[sourceIndex], _cameraForward[prevIndex]));
+
+    OptiInput::RefreshMouseMotion();
+    const auto currentMouse = OptiInput::GetRawMouseMotion();
+    if (_lastCapturedMouseTimestamp > 0.0 && sourcePoseTimestamp > _lastCapturedMouseTimestamp)
+    {
+        const double dX = static_cast<double>(currentMouse.TotalX - _lastCapturedMouseX);
+        const double dY = static_cast<double>(currentMouse.TotalY - _lastCapturedMouseY);
+
+        if (std::abs(dX) >= 4.0 && std::abs(yaw) > 1e-4 && (dX * yaw > 0.0))
+        {
+            const float measuredSensX = static_cast<float>(std::abs(yaw) / std::abs(dX));
+            if (measuredSensX > 1e-5f && measuredSensX < 0.01f)
+            {
+                if (!_hasTrackedMouseSensitivity)
+                {
+                    _trackedMouseSensitivityX = measuredSensX;
+                    _trackedMouseSensitivityY = measuredSensX;
+                    _hasTrackedMouseSensitivity = true;
+                }
+                else
+                {
+                    _trackedMouseSensitivityX = _trackedMouseSensitivityX * 0.9f + measuredSensX * 0.1f;
+                }
+            }
+        }
+
+        if (std::abs(dY) >= 4.0 && std::abs(pitch) > 1e-4 && (dY * pitch > 0.0))
+        {
+            const float measuredSensY = static_cast<float>(std::abs(pitch) / std::abs(dY));
+            if (measuredSensY > 1e-5f && measuredSensY < 0.01f)
+            {
+                _trackedMouseSensitivityY = _trackedMouseSensitivityY * 0.9f + measuredSensY * 0.1f;
+            }
+        }
+    }
+
+    _lastCapturedMouseX = currentMouse.TotalX;
+    _lastCapturedMouseY = currentMouse.TotalY;
+    _lastCapturedMouseTimestamp = sourcePoseTimestamp;
+}
 
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 {
@@ -663,6 +776,13 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.hasCamera = packet.constants.mode != 0;
     if (!packet.hasDepth && !packet.hasCamera)
         packet.constants.mode = 0;
+    OptiInput::RefreshMouseMotion();
+    const auto mouse = OptiInput::GetRawMouseMotion();
+    packet.sourceMouseX = mouse.TotalX;
+    packet.sourceMouseY = mouse.TotalY;
+    packet.sourceMouseTimestamp = sourceTimestamp > 0.0 ? sourceTimestamp : mouse.TimestampMs;
+    packet.inputLatchReady = true;
+    UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
     packet.warpAllowed = warpAllowed && velocity;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
@@ -788,7 +908,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
-    PrepareRotationConstants(constants);
+    if (!ApplyLateInput(constants, packet))
+        PrepareRotationConstants(constants);
     const bool useDepth = packet.hasDepth;
     const bool ok =
         _warp->Dispatch(cmdList, packet.color, packet.colorState, packet.velocity, packet.velocityState,

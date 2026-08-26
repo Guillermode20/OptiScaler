@@ -632,6 +632,9 @@ class Config
     CustomOptional<bool> ReprojCenterCropDebug { false }; // show only central 50% of the viewport
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
     CustomOptional<float> ReprojSmoothing { 0.0f }; // 0=off, 0..0.95 EMA on camera angular velocity
+    CustomOptional<bool> ReprojLateLatch { true };  // sample mouse motion at scanout to timewarp with zero input lag
+    CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
+    CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<bool> ReprojTelemetry { false };
     CustomOptional<bool> ReprojTelemetryMissDump { false };
     // Experimental, version-sensitive KCD2 late-UI interception.  It remains

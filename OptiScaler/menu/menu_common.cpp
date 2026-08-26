@@ -1,4 +1,4 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "menu_common.h"
 
 #include "input/input_system.h"
@@ -3953,6 +3953,26 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
         ShowHelpMarker("KCD2 only. Redirects the late Scaleform pass into a transparent texture, then composites it "
                        "after the warped world. Requires Composite supplied UI.");
+
+        bool reprojLateLatch = config->ReprojLateLatch.value_or_default();
+        if (ImGui::Checkbox("Late latch mouse motion##reproj", &reprojLateLatch))
+            config->ReprojLateLatch = reprojLateLatch;
+        ShowHelpMarker("Sample raw mouse motion at presenter scanout to timewarp the image with zero input lag.");
+
+        if (reprojLateLatch)
+        {
+            ImGui::PushItemWidth(135.0f * menuResScale);
+            float mouseSensX = config->ReprojMouseSensitivityX.value_or_default();
+            if (ImGui::InputFloat("Mouse sens X##reproj", &mouseSensX, 0.0001f, 0.001f, "%.5f"))
+                config->ReprojMouseSensitivityX = std::max(0.0f, mouseSensX);
+            ShowHelpMarker("Radians per count; 0 = auto-tracked from rendered frames");
+
+            float mouseSensY = config->ReprojMouseSensitivityY.value_or_default();
+            if (ImGui::InputFloat("Mouse sens Y##reproj", &mouseSensY, 0.0001f, 0.001f, "%.5f"))
+                config->ReprojMouseSensitivityY = std::max(0.0f, mouseSensY);
+            ShowHelpMarker("Radians per count; 0 = auto-tracked from rendered frames");
+            ImGui::PopItemWidth();
+        }
 
         bool reprojInvertMV = config->ReprojInvertMV.value_or_default();
         if (ImGui::Checkbox("Invert motion vectors##reproj", &reprojInvertMV))
