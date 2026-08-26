@@ -2157,6 +2157,18 @@ HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source
     ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
     realBuffer->Release();
 
+    if (_syncHasUi[fIndex] && _uiColor[fIndex] != nullptr)
+    {
+        if (_renderUI == nullptr && _device != nullptr)
+            _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
+                                                   Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
+
+        if (_renderUI != nullptr && _renderUI->IsInit())
+        {
+            _renderUI->Dispatch(realSwapChain, cmdList, _uiColor[fIndex], _uiColorState[fIndex]);
+        }
+    }
+
     if (!SubmitUICommandList(static_cast<UINT>(fIndex)))
     {
         LOG_INFO("Reproj diag: PresentVirtualFrameSync submit failed");
@@ -2398,7 +2410,25 @@ bool AReproj_Dx12::Present()
         if (SUCCEEDED(realSwapChain->GetBuffer(realSwapChain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&source))))
         {
             if (CopyLastFrame(fIndex, source))
+            {
+                if (_syncHasUi[fIndex] && _uiColor[fIndex] != nullptr)
+                {
+                    if (_renderUI == nullptr && _device != nullptr)
+                        _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
+                                                               Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
+
+                    if (_renderUI != nullptr && _renderUI->IsInit())
+                    {
+                        auto* cmdList = GetUICommandList(fIndex);
+                        if (cmdList != nullptr)
+                        {
+                            _renderUI->Dispatch(realSwapChain, cmdList, _uiColor[fIndex], _uiColorState[fIndex]);
+                            SubmitUICommandList(static_cast<UINT>(fIndex));
+                        }
+                    }
+                }
                 realResult = PresentFrame(syncInterval, presentFlags);
+            }
             source->Release();
         }
     }

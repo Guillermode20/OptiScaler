@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.25 (2026-08-26)
+* Reproj: composite isolated UI on real sync present frames
+
 ## v10.0.0.24 (2026-08-26)
 * Reproj: implement KCD2 Scaleform world snapshot, UI redirection, and post-warp composition
 
