@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.19 (2026-08-26)
+* Reproj: initialize KCD2 Scaleform trace in sync reprojection
+
 ## v10.0.0.18 (2026-08-26)
 * Trace KCD2 Scaleform OM bindings outside Hudfix gating
 

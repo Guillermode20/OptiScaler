@@ -192,7 +192,12 @@ bool Initialize()
     return true;
 }
 
-bool IsActiveOnThisThread() { return g_displayDepth != 0; }
+bool IsActiveOnThisThread()
+{
+    if (g_initState.load(std::memory_order_acquire) == 0)
+        Initialize();
+    return g_displayDepth != 0;
+}
 
 void TraceOmSetRenderTargets(ID3D12GraphicsCommandList* commandList, uint32_t targetCount,
                              ID3D12Resource* const* targets)

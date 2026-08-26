@@ -179,6 +179,7 @@ bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
 
     ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
     _lastColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
+    Kcd2Scaleform::Initialize();
 
     // HUD composition (sync path): warp the HUD-less frame instead of the composed
     // backbuffer so the baked-in HUD is not timewarped; UI is composited after the warp.
