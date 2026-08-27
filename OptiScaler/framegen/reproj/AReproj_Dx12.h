@@ -146,6 +146,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void FillConstants(int fIndex, RP_Constants& constants);
     bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet);
     void UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp);
+    bool ShouldCaptureAnchor(double nowMs);
     int AcquirePacket();
     void RetirePackets();
     uint32_t PacketQueueDepth() const;
@@ -197,6 +198,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _cachedRefreshHz = 0.0;
     double _lastRefreshQueryMs = 0.0;
     double _lastRealFrameTimestamp = 0.0;
+    double _nextAnchorSampleMs = 0.0;
+    float _anchorSampleHz = 0.0f;
+    uint32_t _metricsSkippedAnchorSamples = 0;
     double _realPeriodEmaMs = 0.0;         // smoothed source-frame period used for warp scaling
     double _measuredRefreshPeriodMs = 0.0; // scanout period measured from DXGI_FRAME_STATISTICS
     uint64_t _warpRateFrameId = 0;         // frame the rate-limited warp step belongs to

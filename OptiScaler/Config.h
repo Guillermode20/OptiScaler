@@ -625,6 +625,12 @@ class Config
     }; // bounds blocking warps in synchronous mode; async mode fills every refresh slot instead
     CustomOptional<float> ReprojTargetRefresh { 0.0f };   // 0 = FramerateLimit, then active display refresh
     CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // async + virtualized only; 0 = uncapped
+    // Experimental async pacing controls.  They are deliberately independent so
+    // a game can be tested with one timing change at a time.
+    CustomOptional<bool> ReprojNonBlockingAnchorSampling { false }; // sample anchors, never sleep the game thread
+    CustomOptional<float> ReprojAnchorSampleHz { 0.0f }; // 0 = SourceFramerateLimit, then TargetRefresh / 2
+    CustomOptional<float> ReprojDispatchLeadOverrideMs { 0.0f }; // 0 = adaptive 3..8 ms; otherwise 3..16 ms
+    CustomOptional<bool> ReprojPresentCompletionClock { false }; // use completed Present timestamps, not DXGI stats
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { true };     // safer default: no generic late camera translation exists
     CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose

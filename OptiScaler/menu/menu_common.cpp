@@ -3929,6 +3929,30 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Async + virtualized only. 0 = uncapped. 60 targets one new anchor and one repeat per 120 Hz "
                        "display cycle without changing global FramerateLimit, Reflex, or XeLL pacing.");
 
+        bool nonBlockingAnchors = config->ReprojNonBlockingAnchorSampling.value_or_default();
+        if (ImGui::Checkbox("Non-blocking anchor sampling##reproj", &nonBlockingAnchors))
+            config->ReprojNonBlockingAnchorSampling = nonBlockingAnchors;
+        ShowHelpMarker("Experimental async path. Lets the game render freely and only captures anchors at the sample "
+                       "rate, instead of sleeping the game thread. Set Source FPS cap to 0 while testing this.");
+
+        float anchorSampleHz = config->ReprojAnchorSampleHz.value_or_default();
+        if (ImGui::InputFloat("Anchor sample rate##reproj", &anchorSampleHz, 1.0f, 10.0f, "%.1f Hz"))
+            config->ReprojAnchorSampleHz = std::clamp(anchorSampleHz, 0.0f, 1000.0f);
+        ShowHelpMarker("Only used by Non-blocking anchor sampling. 0 uses Source FPS cap, then half Target refresh. "
+                       "Use 60 on a 120 Hz display.");
+
+        float dispatchLeadOverride = config->ReprojDispatchLeadOverrideMs.value_or_default();
+        if (ImGui::InputFloat("GPU preparation lead##reproj", &dispatchLeadOverride, 0.5f, 1.0f, "%.1f ms"))
+            config->ReprojDispatchLeadOverrideMs = dispatchLeadOverride <= 0.0f ? 0.0f : std::clamp(dispatchLeadOverride, 3.0f, 16.0f);
+        ShowHelpMarker("Experimental. 0 keeps the adaptive 3-8 ms lead. Higher values submit the warp earlier before "
+                       "the next display slot, leaving the worker-owned real backbuffer ready for Present.");
+
+        bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
+        if (ImGui::Checkbox("Present-completion clock##reproj", &completionClock))
+            config->ReprojPresentCompletionClock = completionClock;
+        ShowHelpMarker("Experimental Proton clock. Schedules the next slot from the completion time of Present and "
+                       "ignores DXGI frame-statistics phase corrections, which Wine can report per output incorrectly.");
+
         float maxPoseAge = config->ReprojMaxPoseAgeMs.value_or_default();
         if (ImGui::InputFloat("Max pose age##reproj", &maxPoseAge, 1.0f, 5.0f, "%.0f ms"))
             config->ReprojMaxPoseAgeMs = std::clamp(maxPoseAge, 1.0f, 1000.0f);

@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.28 (2026-08-27)
+* Add configurable async pacing experiments
+
 ## v10.0.0.27 (2026-08-27)
 * Reproj: remove cap-side 2ms busy spin
 

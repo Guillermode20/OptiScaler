@@ -1453,9 +1453,14 @@ void AReproj_Dx12::PresenterMain()
 
     while (!_stopPresenter.load())
     {
+        const auto* config = Config::Instance();
         const auto refreshHz = TargetRefreshHz();
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
-        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, 8.0);
+        const auto requestedLeadMs = config->ReprojDispatchLeadOverrideMs.value_or_default();
+        const bool fixedDispatchLead = std::isfinite(requestedLeadMs) && requestedLeadMs > 0.0f;
+        const auto dispatchLeadMs = fixedDispatchLead ? std::clamp(static_cast<double>(requestedLeadMs), 3.0, 16.0)
+                                                      : std::clamp(_dispatchLeadMs, 3.0, 8.0);
+        const bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
 
         // Handle TargetRefresh change without restart: reset EMA and grid
         // so 240→120 doesn't stay stuck at 4ms period with early correction drift.
@@ -1492,7 +1497,10 @@ void AReproj_Dx12::PresenterMain()
             _telemetry.PollCompletedGpuWork();
         }
 
-        if (SampleDisplayClock(Util::MillisecondsNow()) && nextDeadlineMs > 0.0)
+        // Wine can advance DXGI frame statistics once per composed output rather than per
+        // physical vblank.  The completion-clock mode deliberately treats Present(1)'s
+        // return timestamp as the phase source and leaves this unstable correction out.
+        if (!completionClock && SampleDisplayClock(Util::MillisecondsNow()) && nextDeadlineMs > 0.0)
         {
             refreshPeriodMs = std::min(_measuredRefreshPeriodMs, refreshPeriodMs);
             const auto nearestVblankMs =
@@ -1583,10 +1591,13 @@ void AReproj_Dx12::PresenterMain()
             constexpr double LEAD_GROW_MS = 0.5;
             constexpr double LEAD_DECAY_MS = 0.05;
             const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
-            if (wakeHeadroomMs < 2.0)
-                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, 8.0);
-            else if (wakeHeadroomMs > 4.0)
-                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
+            if (!fixedDispatchLead)
+            {
+                if (wakeHeadroomMs < 2.0)
+                    _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, 8.0);
+                else if (wakeHeadroomMs > 4.0)
+                    _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
+            }
 
             if (!deadlineOk)
             {
@@ -1967,7 +1978,7 @@ void AReproj_Dx12::PresenterMain()
             _lastDisplayPresentMs = presentedAt;
         }
 
-        if (nextDeadlineMs <= 0.0)
+        if (completionClock || nextDeadlineMs <= 0.0)
             nextDeadlineMs = presentedAt + refreshPeriodMs;
         else
             nextDeadlineMs += refreshPeriodMs;
@@ -2022,6 +2033,40 @@ void AReproj_Dx12::RecordRealFrame()
     LogMetricsIfDue();
 }
 
+bool AReproj_Dx12::ShouldCaptureAnchor(double nowMs)
+{
+    auto* config = Config::Instance();
+    if (!config->ReprojNonBlockingAnchorSampling.value_or_default())
+    {
+        _nextAnchorSampleMs = 0.0;
+        _anchorSampleHz = 0.0f;
+        return true;
+    }
+
+    float requestedHz = config->ReprojAnchorSampleHz.value_or_default();
+    if (!(std::isfinite(requestedHz) && requestedHz > 0.0f))
+        requestedHz = config->ReprojSourceFramerateLimit.value_or_default();
+    if (!(std::isfinite(requestedHz) && requestedHz > 0.0f))
+        requestedHz = static_cast<float>(TargetRefreshHz() * 0.5);
+    const float sampleHz = std::clamp(requestedHz, 1.0f, 1000.0f);
+    const double periodMs = 1000.0 / sampleHz;
+
+    // A changed setting or a resume after a long game stall starts a clean grid.
+    if (_nextAnchorSampleMs <= 0.0 || std::abs(_anchorSampleHz - sampleHz) > 0.01f ||
+        nowMs > _nextAnchorSampleMs + periodMs * 4.0)
+    {
+        _nextAnchorSampleMs = nowMs + periodMs;
+        _anchorSampleHz = sampleHz;
+        return true;
+    }
+    if (nowMs < _nextAnchorSampleMs)
+        return false;
+
+    const auto missedPeriods = std::floor((nowMs - _nextAnchorSampleMs) / periodMs);
+    _nextAnchorSampleMs += (missedPeriods + 1.0) * periodMs;
+    return true;
+}
+
 void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs)
 {
     std::scoped_lock lock(_metricsMutex);
@@ -2074,10 +2119,10 @@ void AReproj_Dx12::LogMetricsIfDue()
         _runtimeMetrics.p95PresentIntervalMs = static_cast<float>(*p95);
     }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
-    LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} interval={:.2f}/{:.2f}ms "
+    LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={} sampledSkip={}) missed={} interval={:.2f}/{:.2f}ms "
              "lead={:.2f}ms poseAge={:.1f}ms queue={} pose=rendered ({}, block={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
-             _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
+             _metricsRepeatedAnchorDisplays, _metricsSkippedAnchorSamples, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              presenter, _runtimeMetrics.gamePresentBlockMs);
     _metricsTimestamp = now;
@@ -2089,6 +2134,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsPoseSamples = 0;
     _metricsNewAnchorDisplays = 0;
     _metricsRepeatedAnchorDisplays = 0;
+    _metricsSkippedAnchorSamples = 0;
     _metricsMissedDisplaySlots = 0;
 }
 
@@ -2249,7 +2295,8 @@ bool AReproj_Dx12::Present()
     // (Streamline/FSR3/FFX API) as well as the current upscaler slot.
     const auto fIndex = GetIndexWillBeDispatched();
     _lastDispatchedFrame = _frameCount;
-    RecordRealFrame();
+    const bool nonBlockingAnchorSampling = Config::Instance()->ReprojNonBlockingAnchorSampling.value_or_default();
+    const bool captureThisPresent = !virtualized || !nonBlockingAnchorSampling || ShouldCaptureAnchor(presentStart);
     float poseAge = 0.0f;
     const bool useDepth = Config::Instance()->ReprojUseDepth.value_or_default() &&
                           _resourceReady[fIndex].contains(FG_ResourceType::Depth);
@@ -2303,6 +2350,32 @@ bool AReproj_Dx12::Present()
 
     if (virtualized && _presenterState.load() == PresenterState::Running)
     {
+        if (!captureThisPresent)
+        {
+            // The virtual game buffer still needs its ownership handoff and ring advance, but no packet is copied.
+            // This is deliberately non-blocking: the presenter keeps reprojecting its active anchor while KCD2
+            // continues rendering at its natural rate.
+            FrameLimit::paceReprojectionSource(false);
+            const auto fenceValue = ++_uiFenceValue;
+            _uiAllocatorFenceValues[fIndex] = fenceValue;
+            const bool advanced = _gameCommandQueue != nullptr && _uiFence != nullptr &&
+                                  SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue)) &&
+                                  SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue)) &&
+                                  SUCCEEDED(wrapped->AdvanceReprojectionBuffer());
+            if (!advanced)
+                _presenterState.store(PresenterState::Failed);
+            else
+            {
+                std::scoped_lock metricsLock(_metricsMutex);
+                ++_metricsSkippedAnchorSamples;
+            }
+            SAFE_RELEASE(gameBackBuffer);
+            std::scoped_lock metricsLock(_metricsMutex);
+            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
+            return advanced;
+        }
+
+        RecordRealFrame();
         auto packetIndex = AcquirePacket();
         if (packetIndex < 0)
         {
@@ -2349,9 +2422,9 @@ bool AReproj_Dx12::Present()
             packet.state.store(PacketState::Ready);
             _readyFrameId.store(packet.frameId);
             _presentCv.notify_one();
-            // Pace only the virtualized game thread after its anchor is published.
-            // The presenter remains display-clocked and must never be source-paced.
-            FrameLimit::paceReprojectionSource(true);
+            // Fixed source pacing remains available for A/B comparison, but non-blocking sampling
+            // intentionally never sleeps the KCD2 game thread.
+            FrameLimit::paceReprojectionSource(!nonBlockingAnchorSampling);
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
             _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
@@ -2386,6 +2459,7 @@ bool AReproj_Dx12::Present()
 
     // Synchronous path.  With virtualization the game source is copied to the real
     // anchor while the worker is stopped; otherwise retain the legacy raw-buffer path.
+    RecordRealFrame();
     FrameLimit::paceReprojectionSource(false);
     HRESULT realResult = E_FAIL;
     if (virtualized)
@@ -2500,11 +2574,14 @@ void AReproj_Dx12::Activate()
         _metricsMaxWarpsPerReal = 0;
         _metricsPoseAgeTotalMs = 0.0;
         _metricsPoseSamples = 0;
+        _metricsSkippedAnchorSamples = 0;
         _runtimeMetrics = {};
     }
     _cachedRefreshHz = 0.0;
     _lastRefreshQueryMs = 0.0;
     _lastRealFrameTimestamp = 0.0;
+    _nextAnchorSampleMs = 0.0;
+    _anchorSampleHz = 0.0f;
     if (Config::Instance()->FGDrawUIOverFG.value_or_default() && _renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());

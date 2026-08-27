@@ -200,9 +200,27 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         publish = source.split("if (captured && submitted && advanced)", 1)[1].split(
             "// Hard publication failures", 1)[0]
-        self.assertIn("FrameLimit::paceReprojectionSource(true)", publish)
-        self.assertLess(publish.index("FrameLimit::paceReprojectionSource(true)"), publish.index("return true"))
+        self.assertIn("FrameLimit::paceReprojectionSource(!nonBlockingAnchorSampling)", publish)
+        self.assertLess(publish.index("FrameLimit::paceReprojectionSource(!nonBlockingAnchorSampling)"), publish.index("return true"))
         self.assertIn("FrameLimit::paceReprojectionSource(false)", source)
+
+    def test_nonblocking_anchor_sampling_advances_virtual_ring_without_sleeping_game(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        skip_path = source.split("if (!captureThisPresent)", 1)[1].split("RecordRealFrame();", 1)[0]
+        self.assertIn("SubmitReprojectionBuffer", skip_path)
+        self.assertIn("AdvanceReprojectionBuffer", skip_path)
+        self.assertIn("FrameLimit::paceReprojectionSource(false)", skip_path)
+        self.assertIn("ShouldCaptureAnchor", source)
+
+    def test_experimental_clock_and_gpu_lead_are_opt_in(self):
+        root = Path(__file__).resolve().parents[2]
+        config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
+        presenter = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        self.assertIn("ReprojPresentCompletionClock { false }", config)
+        self.assertIn("ReprojDispatchLeadOverrideMs { 0.0f }", config)
+        self.assertIn("if (!completionClock && SampleDisplayClock", presenter)
+        self.assertIn("if (completionClock || nextDeadlineMs <= 0.0)", presenter)
 
     def test_source_cap_does_not_burn_two_ms_of_cpu_every_frame(self):
         # KCD2 can sustain more than 60 FPS uncapped. A full 2 ms busy tail in

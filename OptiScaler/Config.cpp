@@ -196,6 +196,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojMaxWarpFrames.set_from_config(readInt("Reproj", "MaxWarpFrames"));
             ReprojTargetRefresh.set_from_config(readFloat("Reproj", "TargetRefresh"));
             ReprojSourceFramerateLimit.set_from_config(readFloat("Reproj", "SourceFramerateLimit"));
+            ReprojNonBlockingAnchorSampling.set_from_config(readBool("Reproj", "NonBlockingAnchorSampling"));
+            ReprojAnchorSampleHz.set_from_config(readFloat("Reproj", "AnchorSampleHz"));
+            ReprojDispatchLeadOverrideMs.set_from_config(readFloat("Reproj", "DispatchLeadOverrideMs"));
+            ReprojPresentCompletionClock.set_from_config(readBool("Reproj", "PresentCompletionClock"));
             ReprojUseDepth.set_from_config(readBool("Reproj", "UseDepth"));
             ReprojRotationOnly.set_from_config(readBool("Reproj", "RotationOnly"));
             ReprojDebugView.set_from_config(readBool("Reproj", "DebugView"));
@@ -1046,6 +1050,14 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojTargetRefresh.value_for_config()).c_str());
         ini.SetValue("Reproj", "SourceFramerateLimit",
                      GetFloatValue(Instance()->ReprojSourceFramerateLimit.value_for_config()).c_str());
+        ini.SetValue("Reproj", "NonBlockingAnchorSampling",
+                     GetBoolValue(Instance()->ReprojNonBlockingAnchorSampling.value_for_config()).c_str());
+        ini.SetValue("Reproj", "AnchorSampleHz",
+                     GetFloatValue(Instance()->ReprojAnchorSampleHz.value_for_config()).c_str());
+        ini.SetValue("Reproj", "DispatchLeadOverrideMs",
+                     GetFloatValue(Instance()->ReprojDispatchLeadOverrideMs.value_for_config()).c_str());
+        ini.SetValue("Reproj", "PresentCompletionClock",
+                     GetBoolValue(Instance()->ReprojPresentCompletionClock.value_for_config()).c_str());
         ini.SetValue("Reproj", "UseDepth", GetBoolValue(Instance()->ReprojUseDepth.value_for_config()).c_str());
         ini.SetValue("Reproj", "RotationOnly", GetBoolValue(Instance()->ReprojRotationOnly.value_for_config()).c_str());
         ini.SetValue("Reproj", "DebugView", GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
