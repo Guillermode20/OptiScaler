@@ -92,7 +92,7 @@ struct PredictorState
     float confidence = 0.0f;
 };
 
-PredictorState& State()
+PredictorState& GetPredictorState()
 {
     static PredictorState state;
     return state;
@@ -143,7 +143,7 @@ namespace ReprojInputPredictor
 {
 void Reset()
 {
-    auto& state = State();
+    auto& state = GetPredictorState();
     std::scoped_lock lock(state.mutex);
     state.motionCount = 0;
     state.motionCursor = 0;
@@ -163,7 +163,7 @@ void OnPoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawR
     if (poseTimestampMs <= 0.0 || !std::isfinite(deltaYawRadians) || !std::isfinite(deltaPitchRadians))
         return;
 
-    auto& state = State();
+    auto& state = GetPredictorState();
     std::scoped_lock lock(state.mutex);
 
     // Duplicate or out-of-order feed: ignore, the caller guarantees newest-first.
@@ -219,7 +219,7 @@ bool GetEstimatedGain(float* gainX, float* gainY)
     if (gainX == nullptr || gainY == nullptr)
         return false;
 
-    auto& state = State();
+    auto& state = GetPredictorState();
     std::scoped_lock lock(state.mutex);
     if (state.gainX.count < MIN_GAIN_SAMPLES || state.gainY.count < MIN_GAIN_SAMPLES)
         return false;
@@ -233,14 +233,14 @@ bool GetEstimatedGain(float* gainX, float* gainY)
 
 float GetConfidence()
 {
-    auto& state = State();
+    auto& state = GetPredictorState();
     std::scoped_lock lock(state.mutex);
     return state.confidence;
 }
 
 bool IsInputDriven(float inputDeltaX, float inputDeltaY)
 {
-    auto& state = State();
+    auto& state = GetPredictorState();
     std::scoped_lock lock(state.mutex);
 
     // No fresh mouse motion over the prediction window: nothing to predict
@@ -289,7 +289,7 @@ bool DescribeStats(char* buffer, size_t size)
     if (buffer == nullptr || size == 0)
         return false;
 
-    auto& state = State();
+    auto& state = GetPredictorState();
     std::scoped_lock lock(state.mutex);
     if (state.gainX.count < MIN_GAIN_SAMPLES && state.gainY.count < MIN_GAIN_SAMPLES)
         return false;
