@@ -85,6 +85,25 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("PresentCompositorFrame(1, 0, !newAnchor, false)", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
+    def test_presenter_submits_before_waiting_for_the_present_slot(self):
+        # The outgoing Present returns at vblank. If we wait and only then record
+        # the next image, Proton commonly receives the next Present just after
+        # vblank and blocks it for an entire extra refresh.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
+            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        self.assertLess(presenter.index("const bool dispatched"), presenter.index("const bool deadlineOk"))
+        self.assertLess(presenter.index("const bool deadlineOk"), presenter.index("PresentCompositorFrame(1, 0"))
+
+    def test_presenter_uses_high_resolution_wait_for_final_timer_slice(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        wait = source.split("bool AReproj_Dx12::WaitForPresenterDeadline", 1)[1].split(
+            "bool AReproj_Dx12::CreateAsyncPresenter", 1)[0]
+        self.assertIn("if (chunk > 0.2)", wait)
+        self.assertNotIn("_presentCv.wait_for", wait)
+
     def test_warp_phase_extrapolates_from_pose_timestamp(self):
         # Capture-completion timestamps carry the game's pipeline latency and its
         # jitter into the warp phase; the pose-sample time is the valid origin.
