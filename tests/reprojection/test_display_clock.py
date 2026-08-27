@@ -123,6 +123,22 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("_displayClockAnchorMs", presenter)
         self.assertIn("_measuredRefreshPeriodMs", presenter)
 
+    def test_presenter_uses_high_resolution_wait_for_final_timer_slice(self):
+        # Wine/Proton can oversleep condition_variable::wait_for by most of a
+        # 120 Hz slot. The presenter must keep the final sub-2ms wait on the
+        # high-resolution QPC timer path.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        wait = source.split("bool AReproj_Dx12::WaitForPresenterDeadline", 1)[1].split(
+            "bool AReproj_Dx12::CreateAsyncPresenter", 1)[0]
+        self.assertIn("if (chunk > 0.2)", wait)
+        self.assertIn("FrameLimit::sleepForPresenterMs(chunk)", wait)
+        self.assertNotIn("_presentCv.wait_for", wait)
+        frame_limit = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
+        presenter_sleep = frame_limit.split("void FrameLimit::sleepForPresenterMs", 1)[1].split(
+            "void FrameLimit::paceReprojectionSource", 1)[0]
+        self.assertIn("200'000", presenter_sleep)
+
     def test_vblank_lock_cannot_run_away_earlier(self):
         # Per-slot bounds do not stop a sustained backwards walk when the grid
         # phase estimate is biased early; only a cumulative budget does. Without

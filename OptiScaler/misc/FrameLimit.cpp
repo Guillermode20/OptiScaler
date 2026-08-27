@@ -71,16 +71,16 @@ inline int FrameLimit::busywait_sleep(int64_t ns)
     return 0;
 }
 
-inline int FrameLimit::combined_sleep(int64_t ns)
+inline int FrameLimit::combined_sleep(int64_t ns, int64_t busywaitThresholdNs)
 {
-    constexpr int64_t busywait_threshold = 2'000'000; // 2ms
+    const auto busywaitThreshold = std::clamp(busywaitThresholdNs, 0LL, ns);
     int status {};
     auto current_time = get_timestamp();
-    if (ns <= busywait_threshold)
+    if (ns <= busywaitThreshold)
         status = busywait_sleep(ns);
     else
     {
-        status = timer_sleep((ns - busywait_threshold) / 100);
+        status = timer_sleep((ns - busywaitThreshold) / 100);
         if (status)
         {
             // Wine/Proton may not support CREATE_WAITABLE_TIMER_HIGH_RESOLUTION - fallback to busywait
@@ -139,6 +139,18 @@ void FrameLimit::sleepForMs(double ms)
     // combined_sleep takes nanoseconds
     if (auto res = combined_sleep((int64_t) (ms * 1'000'000.0)); res)
         LOG_ERROR("Sleep command failed: {}", res);
+}
+
+void FrameLimit::sleepForPresenterMs(double ms)
+{
+    if (ms <= 0.0)
+        return;
+
+    // A 120 Hz presenter has only a few milliseconds between slots. Keep the
+    // accuracy benefit of the QPC wait, but reserve just 0.2 ms for spinning
+    // so the worker does not monopolize a CPU core while the game renders.
+    if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), 200'000); res)
+        LOG_ERROR("Presenter sleep failed: {}", res);
 }
 
 void FrameLimit::paceReprojectionSource(bool active)

@@ -1163,20 +1163,17 @@ bool AReproj_Dx12::WaitForPresenterDeadline(double deadlineMs)
         const auto remaining = deadlineMs - Util::MillisecondsNow();
         if (remaining <= 0.2)
             break;
-        // Sleep in 5ms chunks so _stopPresenter can preempt within 5ms
+        // Sleep in 5ms chunks so _stopPresenter can preempt within 5ms. The
+        // condition-variable path is not suitable for the final 0.2-2 ms:
+        // under Wine it commonly resumes several milliseconds late, which is
+        // enough to miss a 120 Hz present slot. FrameLimit uses the same QPC
+        // clock and high-resolution timer for the bulk of the wait, then only
+        // spins the final 0.2 ms.
         const double chunk = std::min(remaining - 0.2, 5.0);
-        if (chunk > 2.0)
+        if (chunk > 0.2)
         {
             // Use high-res timer (QPC ns) - matches presenter display clock domain
-            FrameLimit::sleepForMs(chunk);
-            if (_stopPresenter.load())
-                return false;
-        }
-        else
-        {
-            std::unique_lock lock(_presentMutex);
-            _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(chunk),
-                                [&] { return _stopPresenter.load(); });
+            FrameLimit::sleepForPresenterMs(chunk);
             if (_stopPresenter.load())
                 return false;
         }

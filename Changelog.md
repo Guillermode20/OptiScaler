@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.26 (2026-08-27)
+* Reproj: use high-resolution timing for final async presenter wait
+
 ## v10.0.0.25 (2026-08-26)
 * Reproj: composite isolated UI on real sync present frames
 
