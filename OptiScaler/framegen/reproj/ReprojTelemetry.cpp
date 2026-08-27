@@ -757,13 +757,14 @@ void ReprojTelemetry::DumpMissWindow(uint64_t triggerSequence)
         if (slot == nullptr || !slot->occupied)
             continue;
         LOG_INFO(
-            "ReprojSlot v=1 seq={} outcome={} cause={} secondary={:X} anchor={} new={} repeat={} effMode={} wake={:.2f} wait={:.2f} queue={:.2f} gpu={:.2f} present={:.2f} interval={:.2f} age={:.2f} step={:.2f}/{:.2f} vel={} depth={} cam={}",
+            "ReprojSlot v=1 seq={} outcome={} cause={} secondary={:X} anchor={} new={} repeat={} effMode={} wake={:.2f} wait={:.2f} queue={:.2f} gpu={:.2f} present={:.2f} interval={:.2f} age={:.2f} step={:.2f}/{:.2f} vel={} depth={} cam={} pred={} pyaw={:.4f} ppitch={:.4f}",
             slot->sequence, static_cast<int>(slot->outcome), static_cast<int>(slot->primaryMissCause),
             slot->secondaryCauseFlags, slot->anchorFrameId, slot->newAnchor ? 1 : 0, slot->repeatedAnchor ? 1 : 0,
             static_cast<int>(slot->effectiveMode), slot->wakeLatenessMs, slot->waitableDurationMs, slot->gpuQueueDelayMs,
             slot->gpuDurationMs, slot->presentBlockMs, slot->presentIntervalMs, slot->anchorAgeMs, slot->unclampedTimeStep,
             slot->finalTimeStep, slot->velocityAvailable ? 1 : 0, slot->depthAvailable ? 1 : 0,
-            slot->cameraBasisAvailable ? 1 : 0);
+            slot->cameraBasisAvailable ? 1 : 0, slot->inputPredicted ? 1 : 0, slot->predictedYawRad,
+            slot->predictedPitchRad);
     }
 }
 

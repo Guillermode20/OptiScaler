@@ -3,6 +3,7 @@
 #include "Kcd2Camera.h"
 #include "Kcd2HudIsolation.h"
 #include "Kcd2Scaleform.h"
+#include "ReprojInputPredictor.h"
 
 #include <algorithm>
 #include <bit>
@@ -408,6 +409,19 @@ void StoreReprojVec3(float* target, ReprojVec3 value)
     target[2] = value.z;
 }
 
+// Decompose the rotation from a previous camera basis to the current one into
+// yaw (about world up) and pitch (about camera right) components, matching the
+// composition PrepareRotationConstants applies for input-latched warps.
+void DecomposeCameraPairRotation(const float* forward, const float* prevForward, const float* prevRight,
+                                 const float* prevUp, float* yawRadians, float* pitchRadians)
+{
+    const auto dot = [](const float* a, const float* b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    };
+    *yawRadians = std::atan2(dot(forward, prevRight), dot(forward, prevForward));
+    *pitchRadians = std::atan2(dot(forward, prevUp), dot(forward, prevForward));
+}
+
 void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false, float lateYaw = 0.0f,
                               float latePitch = 0.0f)
 {
@@ -497,11 +511,10 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
     if (_reset[sourceIndex] || _reset[prevIndex] || IsCameraAllZero(sourceIndex) || IsCameraAllZero(prevIndex))
         return;
 
-    const auto dot = [](const float* a, const float* b) { return a[0] * a[0] + a[1] * a[1] + a[2] * a[2]; };
-    const auto yaw = std::atan2(dot(_cameraForward[sourceIndex], _cameraRight[prevIndex]),
-                                dot(_cameraForward[sourceIndex], _cameraForward[prevIndex]));
-    const auto pitch = std::atan2(dot(_cameraForward[sourceIndex], _cameraUp[prevIndex]),
-                                  dot(_cameraForward[sourceIndex], _cameraForward[prevIndex]));
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    DecomposeCameraPairRotation(_cameraForward[sourceIndex], _cameraForward[prevIndex], _cameraRight[prevIndex],
+                                _cameraUp[prevIndex], &yaw, &pitch);
 
     OptiInput::RefreshMouseMotion();
     const auto currentMouse = OptiInput::GetRawMouseMotion();
@@ -543,6 +556,141 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
     _lastCapturedMouseX = currentMouse.TotalX;
     _lastCapturedMouseY = currentMouse.TotalY;
     _lastCapturedMouseTimestamp = sourcePoseTimestamp;
+}
+
+// Feed the input-predictor estimator from the per-slot camera arrays (sync
+// path, FfxApi/Streamline supplied poses). One sample per rendered frame.
+void AReproj_Dx12::FeedInputPredictor(int fIndex)
+{
+    if (!Config::Instance()->ReprojInputPredictor.value_or_default())
+        return;
+
+    const auto poseTimestamp = _cameraTimestamp[fIndex];
+    if (poseTimestamp <= 0.0 || poseTimestamp <= _lastPredictorFeedPoseMs)
+        return;
+
+    const auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    if (_reset[fIndex] || _reset[prevIndex] || IsCameraAllZero(fIndex) || IsCameraAllZero(prevIndex))
+        return;
+
+    const auto prevPoseTimestamp = _cameraTimestamp[prevIndex];
+    const double intervalMs =
+        prevPoseTimestamp > 0.0 && poseTimestamp > prevPoseTimestamp ? poseTimestamp - prevPoseTimestamp : 16.6;
+
+    OptiInput::RefreshMouseMotion();
+    // The camera pair spans [prevPose, pose]; correlate input over the same
+    // window so the gain estimate stays a closed-loop calibration.
+    const auto mouseAtPose = OptiInput::GetRawMouseMotionAt(poseTimestamp);
+    const auto mouseAtPrevPose = OptiInput::GetRawMouseMotionAt(prevPoseTimestamp);
+
+    float deltaYaw = 0.0f;
+    float deltaPitch = 0.0f;
+    DecomposeCameraPairRotation(_cameraForward[fIndex], _cameraForward[prevIndex], _cameraRight[prevIndex],
+                                _cameraUp[prevIndex], &deltaYaw, &deltaPitch);
+
+    ReprojInputPredictor::OnPoseSample(
+        poseTimestamp, intervalMs, deltaYaw, deltaPitch,
+        static_cast<float>(mouseAtPose.TotalX - mouseAtPrevPose.TotalX),
+        static_cast<float>(mouseAtPose.TotalY - mouseAtPrevPose.TotalY));
+    _lastPredictorFeedPoseMs = poseTimestamp;
+}
+
+// Feed the input-predictor estimator from an async packet pose. The KCD2 hook
+// pose pair is authoritative when available; otherwise fall back to the
+// per-slot camera arrays.
+void AReproj_Dx12::FeedInputPredictorFromPacket(int sourceIndex, const RP_Constants& constants,
+                                                double poseTimestampMs, double poseIntervalMs, bool hookPose)
+{
+    if (!Config::Instance()->ReprojInputPredictor.value_or_default())
+        return;
+    if (poseTimestampMs <= 0.0 || poseTimestampMs <= _lastPredictorFeedPoseMs)
+        return;
+
+    OptiInput::RefreshMouseMotion();
+    const double intervalMs = poseIntervalMs > 1.0 ? poseIntervalMs : 16.6;
+    const auto mouseAtPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
+    const auto mouseAtPrevPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs - intervalMs);
+
+    float deltaYaw = 0.0f;
+    float deltaPitch = 0.0f;
+    if (hookPose)
+    {
+        DecomposeCameraPairRotation(constants.cameraForward, constants.prevCameraForward, constants.prevCameraRight,
+                                    constants.prevCameraUp, &deltaYaw, &deltaPitch);
+    }
+    else
+    {
+        const auto prevIndex = (sourceIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+        if (_reset[sourceIndex] || _reset[prevIndex] || IsCameraAllZero(sourceIndex) || IsCameraAllZero(prevIndex))
+            return;
+        DecomposeCameraPairRotation(_cameraForward[sourceIndex], _cameraForward[prevIndex], _cameraRight[prevIndex],
+                                    _cameraUp[prevIndex], &deltaYaw, &deltaPitch);
+    }
+
+    ReprojInputPredictor::OnPoseSample(
+        poseTimestampMs, intervalMs, deltaYaw, deltaPitch,
+        static_cast<float>(mouseAtPose.TotalX - mouseAtPrevPose.TotalX),
+        static_cast<float>(mouseAtPose.TotalY - mouseAtPrevPose.TotalY));
+    _lastPredictorFeedPoseMs = poseTimestampMs;
+}
+
+// True-timewarp prediction: compose the rotation the camera will have at the
+// display deadline from the raw input stream (fresh mouse deltas since the
+// rendered pose), calibrated against rendered pose history. Replaces the
+// velocity-extrapolation term - it must never be added on top of it.
+bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawRadians, float* pitchRadians)
+{
+    if (yawRadians == nullptr || pitchRadians == nullptr || poseTimestampMs <= 0.0)
+        return false;
+
+    const auto nowMs = Util::MillisecondsNow();
+    const auto windowMs = nowMs - poseTimestampMs;
+    if (windowMs <= 0.0 || windowMs > Config::Instance()->ReprojMaxPoseAgeMs.value_or_default())
+        return false;
+
+    OptiInput::RefreshMouseMotion();
+    const auto now = OptiInput::GetRawMouseMotion();
+    const auto atPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
+    const float inputX = static_cast<float>(now.TotalX - atPose.TotalX);
+    const float inputY = static_cast<float>(now.TotalY - atPose.TotalY);
+    if (!std::isfinite(inputX) || !std::isfinite(inputY))
+        return false;
+
+    float gainX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
+    float gainY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();
+    const bool manualGain = gainX > 0.0f && gainY > 0.0f;
+    if (!manualGain && !ReprojInputPredictor::GetEstimatedGain(&gainX, &gainY))
+    {
+        _inputPredictorActive = false;
+        return false;
+    }
+
+    // Hysteresis keeps the warp path from flapping between prediction and
+    // velocity extrapolation while confidence hovers at the threshold.
+    constexpr float enterThreshold = 0.55f;
+    constexpr float exitThreshold = 0.35f;
+    const bool confident =
+        manualGain || ReprojInputPredictor::GetConfidence() >= (_inputPredictorActive ? exitThreshold : enterThreshold);
+    if (!confident || !ReprojInputPredictor::IsInputDriven(inputX, inputY))
+    {
+        _inputPredictorActive = false;
+        return false;
+    }
+
+    ReprojInputPredictor::RotationEstimate estimate {};
+    constexpr float maxRotationRad = 0.35f;
+    if (!ReprojInputPredictor::PredictRotation(gainX, gainY, inputX, inputY,
+                                               Config::Instance()->ReprojInputPredictorResponse.value_or_default(),
+                                               maxRotationRad, &estimate))
+    {
+        _inputPredictorActive = false;
+        return false;
+    }
+
+    *yawRadians = estimate.yawRadians;
+    *pitchRadians = estimate.pitchRadians;
+    _inputPredictorActive = true;
+    return true;
 }
 
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
@@ -813,6 +961,10 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourceMouseTimestamp = sourceTimestamp > 0.0 ? sourceTimestamp : mouse.TimestampMs;
     packet.inputLatchReady = true;
     UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
+    // Estimator feed for input-predicted timewarp: prefer the authoritative
+    // KCD2 hook pose pair; otherwise the per-slot camera arrays.
+    FeedInputPredictorFromPacket(sourceIndex, packet.constants, sourceTimestamp, kcd2PoseIntervalMs,
+                                 kcd2CameraTimestamp > 0.0);
     packet.warpAllowed = warpAllowed && velocity;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
@@ -893,7 +1045,9 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
     return true;
 }
 
-bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs, uint32_t telemetryQueryStart)
+bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs,
+                                      uint32_t telemetryQueryStart, bool inputPredicted, float predictedYaw,
+                                      float predictedPitch)
 {
     auto& packet = _packets[packetIndex];
     if (_swapChain == nullptr || _warp == nullptr || !_warp->IsInit() || packet.velocity == nullptr ||
@@ -938,7 +1092,9 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
-    if (!ApplyLateInput(constants, packet))
+    if (inputPredicted)
+        PrepareRotationConstants(constants, true, predictedYaw, predictedPitch);
+    else if (!ApplyLateInput(constants, packet))
         PrepareRotationConstants(constants);
     const bool useDepth = packet.hasDepth;
     const bool ok =
@@ -1064,7 +1220,31 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
     if (!hasDepth)
         cb.mode = 0;
-    PrepareRotationConstants(cb);
+
+    // True-timewarp prediction: rotate the warp by what the camera will have
+    // done by this display deadline (fresh raw input since the rendered pose),
+    // not by the last rendered velocity. Falls back to velocity extrapolation
+    // when the estimator is not confident or the motion is not mouse-driven.
+    // Input-predicted and extrapolated warps REPLACE each other; they are
+    // never combined.
+    FeedInputPredictor(fIndex);
+    float predictedYaw = 0.0f;
+    float predictedPitch = 0.0f;
+    if (TryInputPredictedRotation(_cameraTimestamp[fIndex], &predictedYaw, &predictedPitch))
+        PrepareRotationConstants(cb, true, predictedYaw, predictedPitch);
+    else
+        PrepareRotationConstants(cb);
+
+    // Rate-limited predictor diagnostics (async stats land in the slot dumps).
+    static double lastPredictorLogMs = 0.0;
+    const auto predictorLogMs = Util::MillisecondsNow();
+    if (Config::Instance()->ReprojInputPredictor.value_or_default() && predictorLogMs - lastPredictorLogMs > 10000.0)
+    {
+        lastPredictorLogMs = predictorLogMs;
+        char predictorDescription[160];
+        if (ReprojInputPredictor::DescribeStats(predictorDescription, sizeof(predictorDescription)))
+            LOG_INFO("Reproj input predictor: {}", predictorDescription);
+    }
 
     bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], velocity->GetResource(),
                               velocity->state, hasDepth ? depth->GetResource() : nullptr,
@@ -1906,8 +2086,22 @@ void AReproj_Dx12::PresenterMain()
             _currentTelemetrySlot = nullptr;
         }
 
+        float predictedYaw = 0.0f;
+        float predictedPitch = 0.0f;
+        const bool inputPredicted = packet.warpAllowed && !focusLost
+                                        ? TryInputPredictedRotation(packet.sourcePoseTimestamp, &predictedYaw,
+                                                                    &predictedPitch)
+                                        : false;
+        if (tSlot)
+        {
+            tSlot->inputPredicted = inputPredicted;
+            tSlot->predictedYawRad = predictedYaw;
+            tSlot->predictedPitchRad = predictedPitch;
+        }
+
         const bool dispatched = packet.warpAllowed && !focusLost
-                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
+                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart,
+                                                         inputPredicted, predictedYaw, predictedPitch)
                                     : DisplayPacket(activePacketIndex, true, queryStart);
 
         if (tSlot)
@@ -2593,6 +2787,11 @@ void AReproj_Dx12::Activate()
 
     _isActive = true;
     _lastDispatchedFrame = 0;
+    // Fresh calibration per FG session; stale gains across mode/context
+    // switches would poison the prediction.
+    ReprojInputPredictor::Reset();
+    _lastPredictorFeedPoseMs = 0.0;
+    _inputPredictorActive = false;
     {
         std::scoped_lock lock(_metricsMutex);
         _metricsTimestamp = 0.0;

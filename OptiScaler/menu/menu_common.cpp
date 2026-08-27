@@ -3990,6 +3990,24 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojLateLatch = reprojLateLatch;
         ShowHelpMarker("Sample raw mouse motion at presenter scanout to timewarp the image with zero input lag.");
 
+        bool reprojInputPredictor = config->ReprojInputPredictor.value_or_default();
+        if (ImGui::Checkbox("Input-predicted timewarp##reproj", &reprojInputPredictor))
+            config->ReprojInputPredictor = reprojInputPredictor;
+        ShowHelpMarker("True timewarp: predict the camera pose at display time from fresh raw mouse input\n"
+                       "with an auto-calibrated camera-response model. Replaces Late latch when enabled\n"
+                       "and falls back to velocity extrapolation when motion is not mouse-driven.");
+
+        if (reprojInputPredictor)
+        {
+            ImGui::PushItemWidth(135.0f * menuResScale);
+            float predictorResponse = config->ReprojInputPredictorResponse.value_or_default();
+            if (ImGui::InputFloat("Predictor response##reproj", &predictorResponse, 0.05f, 0.1f, "%.2f"))
+                config->ReprojInputPredictorResponse = std::clamp(predictorResponse, 0.05f, 1.0f);
+            ShowHelpMarker("Scale on the predicted rotation: 1 = match raw input exactly,\n"
+                           "<1 under-rotates to follow games with smoothed aim");
+            ImGui::PopItemWidth();
+        }
+
         if (reprojLateLatch)
         {
             ImGui::PushItemWidth(135.0f * menuResScale);

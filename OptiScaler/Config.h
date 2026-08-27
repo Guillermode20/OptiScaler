@@ -640,6 +640,8 @@ class Config
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
     CustomOptional<float> ReprojSmoothing { 0.0f }; // 0=off, 0..0.95 EMA on camera angular velocity
     CustomOptional<bool> ReprojLateLatch { true };  // sample mouse motion at scanout to timewarp with zero input lag
+    CustomOptional<bool> ReprojInputPredictor { false }; // true-timewarp: warp from fresh raw input via calibrated camera-response model; replaces LateLatch when on
+    CustomOptional<float> ReprojInputPredictorResponse { 1.0f }; // 0.05..1 predicted-rotation scale; <1 under-rotates to follow games with smoothed aim
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<bool> ReprojTelemetry { false };

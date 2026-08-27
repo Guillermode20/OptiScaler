@@ -138,7 +138,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] + MV (+depth) -> current backbuffer
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
-    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0, uint32_t telemetryQueryStart = UINT32_MAX);
+    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
+                            uint32_t telemetryQueryStart = UINT32_MAX, bool inputPredicted = false,
+                            float predictedYaw = 0.0f, float predictedPitch = 0.0f);
     bool DisplayPacket(int packetIndex, bool composeUi, uint32_t telemetryQueryStart = UINT32_MAX);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
@@ -146,6 +148,13 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void FillConstants(int fIndex, RP_Constants& constants);
     bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet);
     void UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp);
+    // Input-predicted timewarp (true ATW): calibrate the game's mouse->camera
+    // response and warp to the pose the camera will have at the display
+    // deadline. Prediction replaces the velocity-extrapolation term.
+    void FeedInputPredictor(int fIndex);
+    void FeedInputPredictorFromPacket(int sourceIndex, const RP_Constants& constants, double poseTimestampMs,
+                                      double poseIntervalMs, bool hookPose);
+    bool TryInputPredictedRotation(double poseTimestampMs, float* yawRadians, float* pitchRadians);
     bool ShouldCaptureAnchor(double nowMs);
     int AcquirePacket();
     void RetirePackets();
@@ -215,6 +224,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::atomic<float> _trackedMouseSensitivityX { 0.001f };
     std::atomic<float> _trackedMouseSensitivityY { 0.001f };
     std::atomic<bool> _hasTrackedMouseSensitivity { false };
+    bool _inputPredictorActive = false;  // hysteresis state of the input-predicted warp path
+    double _lastPredictorFeedPoseMs = 0.0; // estimator dedup guard (newest fed pose)
   protected:
     void ReleaseObjects() override final;
     void CreateObjects(ID3D12Device* InDevice) override final;

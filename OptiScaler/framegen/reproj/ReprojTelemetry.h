@@ -179,6 +179,10 @@ struct ReprojSlotRecord
     bool depthConstantsValid = false;
     bool captureFenceReadyAtSelection = false;
     bool hudlessSource = false;
+    // Input-predicted timewarp: what the estimator applied for this slot.
+    bool inputPredicted = false;
+    float predictedYawRad = 0.0f;
+    float predictedPitchRad = 0.0f;
 
     // Result
     HRESULT waitableResult = S_OK;
