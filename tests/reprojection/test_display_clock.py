@@ -222,6 +222,16 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("if (!completionClock && SampleDisplayClock", presenter)
         self.assertIn("if (completionClock || nextDeadlineMs <= 0.0)", presenter)
 
+    def test_queue_aware_lead_uses_completed_gpu_queue_telemetry(self):
+        root = Path(__file__).resolve().parents[2]
+        config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
+        presenter = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        telemetry = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.cpp").read_text(encoding="utf-8")
+        self.assertIn("ReprojAdaptiveQueueLead { true }", config)
+        self.assertIn("RecentGpuQueueDelayMs", presenter)
+        self.assertIn("queueAwareLead ? 16.0 : 8.0", presenter)
+        self.assertIn("_recentGpuQueueDelayMs.store(slot->gpuQueueDelayMs", telemetry)
+
     def test_source_cap_does_not_burn_two_ms_of_cpu_every_frame(self):
         # KCD2 can sustain more than 60 FPS uncapped. A full 2 ms busy tail in
         # the cap itself takes roughly 12% of one core at 60 Hz and turns a

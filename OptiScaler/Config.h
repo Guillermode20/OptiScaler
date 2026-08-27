@@ -630,6 +630,7 @@ class Config
     CustomOptional<bool> ReprojNonBlockingAnchorSampling { false }; // sample anchors, never sleep the game thread
     CustomOptional<float> ReprojAnchorSampleHz { 0.0f }; // 0 = SourceFramerateLimit, then TargetRefresh / 2
     CustomOptional<float> ReprojDispatchLeadOverrideMs { 0.0f }; // 0 = adaptive 3..8 ms; otherwise 3..16 ms
+    CustomOptional<bool> ReprojAdaptiveQueueLead { true }; // account for measured present-queue delay (async only)
     CustomOptional<bool> ReprojPresentCompletionClock { false }; // use completed Present timestamps, not DXGI stats
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { true };     // safer default: no generic late camera translation exists

@@ -3947,6 +3947,13 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Experimental. 0 keeps the adaptive 3-8 ms lead. Higher values submit the warp earlier before "
                        "the next display slot, leaving the worker-owned real backbuffer ready for Present.");
 
+        bool adaptiveQueueLead = config->ReprojAdaptiveQueueLead.value_or_default();
+        if (ImGui::Checkbox("Queue-aware GPU lead##reproj", &adaptiveQueueLead))
+            config->ReprojAdaptiveQueueLead = adaptiveQueueLead;
+        ShowHelpMarker("Recommended with telemetry enabled. Learns how long KCD2's GPU queue holds the worker warp "
+                       "and expands the preparation lead before it can miss a display slot. Manual GPU preparation "
+                       "lead overrides it.");
+
         bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
         if (ImGui::Checkbox("Present-completion clock##reproj", &completionClock))
             config->ReprojPresentCompletionClock = completionClock;

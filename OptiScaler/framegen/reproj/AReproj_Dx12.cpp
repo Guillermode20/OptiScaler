@@ -1458,8 +1458,28 @@ void AReproj_Dx12::PresenterMain()
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
         const auto requestedLeadMs = config->ReprojDispatchLeadOverrideMs.value_or_default();
         const bool fixedDispatchLead = std::isfinite(requestedLeadMs) && requestedLeadMs > 0.0f;
+        if (!fixedDispatchLead && config->ReprojAdaptiveQueueLead.value_or_default() &&
+            config->ReprojTelemetry.value_or_default())
+        {
+            // The dedicated present queue shares the physical GPU with KCD2's render queue.  Under Proton the
+            // worker can be submitted on time but not begin execution for 7-20 ms.  Dispatching only 3-8 ms before
+            // vblank guarantees a late warp in those windows.  Completed timestamp telemetry gives that delay
+            // without adding a wait/readback to this hot path; grow immediately for a spike and decay gradually so
+            // one quiet frame cannot reintroduce a hitch.
+            const auto queueDelayMs = _telemetry.RecentGpuQueueDelayMs();
+            if (std::isfinite(queueDelayMs) && queueDelayMs > 0.0f)
+            {
+                const auto desiredLeadMs = std::clamp(static_cast<double>(queueDelayMs) + _warpDurationEmaMs + 0.75,
+                                                       3.0, 16.0);
+                _dispatchLeadMs = desiredLeadMs >= _dispatchLeadMs
+                                      ? desiredLeadMs
+                                      : std::max(desiredLeadMs, _dispatchLeadMs - 0.10);
+            }
+        }
+        const bool queueAwareLead = config->ReprojAdaptiveQueueLead.value_or_default() &&
+                                    config->ReprojTelemetry.value_or_default();
         const auto dispatchLeadMs = fixedDispatchLead ? std::clamp(static_cast<double>(requestedLeadMs), 3.0, 16.0)
-                                                      : std::clamp(_dispatchLeadMs, 3.0, 8.0);
+                                                      : std::clamp(_dispatchLeadMs, 3.0, queueAwareLead ? 16.0 : 8.0);
         const bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
 
         // Handle TargetRefresh change without restart: reset EMA and grid

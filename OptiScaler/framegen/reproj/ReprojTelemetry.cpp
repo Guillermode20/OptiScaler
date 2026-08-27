@@ -23,6 +23,7 @@ ReprojTelemetry::ReprojTelemetry()
 void ReprojTelemetry::Initialize(ID3D12CommandQueue* presentQueue)
 {
     _presentQueue = presentQueue;
+    _recentGpuQueueDelayMs.store(0.0f, std::memory_order_relaxed);
     ResetWindow(_clock.NowQpc());
 }
 
@@ -245,7 +246,12 @@ void ReprojTelemetry::PollCompletedGpuWork()
                     slot->queueSubmitQpc = gpu.submitQpc;
                     // Recompute derived GPU fields now that we have calibration
                     if (gpu.submitQpc != 0)
+                    {
                         slot->gpuQueueDelayMs = static_cast<float>(_clock.DeltaMs(gpu.submitQpc, startQpc));
+                        if (std::isfinite(slot->gpuQueueDelayMs) && slot->gpuQueueDelayMs >= 0.0f &&
+                            slot->gpuQueueDelayMs < 100.0f)
+                            _recentGpuQueueDelayMs.store(slot->gpuQueueDelayMs, std::memory_order_relaxed);
+                    }
                     const double gpuMs = static_cast<double>(end - start) * 1000.0 / static_cast<double>(_timestampFrequency);
                     if (gpuMs >= 0.0 && gpuMs < 500.0)
                         slot->gpuDurationMs = static_cast<float>(gpuMs);

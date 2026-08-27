@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.29 (2026-08-27)
+* Reproj: adapt presenter lead to GPU queue delay
+
 ## v10.0.0.28 (2026-08-27)
 * Add configurable async pacing experiments
 
