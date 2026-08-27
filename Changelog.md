@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.31 (2026-08-27)
+* KCD2 depth warp: restore configured mode when the WHGame camera hook is authoritative (legacy camera fields empty)
+
 ## v10.0.0.30 (2026-08-27)
 * KCD2 depth-aware warp: honor configured warp mode in Kcd2Camera, rotation-homography disocclusion fallback in RPD
 

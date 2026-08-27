@@ -774,6 +774,14 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     Kcd2Scaleform::Initialize();
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
+    if (kcd2CameraTimestamp > 0.0 && packet.constants.mode == 0)
+    {
+        // The legacy camera fields are empty for KCD2 (its pose comes from the WHGame hook),
+        // so FillConstants zeroed the mode above. The hooked pose is authoritative here:
+        // restore the configured warp mode, clamped to supported values.
+        const auto configuredMode = Config::Instance()->ReprojMode.value_or_default();
+        packet.constants.mode = configuredMode > 2u ? 2u : configuredMode;
+    }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     // Rate-limited raw CCamera projection dump: lets a live session confirm the near/far field
     // mapping (stock CryEngine layout assumed) against in-game view distance before depth mode
