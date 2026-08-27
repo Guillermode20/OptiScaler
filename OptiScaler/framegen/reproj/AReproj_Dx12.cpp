@@ -425,6 +425,19 @@ void DecomposeCameraPairRotation(const float* forward, const float* prevForward,
 void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false, float lateYaw = 0.0f,
                               float latePitch = 0.0f)
 {
+    // Mode 1 takes the input-predicted rotation as an explicit warp target:
+    // the shader composes it onto the current pose and keeps the rendered
+    // velocity for the position lerp. Mode 2 rotates the predicted basis here.
+    constants.targetFromInput = 0;
+    constants.targetYaw = 0.0f;
+    constants.targetPitch = 0.0f;
+    if (inputLatched && constants.mode == 1)
+    {
+        constants.targetYaw = lateYaw;
+        constants.targetPitch = latePitch;
+        constants.targetFromInput = 1;
+    }
+
     if (constants.mode != 2)
         return;
 

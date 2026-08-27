@@ -12,7 +12,9 @@ namespace
 {
 using namespace ReprojInputPredictor;
 
-constexpr size_t GAIN_SAMPLE_COUNT = 32;   // per-axis robust gain window
+constexpr size_t GAIN_SAMPLE_COUNT = 128;  // per-axis robust gain window (~2 s at 60 FPS; wider than the old
+                                           // 32-sample ring so per-frame gain scatter from aim smoothing no
+                                           // longer collapses confidence and drops prediction mid-play)
 constexpr size_t MOTION_SAMPLE_COUNT = 16; // recent pose samples
 constexpr size_t MIN_GAIN_SAMPLES = 6;     // before any prediction is allowed
 constexpr float MIN_GAIN = 1.0e-6f;        // radians per count plausibility window

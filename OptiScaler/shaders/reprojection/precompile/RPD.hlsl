@@ -24,6 +24,10 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
+    float  TargetYaw;      // input-predicted target rotation (mode 1)
+    float  TargetPitch;
+    uint   TargetFromInput;
+    uint   TargetReserved;
 };
 
 Texture2D<float4> LastColor : register(t0);
@@ -116,9 +120,29 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float3 up = normalize(CameraUp.xyz);
     float3 forward = normalize(CameraForward.xyz);
     const float s = 1.0f + TimeStep;
-    float3 midRight = normalize(lerp(PrevCameraRight.xyz, right, s));
-    float3 midUp = normalize(lerp(PrevCameraUp.xyz, up, s));
-    float3 midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
+    // Warp target basis: extrapolate the rendered pair by default, or compose
+    // the input-predicted rotation onto the current pose when the CPU already
+    // produced it. Reconstruction below always uses the rendered basis.
+    float3 midRight;
+    float3 midUp;
+    float3 midForward;
+    if (TargetFromInput)
+    {
+        float yawSin, yawCos, pitchSin, pitchCos;
+        sincos(TargetYaw, yawSin, yawCos);
+        sincos(TargetPitch, pitchSin, pitchCos);
+        const float3 yawRight = right * yawCos - forward * yawSin;
+        const float3 yawForward = forward * yawCos + right * yawSin;
+        midRight = normalize(yawRight);
+        midUp = normalize(up * pitchCos - yawForward * pitchSin);
+        midForward = normalize(yawForward * pitchCos + up * pitchSin);
+    }
+    else
+    {
+        midRight = normalize(lerp(PrevCameraRight.xyz, right, s));
+        midUp = normalize(lerp(PrevCameraUp.xyz, up, s));
+        midForward = normalize(lerp(PrevCameraForward.xyz, forward, s));
+    }
 
     // MV-warp fallback sample (also the v1 result).
     float2 deltaUV = delta / float2(MVSize);

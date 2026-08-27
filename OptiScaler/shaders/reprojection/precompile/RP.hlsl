@@ -24,6 +24,10 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
+    float  TargetYaw;      // input-predicted target rotation (mode 1)
+    float  TargetPitch;
+    uint   TargetFromInput;
+    uint   TargetReserved;
 };
 
 Texture2D<float4> LastColor : register(t0);
