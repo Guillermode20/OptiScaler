@@ -43,15 +43,19 @@ def run(cmd, **kw):
     print(f"$ {' '.join(cmd)}")
     return subprocess.run(cmd, check=True, **kw)
 
-def gh_api(path: str, repo: str = REPO):
-    # gh api with json output via --jq or just raw
-    result = subprocess.run(["gh", "api", path], capture_output=True, text=True, check=True)
+def gh_api(path: str):
+    """Return a GitHub API response, preserving gh's useful failure detail."""
+    cmd = ["gh", "api", path]
+    print(f"$ {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no error output"
+        raise RuntimeError(f"GitHub API request failed ({result.returncode}): {detail}")
     return json.loads(result.stdout) if result.stdout.strip().startswith(("{", "[")) else result.stdout
 
 def find_latest_run(repo: str, branch: str, workflow: str = WORKFLOW) -> dict:
     # List workflows to get id
-    wf = subprocess.run(["gh", "api", f"repos/{repo}/actions/workflows"], capture_output=True, text=True, check=True)
-    data = json.loads(wf.stdout)
+    data = gh_api(f"repos/{repo}/actions/workflows")
     wid = None
     for w in data.get("workflows", []):
         if w["name"] == workflow:
@@ -60,19 +64,14 @@ def find_latest_run(repo: str, branch: str, workflow: str = WORKFLOW) -> dict:
     if wid is None:
         raise RuntimeError(f"Workflow '{workflow}' not found in {repo}")
     # runs for that workflow+branch, most recent first
-    runs = subprocess.run(
-        ["gh", "api", f"repos/{repo}/actions/workflows/{wid}/runs?branch={branch}&per_page=5"],
-        capture_output=True, text=True, check=True
-    )
-    rdata = json.loads(runs.stdout)
+    rdata = gh_api(f"repos/{repo}/actions/workflows/{wid}/runs?branch={branch}&per_page=5")
     for r in rdata.get("workflow_runs", []):
         if r["status"] == "completed" and r["conclusion"] == "success":
             return r
     raise RuntimeError(f"No successful runs for {workflow}@{branch}")
 
 def download_artifact(repo: str, run_id: int, out_path: Path):
-    arts = subprocess.run(["gh", "api", f"repos/{repo}/actions/runs/{run_id}/artifacts"], capture_output=True, text=True, check=True)
-    data = json.loads(arts.stdout)
+    data = gh_api(f"repos/{repo}/actions/runs/{run_id}/artifacts")
     if not data.get("artifacts"):
         raise RuntimeError(f"No artifacts for run {run_id}")
     art = data["artifacts"][0]
