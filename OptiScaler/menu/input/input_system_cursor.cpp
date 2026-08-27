@@ -195,8 +195,9 @@ void RecordPolledMouseMotionLocked(const POINT& point)
     const POINT offset { point.x - _state.CursorPollCenter.x, point.y - _state.CursorPollCenter.y };
     const LONG x = offset.x - _state.CursorPollLastOffset.x;
     const LONG y = offset.y - _state.CursorPollLastOffset.y;
+    // AccumulateRelativeMouseMotionLocked records the timestamped motion; a
+    // separate polled record here would double-count the same physical move.
     AccumulateRelativeMouseMotionLocked(x, y);
-    AccumulatePolledMouseMotionLocked(x, y);
     _state.CursorPollLastOffset = offset;
 }
 

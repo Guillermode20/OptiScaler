@@ -117,8 +117,10 @@ float ComputeConfidence(const GainRing& ring, double nowMs)
     // Dispersion: tight MAD relative to the median means a linear response
     // (constant sensitivity). High dispersion means aim acceleration, smoothing
     // or a polluted sample stream - fall back to velocity extrapolation.
+    // Real games show moderate dispersion from aim smoothing; 0.6 keeps those
+    // calibrating while still rejecting nonlinear/polluted streams.
     const float madRatio = ring.medianAbsoluteDeviation / std::max(absMedian, 1.0e-9f);
-    float dispersion = 1.0f - madRatio / 0.45f;
+    float dispersion = 1.0f - madRatio / 0.6f;
     dispersion = std::clamp(dispersion, 0.0f, 1.0f);
     const float recency = 1.0f - std::min(1.0f, static_cast<float>((nowMs - ring.lastUpdateMs) / FRESH_MS)) * 0.5f;
     return dispersion * recency;

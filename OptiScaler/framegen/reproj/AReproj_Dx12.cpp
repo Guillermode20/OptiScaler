@@ -667,8 +667,8 @@ bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawR
 
     // Hysteresis keeps the warp path from flapping between prediction and
     // velocity extrapolation while confidence hovers at the threshold.
-    constexpr float enterThreshold = 0.55f;
-    constexpr float exitThreshold = 0.35f;
+    constexpr float enterThreshold = 0.45f;
+    constexpr float exitThreshold = 0.30f;
     const bool confident =
         manualGain || ReprojInputPredictor::GetConfidence() >= (_inputPredictorActive ? exitThreshold : enterThreshold);
     if (!confident || !ReprojInputPredictor::IsInputDriven(inputX, inputY))
@@ -2097,6 +2097,29 @@ void AReproj_Dx12::PresenterMain()
             tSlot->inputPredicted = inputPredicted;
             tSlot->predictedYawRad = predictedYaw;
             tSlot->predictedPitchRad = predictedPitch;
+        }
+        _predictorLogSlots++;
+        if (inputPredicted)
+            _inputPredictedSlots++;
+
+        // Rate-limited predictor diagnostics for the async path (the sync path
+        // logs from DispatchWarp). This is the only regular visibility into
+        // whether prediction is calibrating and engaging.
+        static double lastPresenterPredictorLogMs = 0.0;
+        const auto predictorLogMs = Util::MillisecondsNow();
+        if (Config::Instance()->ReprojInputPredictor.value_or_default() &&
+            predictorLogMs - lastPresenterPredictorLogMs > 10000.0)
+        {
+            lastPresenterPredictorLogMs = predictorLogMs;
+            char predictorDescription[160];
+            if (ReprojInputPredictor::DescribeStats(predictorDescription, sizeof(predictorDescription)))
+                LOG_INFO("Reproj input predictor: {} applied {}/{} slots in window", predictorDescription,
+                         _inputPredictedSlots, _predictorLogSlots);
+            else
+                LOG_INFO("Reproj input predictor: uncalibrated, applied {}/{} slots in window", _inputPredictedSlots,
+                         _predictorLogSlots);
+            _inputPredictedSlots = 0;
+            _predictorLogSlots = 0;
         }
 
         const bool dispatched = packet.warpAllowed && !focusLost

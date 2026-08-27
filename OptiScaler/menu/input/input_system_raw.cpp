@@ -536,19 +536,8 @@ void TrackRawInputDeviceRegistrationLocked(const RAWINPUTDEVICE& device)
     }
 }
 
-void AccumulateRelativeMouseMotionLocked(LONG x, LONG y)
+void RecordRawMouseMotionLocked(LONG x, LONG y)
 {
-    if (x == 0 && y == 0)
-        return;
-
-    _state.ReceivedAnyInputThisFrame = true;
-}
-
-void AccumulatePolledMouseMotionLocked(LONG x, LONG y)
-{
-    if ((x == 0 && y == 0) || _state.MenuVisible)
-        return;
-
     static const double ticksToMilliseconds = []
     {
         LARGE_INTEGER frequency {};
@@ -564,6 +553,21 @@ void AccumulatePolledMouseMotionLocked(LONG x, LONG y)
     motion.TimestampMs = static_cast<double>(counter.QuadPart) * ticksToMilliseconds;
     _state.RawMouseHistory[_state.RawMouseHistoryWriteIndex] = motion;
     _state.RawMouseHistoryWriteIndex = (_state.RawMouseHistoryWriteIndex + 1) % _state.RawMouseHistory.size();
+}
+
+void AccumulateRelativeMouseMotionLocked(LONG x, LONG y)
+{
+    if (x == 0 && y == 0)
+        return;
+
+    _state.ReceivedAnyInputThisFrame = true;
+
+    // Raw-input games keep the cursor centered/hidden, so the polled
+    // GetCursorPos delta stream never moves. Record the game-facing raw motion
+    // here instead, or the timestamped motion history stays empty and
+    // input-predicted timewarp (and the legacy late latch) cannot calibrate.
+    if (!_state.MenuVisible)
+        RecordRawMouseMotionLocked(x, y);
 }
 
 bool ShouldRecordRawMotionHandleLocked(HRAWINPUT handle)

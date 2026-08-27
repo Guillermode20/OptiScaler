@@ -226,6 +226,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::atomic<bool> _hasTrackedMouseSensitivity { false };
     bool _inputPredictorActive = false;  // hysteresis state of the input-predicted warp path
     double _lastPredictorFeedPoseMs = 0.0; // estimator dedup guard (newest fed pose)
+    uint32_t _inputPredictedSlots = 0;   // async presenter diagnostics window
+    uint32_t _predictorLogSlots = 0;
   protected:
     void ReleaseObjects() override final;
     void CreateObjects(ID3D12Device* InDevice) override final;
