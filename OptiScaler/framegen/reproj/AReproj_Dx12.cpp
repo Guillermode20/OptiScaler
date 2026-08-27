@@ -1165,14 +1165,20 @@ bool AReproj_Dx12::WaitForPresenterDeadline(double deadlineMs)
         const auto remaining = deadlineMs - Util::MillisecondsNow();
         if (remaining <= 0.2)
             break;
-        // Sleep in 5ms chunks so _stopPresenter can preempt within 5ms. Use the
-        // high-resolution timer even for the final sub-2ms portion: Wine's
-        // condition_variable wait_for can overshoot that interval by a whole slot.
+        // Sleep in 5ms chunks so _stopPresenter can preempt within 5ms
         const double chunk = std::min(remaining - 0.2, 5.0);
-        if (chunk > 0.2)
+        if (chunk > 2.0)
         {
             // Use high-res timer (QPC ns) - matches presenter display clock domain
             FrameLimit::sleepForMs(chunk);
+            if (_stopPresenter.load())
+                return false;
+        }
+        else
+        {
+            std::unique_lock lock(_presentMutex);
+            _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(chunk),
+                                [&] { return _stopPresenter.load(); });
             if (_stopPresenter.load())
                 return false;
         }
@@ -1454,7 +1460,7 @@ void AReproj_Dx12::PresenterMain()
     {
         const auto refreshHz = TargetRefreshHz();
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
-        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 1.0, 4.0);
+        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, 8.0);
 
         // Handle TargetRefresh change without restart: reset EMA and grid
         // so 240→120 doesn't stay stuck at 4ms period with early correction drift.
@@ -1556,6 +1562,53 @@ void AReproj_Dx12::PresenterMain()
                 }
             }
 
+            if (tSlot)
+            {
+                const double deadlineMs = nextDeadlineMs;
+                const double wakeTargetMs = deadlineMs - dispatchLeadMs;
+                // Convert ms to QPC using telemetry clock
+                // Simpler: store ms-based deadline in QPC via Now + delta
+                // We'll store softwareDeadline as QPC corresponding to nextDeadlineMs
+                // Approximate: softwareDeadlineQpc = NowQpc + (deadlineMs - now) * freq/1000
+                LARGE_INTEGER freq {}; QueryPerformanceFrequency(&freq);
+                const int64_t deltaQpc = static_cast<int64_t>((deadlineMs - Util::MillisecondsNow()) * freq.QuadPart / 1000.0);
+                tSlot->softwareDeadlineQpc = _telemetry.NowQpc() + deltaQpc;
+                tSlot->wakeTargetQpc = tSlot->softwareDeadlineQpc - static_cast<int64_t>(dispatchLeadMs * freq.QuadPart / 1000.0);
+            }
+
+            const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
+            const auto wakeCompletedMs = Util::MillisecondsNow();
+            if (tSlot)
+                tSlot->wakeCompletedQpc = _telemetry.NowQpc();
+
+            // Adapt from usable headroom after the actual wake, not from loop-top lateness. Present(1)
+            // normally blocks for most of a refresh, so loop-top is early even when Wine's timer then
+            // overshoots the requested wake by 3-10 ms. UpdateWarpGpuDuration used to reset this to 3 ms
+            // every slot, making the old adaptation ineffective (telemetry always reported lead=3.00).
+            constexpr double LEAD_GROW_MS = 0.5;
+            constexpr double LEAD_DECAY_MS = 0.05;
+            const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
+            if (wakeHeadroomMs < 2.0)
+                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, 8.0);
+            else if (wakeHeadroomMs > 4.0)
+                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
+
+            if (!deadlineOk)
+            {
+                if (tSlot)
+                {
+                    tSlot->outcome = ReprojSlotOutcome::PresenterStopped;
+                    _telemetry.FinalizeSlot(tSlot);
+                    _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
+                }
+                break;
+            }
+        }
+        else if (tSlot)
+        {
+            tSlot->softwareDeadlineQpc = 0;
+            tSlot->wakeTargetQpc = 0;
+            tSlot->wakeCompletedQpc = _telemetry.NowQpc();
         }
 
         if (tSlot)
@@ -1847,62 +1900,6 @@ void AReproj_Dx12::PresenterMain()
                 _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
             }
             break;
-        }
-
-        // Record and submit the next backbuffer as soon as it becomes available after the
-        // previous vblank. Waiting before dispatch makes the Present(1) call arrive just
-        // after the target vblank under Proton, so it blocks for an entire extra refresh.
-        // The queue already orders this work before Present; sleep only after submission,
-        // leaving a small, adaptive lead for the present call itself.
-        if (nextDeadlineMs > 0.0)
-        {
-            if (tSlot)
-            {
-                const double deadlineMs = nextDeadlineMs;
-                LARGE_INTEGER freq {};
-                QueryPerformanceFrequency(&freq);
-                const int64_t deltaQpc =
-                    static_cast<int64_t>((deadlineMs - Util::MillisecondsNow()) * freq.QuadPart / 1000.0);
-                tSlot->softwareDeadlineQpc = _telemetry.NowQpc() + deltaQpc;
-                tSlot->wakeTargetQpc =
-                    tSlot->softwareDeadlineQpc - static_cast<int64_t>(dispatchLeadMs * freq.QuadPart / 1000.0);
-            }
-
-            const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
-            const auto wakeCompletedMs = Util::MillisecondsNow();
-            if (tSlot)
-                tSlot->wakeCompletedQpc = _telemetry.NowQpc();
-
-            // This is now a present-submission lead, not a rendering lead: the GPU work is
-            // already queued above. Keep enough headroom for Wine timer jitter without
-            // starting a Present immediately after the previous vblank, which guarantees a
-            // nearly-full-refresh block and produces the observed 10-16 ms intervals.
-            constexpr double LEAD_GROW_MS = 0.25;
-            constexpr double LEAD_DECAY_MS = 0.05;
-            constexpr double MIN_PRESENT_LEAD_MS = 1.0;
-            constexpr double MAX_PRESENT_LEAD_MS = 4.0;
-            const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
-            if (wakeHeadroomMs < 0.5)
-                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, MAX_PRESENT_LEAD_MS);
-            else if (wakeHeadroomMs > 1.5)
-                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, MIN_PRESENT_LEAD_MS);
-
-            if (!deadlineOk)
-            {
-                if (tSlot)
-                {
-                    tSlot->outcome = ReprojSlotOutcome::PresenterStopped;
-                    _telemetry.FinalizeSlot(tSlot);
-                    _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-                }
-                break;
-            }
-        }
-        else if (tSlot)
-        {
-            tSlot->softwareDeadlineQpc = 0;
-            tSlot->wakeTargetQpc = 0;
-            tSlot->wakeCompletedQpc = _telemetry.NowQpc();
         }
 
         if (tSlot)
