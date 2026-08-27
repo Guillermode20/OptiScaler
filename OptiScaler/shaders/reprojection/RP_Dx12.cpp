@@ -35,8 +35,6 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
         return false;
     }
 
-    LOG_DEBUG("[{}] Start!", _name);
-
     _counter++;
     _counter = _counter % RP_NUM_OF_HEAPS;
     FrameDescriptorHeap& currentHeap = _frameHeaps[_counter];

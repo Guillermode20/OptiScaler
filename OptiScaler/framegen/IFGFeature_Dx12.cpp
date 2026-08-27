@@ -179,8 +179,6 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetSCCommandList(int index)
     if (index < 0)
         index = GetIndex();
 
-    LOG_DEBUG("index: {}", index);
-
     if (_scCommandAllocator[0] == nullptr)
     {
         if (_device != nullptr)

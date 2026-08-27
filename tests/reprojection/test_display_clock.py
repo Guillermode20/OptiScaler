@@ -85,6 +85,16 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("PresentCompositorFrame(1, 0, !newAnchor, false)", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
+    def test_async_hot_path_has_no_per_output_debug_logging(self):
+        root = Path(__file__).resolve().parents[2]
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        dispatch = (root / "OptiScaler/shaders/reprojection/RP_Dx12.cpp").read_text(encoding="utf-8")
+        present = reproj.split("HRESULT AReproj_Dx12::PresentCompositorFrame", 1)[1].split(
+            "bool AReproj_Dx12::SampleDisplayClock", 1)[0]
+        warp = dispatch.split("bool RP_Dx12::Dispatch", 1)[1].split("RP_Dx12::RP_Dx12", 1)[0]
+        self.assertNotIn("LOG_DEBUG", present)
+        self.assertNotIn("LOG_DEBUG", warp)
+
     def test_warp_phase_extrapolates_from_pose_timestamp(self):
         # Capture-completion timestamps carry the game's pipeline latency and its
         # jitter into the warp phase; the pose-sample time is the valid origin.

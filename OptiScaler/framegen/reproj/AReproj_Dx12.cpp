@@ -56,7 +56,6 @@ HRESULT AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags, bool interpola
 
     if (result == S_OK)
     {
-        LOG_DEBUG("Presented frame, SyncInterval: {}, Flags: {:X}", SyncInterval, Flags);
         fakenvapi::reportFGPresent(_swapChain, true, interpolated);
     }
     else
@@ -80,7 +79,6 @@ bool AReproj_Dx12::SubmitSCCommandList(int fIndex)
         return false;
     }
 
-    LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
     auto closeResult = _scCommandList[fIndex]->Close();
 
     if (closeResult != S_OK)
@@ -2192,8 +2190,6 @@ HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source
 
 bool AReproj_Dx12::Present()
 {
-    LOG_FUNC();
-    LOG_INFO("Reproj diag: Present() entry");
     if (_swapChain == nullptr)
         return false;
 
