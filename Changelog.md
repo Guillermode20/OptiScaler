@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.27 (2026-08-27)
+* Reproj: remove cap-side 2ms busy spin
+
 ## v10.0.0.26 (2026-08-27)
 * Reproj: use high-resolution timing for final async presenter wait
 

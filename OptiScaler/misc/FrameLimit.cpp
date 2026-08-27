@@ -141,16 +141,16 @@ void FrameLimit::sleepForMs(double ms)
         LOG_ERROR("Sleep command failed: {}", res);
 }
 
-void FrameLimit::sleepForPresenterMs(double ms)
+void FrameLimit::sleepForPrecisePacingMs(double ms)
 {
     if (ms <= 0.0)
         return;
 
-    // A 120 Hz presenter has only a few milliseconds between slots. Keep the
-    // accuracy benefit of the QPC wait, but reserve just 0.2 ms for spinning
-    // so the worker does not monopolize a CPU core while the game renders.
+    // Keep the accuracy benefit of the QPC wait, but reserve just 0.2 ms for
+    // spinning so neither the presenter nor the capped game thread monopolizes
+    // a CPU core while KCD2 renders.
     if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), 200'000); res)
-        LOG_ERROR("Presenter sleep failed: {}", res);
+        LOG_ERROR("Precise pacing sleep failed: {}", res);
 }
 
 void FrameLimit::paceReprojectionSource(bool active)
@@ -193,8 +193,11 @@ void FrameLimit::paceReprojectionSource(bool active)
     }
 
     const uint64_t deadlineNs = pacer.nextDeadlineNs;
-    if (const auto res = combined_sleep(static_cast<int64_t>(deadlineNs - nowNs)); res)
-        LOG_ERROR("Reprojection source sleep failed: {}", res);
+    // The legacy limiter's 2 ms spin tail costs about 12% of a CPU core at
+    // 60 Hz. That contention turns an otherwise sustainable 60 FPS KCD2
+    // source into 25-30 ms frames. Keep the same absolute deadline grid, but
+    // use the 0.2 ms precision tail used by the async presenter.
+    sleepForPrecisePacingMs(static_cast<double>(deadlineNs - nowNs) / 1'000'000.0);
     const uint64_t completedNs = get_timestamp();
     g_reprojectionSourceTimingErrorMs.store(
         static_cast<float>(static_cast<double>(completedNs - deadlineNs) / 1'000'000.0), std::memory_order_relaxed);

@@ -1173,7 +1173,7 @@ bool AReproj_Dx12::WaitForPresenterDeadline(double deadlineMs)
         if (chunk > 0.2)
         {
             // Use high-res timer (QPC ns) - matches presenter display clock domain
-            FrameLimit::sleepForPresenterMs(chunk);
+            FrameLimit::sleepForPrecisePacingMs(chunk);
             if (_stopPresenter.load())
                 return false;
         }

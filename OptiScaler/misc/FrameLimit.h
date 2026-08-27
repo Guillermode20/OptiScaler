@@ -12,9 +12,9 @@ class FrameLimit
 
     static void sleep(bool fgActive);
     static void sleepForMs(double ms);
-    // High-resolution sleep with a small spin tail. The async presenter uses
-    // this rather than consuming a full 2 ms of CPU every display slot.
-    static void sleepForPresenterMs(double ms);
+    // High-resolution sleep with a small spin tail for async presentation and
+    // source pacing, rather than consuming a full 2 ms of CPU every slot.
+    static void sleepForPrecisePacingMs(double ms);
     // Called by the virtualized async-reprojection game thread after an anchor
     // has been published. This deliberately never runs on the presenter thread.
     static void paceReprojectionSource(bool active);

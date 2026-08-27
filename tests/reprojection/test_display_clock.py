@@ -132,10 +132,10 @@ class ReprojectionTests(unittest.TestCase):
         wait = source.split("bool AReproj_Dx12::WaitForPresenterDeadline", 1)[1].split(
             "bool AReproj_Dx12::CreateAsyncPresenter", 1)[0]
         self.assertIn("if (chunk > 0.2)", wait)
-        self.assertIn("FrameLimit::sleepForPresenterMs(chunk)", wait)
+        self.assertIn("FrameLimit::sleepForPrecisePacingMs(chunk)", wait)
         self.assertNotIn("_presentCv.wait_for", wait)
         frame_limit = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
-        presenter_sleep = frame_limit.split("void FrameLimit::sleepForPresenterMs", 1)[1].split(
+        presenter_sleep = frame_limit.split("void FrameLimit::sleepForPrecisePacingMs", 1)[1].split(
             "void FrameLimit::paceReprojectionSource", 1)[0]
         self.assertIn("200'000", presenter_sleep)
 
@@ -203,6 +203,17 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("FrameLimit::paceReprojectionSource(true)", publish)
         self.assertLess(publish.index("FrameLimit::paceReprojectionSource(true)"), publish.index("return true"))
         self.assertIn("FrameLimit::paceReprojectionSource(false)", source)
+
+    def test_source_cap_does_not_burn_two_ms_of_cpu_every_frame(self):
+        # KCD2 can sustain more than 60 FPS uncapped. A full 2 ms busy tail in
+        # the cap itself takes roughly 12% of one core at 60 Hz and turns a
+        # sustainable source into a sub-60 one under load.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
+        pacer = source.split("void FrameLimit::paceReprojectionSource", 1)[1].split(
+            "FrameLimit::SourcePacingStats", 1)[0]
+        self.assertIn("sleepForPrecisePacingMs", pacer)
+        self.assertNotIn("combined_sleep(static_cast<int64_t>(deadlineNs - nowNs))", pacer)
 
 
 if __name__ == "__main__":
