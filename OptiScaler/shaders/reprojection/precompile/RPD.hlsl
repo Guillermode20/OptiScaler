@@ -182,7 +182,35 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         conf *= saturate((length(delta) - 0.02f) * 8.0f);
 
     float4 warped = LastColor.SampleLevel(Bilinear, clamp(reprojUV, 0.0f, 1.0f), 0);
-    float4 fallback = lerp(original, mvWarp, mvCoverage);
+
+    // Disocclusion fallback. With a HUDless source (KCD2) the motion vectors are not
+    // trustworthy, so fall back to the exact rotation-only homography from the previous
+    // pose instead of the MV warp; translation correction fades out with confidence.
+    float4 fallback;
+    if (HudlessSource)
+    {
+        float3 rotRay = float3(ndc.x * CameraAspect * tanHalf, ndc.y * tanHalf, 1.0f);
+        float3 rotSrc = float3(dot(PrevCameraRight.xyz, rotRay), dot(PrevCameraUp.xyz, rotRay),
+                               dot(PrevCameraForward.xyz, rotRay));
+        float4 rotWarp = original;
+        float rotConf = 0.0f;
+        if (rotSrc.z > 0.0f)
+        {
+            float2 rotUV = float2(rotSrc.x / (rotSrc.z * CameraAspect * tanHalf),
+                                  rotSrc.y / (rotSrc.z * tanHalf));
+            if (all(rotUV >= 0.0f) && all(rotUV <= 1.0f))
+            {
+                float2 rotEdge = min(rotUV, 1.0f - rotUV) * float2(DisplaySize);
+                rotConf = saturate(min(rotEdge.x, rotEdge.y) * 0.5f);
+                rotWarp = LastColor.SampleLevel(Bilinear, clamp(rotUV, 0.0f, 1.0f), 0);
+            }
+        }
+        fallback = lerp(original, rotWarp, rotConf);
+    }
+    else
+    {
+        fallback = lerp(original, mvWarp, mvCoverage);
+    }
     float4 result = lerp(original, lerp(fallback, warped, conf), Strength);
 
     if (DebugView == 1)

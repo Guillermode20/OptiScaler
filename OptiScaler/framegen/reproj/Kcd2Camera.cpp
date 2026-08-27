@@ -332,11 +332,12 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
             g_smoothingInit = false;
         }
     }
-    // KCD2 currently supplies depth but no trustworthy near/far projection constants. Mode 1 combines
-    // camera/depth with motion vectors and produced severe double-warp wobble/artifacts. Validate the
-    // acquired pose independently in camera rotation-only mode; enable depth only after its projection
-    // convention and near/far values are extracted and verified.
-    constants.mode = 2;
+    // Near/far are extracted and live-validated above (near-edge y @0x54, far-edge y @0x6C), and the
+    // RPD depth path falls back to the rotation homography instead of the MV warp when a HUDless
+    // source is present, so the configured warp mode is honored. Clamp only unsupported values
+    // (mode 3+ extrapolation was removed with input latching).
+    if (constants.mode > 2)
+        constants.mode = 2;
     return current.timestampMs;
 }
 

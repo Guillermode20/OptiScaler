@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.30 (2026-08-27)
+* KCD2 depth-aware warp: honor configured warp mode in Kcd2Camera, rotation-homography disocclusion fallback in RPD
+
 ## v10.0.0.29 (2026-08-27)
 * Reproj: adapt presenter lead to GPU queue delay
 
