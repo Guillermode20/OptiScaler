@@ -1,6 +1,6 @@
 # KCD2 real asynchronous timewarp
 
-Date: 2026-08-29  
+Date: 2026-08-29
 Base: `async-timewarp` at `29714920`
 
 ## Verdict on the current branch
