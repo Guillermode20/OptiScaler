@@ -2,6 +2,7 @@
 #include "AReproj_Dx12.h"
 #include "Kcd2Camera.h"
 #include "Kcd2HudIsolation.h"
+#include "Kcd2Input.h"
 #include "Kcd2Scaleform.h"
 #include "ReprojInputPredictor.h"
 
@@ -933,6 +934,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // Keep the HUD trace lazy: WHGame.dll is loaded after OptiScaler in KCD2. This is read-only
     // and fails closed on an unknown game build.
     Kcd2Scaleform::Initialize();
+    Kcd2Input::Initialize();
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     if (kcd2CameraTimestamp > 0.0 && packet.constants.mode == 0)
@@ -957,6 +959,16 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             char projectionDescription[256];
             if (Kcd2Camera::DescribeProjection(projectionDescription, sizeof(projectionDescription)))
                 LOG_INFO("KCD2 camera projection: {}", projectionDescription);
+        }
+
+        static double lastInputLogMs = 0.0;
+        const auto inputLogMs = Util::MillisecondsNow();
+        if (inputLogMs - lastInputLogMs > 10000.0)
+        {
+            lastInputLogMs = inputLogMs;
+            char inputDescription[256];
+            if (Kcd2Input::DescribeStats(inputDescription, sizeof(inputDescription)))
+                LOG_INFO("KCD2 late input: {}", inputDescription);
         }
     }
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
