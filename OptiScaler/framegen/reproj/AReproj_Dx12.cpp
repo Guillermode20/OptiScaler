@@ -1435,7 +1435,18 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 
     D3D12_COMMAND_QUEUE_DESC queueDesc {};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    // The warp is deadline-sensitive and normally contains less than a millisecond
+    // of GPU work. Ask the scheduler to run it ahead of queued game rendering. Some
+    // drivers reject high-priority queues, so retain the normal-priority fallback.
+    queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
     auto result = _device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_presentQueue));
+    if (FAILED(result))
+    {
+        LOG_INFO("Reproj: high-priority present queue unavailable ({:X}), retrying normal priority", (UINT) result);
+        SAFE_RELEASE(_presentQueue);
+        queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        result = _device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_presentQueue));
+    }
     if (FAILED(result))
     {
         LOG_WARN("Reproj: async present queue creation failed: {:X}", (UINT) result);
@@ -1658,6 +1669,8 @@ void AReproj_Dx12::PresenterMain()
     constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 16.0; // 4->16: 8ms drift needs >4ms to recover
     double totalEarlyCorrectionMs = 0.0;
     uint32_t consecutiveJammedPresents = 0;
+    LARGE_INTEGER qpcFrequency {};
+    QueryPerformanceFrequency(&qpcFrequency);
 
     // Telemetry: ensure clock initialized (already in ReprojTelemetry ctor)
     // Poll calibration once at thread start if enabled.
@@ -1806,10 +1819,11 @@ void AReproj_Dx12::PresenterMain()
                 // Simpler: store ms-based deadline in QPC via Now + delta
                 // We'll store softwareDeadline as QPC corresponding to nextDeadlineMs
                 // Approximate: softwareDeadlineQpc = NowQpc + (deadlineMs - now) * freq/1000
-                LARGE_INTEGER freq {}; QueryPerformanceFrequency(&freq);
-                const int64_t deltaQpc = static_cast<int64_t>((deadlineMs - Util::MillisecondsNow()) * freq.QuadPart / 1000.0);
+                const int64_t deltaQpc = static_cast<int64_t>(
+                    (deadlineMs - Util::MillisecondsNow()) * qpcFrequency.QuadPart / 1000.0);
                 tSlot->softwareDeadlineQpc = _telemetry.NowQpc() + deltaQpc;
-                tSlot->wakeTargetQpc = tSlot->softwareDeadlineQpc - static_cast<int64_t>(dispatchLeadMs * freq.QuadPart / 1000.0);
+                tSlot->wakeTargetQpc = tSlot->softwareDeadlineQpc -
+                                       static_cast<int64_t>(dispatchLeadMs * qpcFrequency.QuadPart / 1000.0);
             }
 
             const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
