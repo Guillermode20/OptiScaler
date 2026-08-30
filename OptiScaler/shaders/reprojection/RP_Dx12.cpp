@@ -46,7 +46,7 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     if (depth != nullptr)
         ResourceBarrier(cmdList, depth, depthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-    ResourceBarrier(cmdList, output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ResourceBarrier(cmdList, output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Sample the previous frame byte-faithfully: an sRGB backbuffer copy would otherwise
     // gamma-decode on sampling and come out too bright when written to the UAV output.
@@ -71,11 +71,9 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     CreateUnorderedAccessView(_device, output, currentHeap.GetUavCPU(0), 0);
 
-    if (!CreateConstantsBuffer(_device, _constantBuffers[_counter], constants, currentHeap.GetCbvCPU(0)))
-    {
-        LOG_ERROR("[{}] Failed to create a constants buffer", _name);
+    if (_constantBufferData[_counter] == nullptr)
         return false;
-    }
+    memcpy(_constantBufferData[_counter], &constants, sizeof(constants));
 
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
@@ -152,6 +150,34 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
     }
 
     _init = InitHeaps(InDevice, _frameHeaps, RP_NUM_OF_HEAPS);
+    if (!_init)
+        return;
+
+    // These upload buffers live for the lifetime of the reprojection pass. D3D12
+    // explicitly permits persistent mapping, so avoid Map/Unmap and CBV creation
+    // in every display slot. Each descriptor heap owns the matching ring-buffer
+    // entry and command-allocator fences prevent it from being overwritten early.
+    const CD3DX12_RANGE noCpuReads(0, 0);
+    for (int i = 0; i < RP_NUM_OF_HEAPS; ++i)
+    {
+        const auto result = _constantBuffers[i]->Map(0, &noCpuReads, reinterpret_cast<void**>(&_constantBufferData[i]));
+        if (FAILED(result))
+        {
+            LOG_ERROR("[{}] Persistent constant-buffer map failed: {:x}", _name, static_cast<unsigned int>(result));
+            for (int mapped = 0; mapped < i; ++mapped)
+            {
+                _constantBuffers[mapped]->Unmap(0, nullptr);
+                _constantBufferData[mapped] = nullptr;
+            }
+            _init = false;
+            return;
+        }
+
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc {};
+        cbvDesc.BufferLocation = _constantBuffers[i]->GetGPUVirtualAddress();
+        cbvDesc.SizeInBytes = static_cast<UINT>(sizeof(RP_Constants));
+        InDevice->CreateConstantBufferView(&cbvDesc, _frameHeaps[i].GetCbvCPU(0));
+    }
 }
 
 RP_Dx12::~RP_Dx12()
@@ -163,6 +189,11 @@ RP_Dx12::~RP_Dx12()
 
     for (int i = 0; i < RP_NUM_OF_HEAPS; i++)
     {
+        if (_constantBuffers[i] != nullptr && _constantBufferData[i] != nullptr)
+        {
+            _constantBuffers[i]->Unmap(0, nullptr);
+            _constantBufferData[i] = nullptr;
+        }
         SAFE_RELEASE(_constantBuffers[i]);
         _frameHeaps[i].ReleaseHeaps();
     }

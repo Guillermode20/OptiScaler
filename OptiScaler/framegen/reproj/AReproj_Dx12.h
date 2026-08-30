@@ -166,7 +166,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void PresenterMain();
     HRESULT WaitForPresentSlot();
     HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot = true);
-    void UpdateWarpGpuDuration(int outputIndex);
     bool SampleDisplayClock(double nowMs); // lock pacing to DXGI_FRAME_STATISTICS vblanks
     double TargetRefreshHz();
     uint32_t WarpCountForFrame(double refreshHz) const;
@@ -200,7 +199,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _presentIntervalCursor = 0;
     double _lastDisplayPresentMs = 0.0;
     double _dispatchLeadMs = 3.0;
-    double _warpDurationEmaMs = 2.0;
     RuntimeMetrics _runtimeMetrics {};
     mutable std::mutex _metricsMutex;
     std::mutex _refreshMutex;

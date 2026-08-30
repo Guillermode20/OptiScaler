@@ -2,6 +2,7 @@
 #include "AReproj_Dx12.h"
 #include "Kcd2Camera.h"
 #include "Kcd2HudIsolation.h"
+#include "Kcd2Input.h"
 #include "Kcd2Scaleform.h"
 #include "ReprojInputPredictor.h"
 
@@ -280,8 +281,12 @@ bool AReproj_Dx12::CreateWarpOutput(int fIndex, ID3D12Resource* source)
 
     inDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
-    hr = _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, D3D12_RESOURCE_STATE_COMMON,
-                                          nullptr, IID_PPV_ARGS(&_warpOutput[fIndex]));
+    // Every use follows the same UAV -> COPY_SOURCE cycle. Starting and ending
+    // in COPY_SOURCE removes the otherwise redundant COPY_SOURCE -> COMMON ->
+    // UAV transition between display slots.
+    const auto initialState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    hr = _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, initialState, nullptr,
+                                          IID_PPV_ARGS(&_warpOutput[fIndex]));
 
     if (hr != S_OK)
     {
@@ -933,6 +938,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // Keep the HUD trace lazy: WHGame.dll is loaded after OptiScaler in KCD2. This is read-only
     // and fails closed on an unknown game build.
     Kcd2Scaleform::Initialize();
+    Kcd2Input::Initialize();
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     if (kcd2CameraTimestamp > 0.0 && packet.constants.mode == 0)
@@ -957,6 +963,16 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             char projectionDescription[256];
             if (Kcd2Camera::DescribeProjection(projectionDescription, sizeof(projectionDescription)))
                 LOG_INFO("KCD2 camera projection: {}", projectionDescription);
+        }
+
+        static double lastInputLogMs = 0.0;
+        const auto inputLogMs = Util::MillisecondsNow();
+        if (inputLogMs - lastInputLogMs > 10000.0)
+        {
+            lastInputLogMs = inputLogMs;
+            char inputDescription[256];
+            if (Kcd2Input::DescribeStats(inputDescription, sizeof(inputDescription)))
+                LOG_INFO("KCD2 late input: {}", inputDescription);
         }
     }
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
@@ -1086,7 +1102,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         return false;
     }
 
-    UpdateWarpGpuDuration(outputIndex);
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
     uint32_t queryStart = telemetryQueryStart;
@@ -1099,9 +1114,9 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     else if (queryStart != UINT32_MAX)
         useTelemetryQuery = true;
 
-    // Legacy fallback uses outputIndex*2, telemetry uses sequence-indexed
-    const UINT timestampStart = useTelemetryQuery ? queryStart : static_cast<UINT>(outputIndex * 2);
-    if (_warpTimestampHeap != nullptr && timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
+    // Sequence-indexed timestamps are emitted only while telemetry is active.
+    const UINT timestampStart = useTelemetryQuery ? queryStart : UINT32_MAX;
+    if (useTelemetryQuery && _warpTimestampHeap != nullptr && timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
@@ -1127,13 +1142,13 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
     cmdList->CopyResource(backBuffer, _warpOutput[outputIndex]);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-    ResourceBarrier(cmdList, _warpOutput[outputIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     backBuffer->Release();
 
     if (constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
         _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
 
-    if (_warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr && timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
+    if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
+        timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
     {
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart + 1);
         cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart, 2,
@@ -1147,36 +1162,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
     return true;
-}
-
-void AReproj_Dx12::UpdateWarpGpuDuration(int outputIndex)
-{
-    if (_warpTimestampReadback == nullptr || _presentTimestampFrequency == 0 || outputIndex < 0 ||
-        outputIndex >= BUFFER_COUNT || _scAllocatorFenceValues[outputIndex] == 0 || _scFence == nullptr ||
-        _scFence->GetCompletedValue() < _scAllocatorFenceValues[outputIndex])
-        return;
-
-    const SIZE_T offset = static_cast<SIZE_T>(outputIndex * 2 * sizeof(UINT64));
-    D3D12_RANGE range { offset, offset + 2 * sizeof(UINT64) };
-    void* mapped = nullptr;
-    if (FAILED(_warpTimestampReadback->Map(0, &range, &mapped)))
-        return;
-    const auto* timestamps = reinterpret_cast<const UINT64*>(static_cast<const uint8_t*>(mapped) + offset);
-    if (timestamps[1] >= timestamps[0])
-    {
-        const double durationMs = static_cast<double>(timestamps[1] - timestamps[0]) * 1000.0 /
-                                  static_cast<double>(_presentTimestampFrequency);
-        if (durationMs > 0.0 && durationMs < 50.0)
-        {
-            std::scoped_lock metricsLock(_metricsMutex);
-            _warpDurationEmaMs = _warpDurationEmaMs * 0.9 + durationMs * 0.1;
-            // PresenterMain owns the dispatch lead. Do not reset it from the GPU-only duration:
-            // on Proton the timer can wake several milliseconds late even though the warp itself is
-            // sub-millisecond. Resetting here silently defeated the presenter's scheduler adaptation.
-        }
-    }
-    D3D12_RANGE written { 0, 0 };
-    _warpTimestampReadback->Unmap(0, &written);
 }
 
 bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
@@ -1277,7 +1262,6 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
     cmdList->CopyResource(bb, _warpOutput[fIndex]);
     ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-    ResourceBarrier(cmdList, _warpOutput[fIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
 
     // Composite the captured UI unwarped on top of the warped HUD-less frame
     if (cb.debugView != 2 && _syncHasUi[fIndex] && _uiColor[fIndex] != nullptr && _renderUI != nullptr &&
@@ -1423,7 +1407,18 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 
     D3D12_COMMAND_QUEUE_DESC queueDesc {};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    // The warp is deadline-sensitive and normally contains less than a millisecond
+    // of GPU work. Ask the scheduler to run it ahead of queued game rendering. Some
+    // drivers reject high-priority queues, so retain the normal-priority fallback.
+    queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
     auto result = _device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_presentQueue));
+    if (FAILED(result))
+    {
+        LOG_INFO("Reproj: high-priority present queue unavailable ({:X}), retrying normal priority", (UINT) result);
+        SAFE_RELEASE(_presentQueue);
+        queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        result = _device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_presentQueue));
+    }
     if (FAILED(result))
     {
         LOG_WARN("Reproj: async present queue creation failed: {:X}", (UINT) result);
@@ -1451,7 +1446,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
             _telemetry.SetTimestampResources(_warpTimestampHeap, _warpTimestampReadback, _scFence, _presentTimestampFrequency);
         }
     }
-    LOG_INFO("Reproj: main-swapchain async presenter created");
+    LOG_INFO("Reproj: main-swapchain async presenter created ({} GPU queue priority)",
+             queueDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH ? "high" : "normal");
     return true;
 }
 
@@ -1646,15 +1642,17 @@ void AReproj_Dx12::PresenterMain()
     constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 16.0; // 4->16: 8ms drift needs >4ms to recover
     double totalEarlyCorrectionMs = 0.0;
     uint32_t consecutiveJammedPresents = 0;
+    LARGE_INTEGER qpcFrequency {};
+    QueryPerformanceFrequency(&qpcFrequency);
+    const auto* config = Config::Instance();
 
     // Telemetry: ensure clock initialized (already in ReprojTelemetry ctor)
     // Poll calibration once at thread start if enabled.
-    if (Config::Instance()->ReprojTelemetry.value_or_default())
+    if (config->ReprojTelemetry.value_or_default())
         _telemetry.TryCalibrate();
 
     while (!_stopPresenter.load())
     {
-        const auto* config = Config::Instance();
         const auto refreshHz = TargetRefreshHz();
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
         const auto requestedLeadMs = config->ReprojDispatchLeadOverrideMs.value_or_default();
@@ -1670,7 +1668,8 @@ void AReproj_Dx12::PresenterMain()
             const auto queueDelayMs = _telemetry.RecentGpuQueueDelayMs();
             if (std::isfinite(queueDelayMs) && queueDelayMs > 0.0f)
             {
-                const auto desiredLeadMs = std::clamp(static_cast<double>(queueDelayMs) + _warpDurationEmaMs + 0.75,
+                const auto warpDurationMs = _telemetry.RecentGpuDurationMs();
+                const auto desiredLeadMs = std::clamp(static_cast<double>(queueDelayMs + warpDurationMs) + 0.75,
                                                        3.0, 16.0);
                 _dispatchLeadMs = desiredLeadMs >= _dispatchLeadMs
                                       ? desiredLeadMs
@@ -1700,7 +1699,7 @@ void AReproj_Dx12::PresenterMain()
 
         // Telemetry per-slot record (only if enabled, otherwise dummy to avoid overhead)
         ReprojSlotRecord* tSlot = nullptr;
-        const bool telemetryEnabled = Config::Instance()->ReprojTelemetry.value_or_default();
+        const bool telemetryEnabled = config->ReprojTelemetry.value_or_default();
         if (telemetryEnabled)
         {
             tSlot = _telemetry.BeginSlot();
@@ -1794,10 +1793,11 @@ void AReproj_Dx12::PresenterMain()
                 // Simpler: store ms-based deadline in QPC via Now + delta
                 // We'll store softwareDeadline as QPC corresponding to nextDeadlineMs
                 // Approximate: softwareDeadlineQpc = NowQpc + (deadlineMs - now) * freq/1000
-                LARGE_INTEGER freq {}; QueryPerformanceFrequency(&freq);
-                const int64_t deltaQpc = static_cast<int64_t>((deadlineMs - Util::MillisecondsNow()) * freq.QuadPart / 1000.0);
+                const int64_t deltaQpc = static_cast<int64_t>(
+                    (deadlineMs - Util::MillisecondsNow()) * qpcFrequency.QuadPart / 1000.0);
                 tSlot->softwareDeadlineQpc = _telemetry.NowQpc() + deltaQpc;
-                tSlot->wakeTargetQpc = tSlot->softwareDeadlineQpc - static_cast<int64_t>(dispatchLeadMs * freq.QuadPart / 1000.0);
+                tSlot->wakeTargetQpc = tSlot->softwareDeadlineQpc -
+                                       static_cast<int64_t>(dispatchLeadMs * qpcFrequency.QuadPart / 1000.0);
             }
 
             const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
@@ -1807,7 +1807,7 @@ void AReproj_Dx12::PresenterMain()
 
             // Adapt from usable headroom after the actual wake, not from loop-top lateness. Present(1)
             // normally blocks for most of a refresh, so loop-top is early even when Wine's timer then
-            // overshoots the requested wake by 3-10 ms. UpdateWarpGpuDuration used to reset this to 3 ms
+            // overshoots the requested wake by 3-10 ms. An older GPU-duration path reset this to 3 ms
             // every slot, making the old adaptation ineffective (telemetry always reported lead=3.00).
             constexpr double LEAD_GROW_MS = 0.5;
             constexpr double LEAD_DECAY_MS = 0.05;
@@ -1995,7 +1995,7 @@ void AReproj_Dx12::PresenterMain()
                                      packet.sourcePoseTimestamp <= targetDisplayMs;
         const auto warpOriginMs = poseOriginValid ? packet.sourcePoseTimestamp : packet.renderTimestamp;
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
-        auto maxTimeStep = std::max(0.25f, Config::Instance()->ReprojMaxTimeStep.value_or_default());
+        auto maxTimeStep = std::max(0.25f, config->ReprojMaxTimeStep.value_or_default());
         // KCD2's rendered camera path is accurate, but source stalls can leave an anchor 2-3 frames
         // old. A hard displacement cap freezes the image mid-turn (every slot re-renders the same
         // maximum warp) and then snaps forward on anchor arrival. For KCD2 the cap instead bounds the
@@ -2004,8 +2004,8 @@ void AReproj_Dx12::PresenterMain()
         // generic value; only growth is limited, because KCD2's natural per-slot step (age/period with
         // 16-32ms alternating frames and 27-45ms anchor ages) legitimately exceeds 1.5 in normal play.
         const bool rateLimitedWarp = Kcd2Camera::IsAvailable();
-        const auto unclampedStep = static_cast<float>((anchorAgeMs / realPeriodMs) *
-                                                      Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f);
+        const auto unclampedStep =
+            static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default() * 2.0f);
         auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
         if (rateLimitedWarp)
         {
@@ -2038,7 +2038,8 @@ void AReproj_Dx12::PresenterMain()
             tSlot->sourceProvidedFrameIntervalMs = static_cast<float>(State::Instance().lastFGFrameTime);
             tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
             tSlot->anchorAgeMs = static_cast<float>(anchorAgeMs);
-            tSlot->unclampedTimeStep = static_cast<float>((anchorAgeMs / realPeriodMs) * Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f);
+            tSlot->unclampedTimeStep =
+                static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default() * 2.0f);
             tSlot->finalTimeStep = timeStep;
             tSlot->maxTimeStep = maxTimeStep;
             tSlot->timestepClamped = tSlot->unclampedTimeStep > maxTimeStep || tSlot->unclampedTimeStep < 0;
@@ -2050,7 +2051,7 @@ void AReproj_Dx12::PresenterMain()
             tSlot->cameraAspect = packet.constants.cameraAspect;
             tSlot->cameraNear = packet.constants.cameraNear;
             tSlot->cameraFar = packet.constants.cameraFar;
-            tSlot->requestedMode = static_cast<ReprojEffectiveMode>(Config::Instance()->ReprojMode.value_or_default());
+            tSlot->requestedMode = static_cast<ReprojEffectiveMode>(config->ReprojMode.value_or_default());
             // Record the actual constants submitted to the shader.  Packet resource
             // availability alone cannot distinguish the stable rotation-only path
             // from full depth/camera reprojection.
@@ -2120,7 +2121,7 @@ void AReproj_Dx12::PresenterMain()
         // whether prediction is calibrating and engaging.
         static double lastPresenterPredictorLogMs = 0.0;
         const auto predictorLogMs = Util::MillisecondsNow();
-        if (Config::Instance()->ReprojInputPredictor.value_or_default() &&
+        if (config->ReprojInputPredictor.value_or_default() &&
             predictorLogMs - lastPresenterPredictorLogMs > 10000.0)
         {
             lastPresenterPredictorLogMs = predictorLogMs;

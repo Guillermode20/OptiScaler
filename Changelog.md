@@ -1,5 +1,11 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.33 (2026-08-30)
+* Reproj efficiency: high-priority presenter queue with fallback, persistent warp constants, asynchronous-only GPU timing, and one fewer output-state barrier
+
+## v10.0.0.32 (2026-08-29)
+* KCD2 passive late-input acquisition foundation
+
 ## v10.0.0.31 (2026-08-27)
 * KCD2 depth warp: restore configured mode when the WHGame camera hook is authoritative (legacy camera fields empty)
 
