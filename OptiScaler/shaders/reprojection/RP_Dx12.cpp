@@ -46,7 +46,7 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     if (depth != nullptr)
         ResourceBarrier(cmdList, depth, depthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-    ResourceBarrier(cmdList, output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ResourceBarrier(cmdList, output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Sample the previous frame byte-faithfully: an sRGB backbuffer copy would otherwise
     // gamma-decode on sampling and come out too bright when written to the UAV output.

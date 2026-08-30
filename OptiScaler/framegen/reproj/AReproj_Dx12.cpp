@@ -281,8 +281,12 @@ bool AReproj_Dx12::CreateWarpOutput(int fIndex, ID3D12Resource* source)
 
     inDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
-    hr = _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, D3D12_RESOURCE_STATE_COMMON,
-                                          nullptr, IID_PPV_ARGS(&_warpOutput[fIndex]));
+    // Every use follows the same UAV -> COPY_SOURCE cycle. Starting and ending
+    // in COPY_SOURCE removes the otherwise redundant COPY_SOURCE -> COMMON ->
+    // UAV transition between display slots.
+    hr = _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc,
+                                          D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
+                                          IID_PPV_ARGS(&_warpOutput[fIndex]));
 
     if (hr != S_OK)
     {
@@ -1138,7 +1142,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
     cmdList->CopyResource(backBuffer, _warpOutput[outputIndex]);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-    ResourceBarrier(cmdList, _warpOutput[outputIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     backBuffer->Release();
 
     if (constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
@@ -1259,7 +1262,6 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
     cmdList->CopyResource(bb, _warpOutput[fIndex]);
     ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-    ResourceBarrier(cmdList, _warpOutput[fIndex], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
 
     // Composite the captured UI unwarped on top of the warped HUD-less frame
     if (cb.debugView != 2 && _syncHasUi[fIndex] && _uiColor[fIndex] != nullptr && _renderUI != nullptr &&
