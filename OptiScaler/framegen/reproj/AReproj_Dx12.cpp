@@ -1162,7 +1162,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         std::memcpy(generated.constants.prevCameraForward, generated.constants.cameraForward,
                     sizeof(generated.constants.cameraForward));
 
-        const auto requestedFrames = std::clamp(Config::Instance()->HybridGeneratedFrames.value_or_default(), 1u, 3u);
+        const auto requestedFrames = std::clamp(Config::Instance()->HybridGeneratedFrames.value_or_default(), 1, 3);
         if (requestedFrames != 1)
         {
             static bool warnedThreeFrameRequest = false;
