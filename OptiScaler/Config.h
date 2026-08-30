@@ -100,12 +100,13 @@ template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptio
     }
 
     constexpr T value_or_default() &&
-        requires(defaultState != NoDefault) {
-            return this->has_value() ? std::move(this->value()) : std::move(_defaultValue);
-        }
+        requires(defaultState != NoDefault)
+    {
+        return this->has_value() ? std::move(this->value()) : std::move(_defaultValue);
+    }
 
-        constexpr std::optional<T> value_for_config()
-            requires(defaultState == WithDefault)
+    constexpr std::optional<T> value_for_config()
+        requires(defaultState == WithDefault)
     {
         if (_volatile)
         {
@@ -623,14 +624,14 @@ class Config
     CustomOptional<int> ReprojMaxWarpFrames {
         1
     }; // bounds blocking warps in synchronous mode; async mode fills every refresh slot instead
-    CustomOptional<float> ReprojTargetRefresh { 0.0f };   // 0 = FramerateLimit, then active display refresh
+    CustomOptional<float> ReprojTargetRefresh { 0.0f };        // 0 = FramerateLimit, then active display refresh
     CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // async + virtualized only; 0 = uncapped
     // Experimental async pacing controls.  They are deliberately independent so
     // a game can be tested with one timing change at a time.
     CustomOptional<bool> ReprojNonBlockingAnchorSampling { false }; // sample anchors, never sleep the game thread
-    CustomOptional<float> ReprojAnchorSampleHz { 0.0f }; // 0 = SourceFramerateLimit, then TargetRefresh / 2
-    CustomOptional<float> ReprojDispatchLeadOverrideMs { 0.0f }; // 0 = adaptive 3..8 ms; otherwise 3..20 ms
-    CustomOptional<bool> ReprojHighPriorityQueue { false }; // Windows only: use HIGH priority presenter queue
+    CustomOptional<float> ReprojAnchorSampleHz { 0.0f };            // 0 = SourceFramerateLimit, then TargetRefresh / 2
+    CustomOptional<float> ReprojDispatchLeadOverrideMs { 0.0f };    // 0 = adaptive 3..8 ms; otherwise 3..20 ms
+    CustomOptional<bool> ReprojHighPriorityQueue { false };         // Windows only: use HIGH priority presenter queue
     CustomOptional<bool> ReprojAdaptiveQueueLead { true }; // account for measured present-queue delay (async only)
     CustomOptional<bool> ReprojPresentCompletionClock { false }; // use completed Present timestamps, not DXGI stats
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
@@ -639,10 +640,17 @@ class Config
     CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
     CustomOptional<bool> ReprojCenterCropDebug { false }; // show only central 50% of the viewport
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
-    CustomOptional<float> ReprojSmoothing { 0.0f }; // 0=off, 0..0.95 EMA on camera angular velocity
-    CustomOptional<bool> ReprojLateLatch { true };  // sample mouse motion at scanout to timewarp with zero input lag
-    CustomOptional<bool> ReprojInputPredictor { false }; // true-timewarp: warp from fresh raw input via calibrated camera-response model; replaces LateLatch when on
-    CustomOptional<float> ReprojInputPredictorResponse { 1.0f }; // 0.05..1 predicted-rotation scale; <1 under-rotates to follow games with smoothed aim
+    CustomOptional<float> ReprojSmoothing { 0.0f };       // 0=off, 0..0.95 EMA on camera angular velocity
+    CustomOptional<bool> ReprojLateLatch { true }; // sample mouse motion at scanout to timewarp with zero input lag
+    CustomOptional<bool> ReprojInputPredictor {
+        false
+    }; // true-timewarp: warp from fresh raw input via calibrated camera-response model; replaces LateLatch when on
+    CustomOptional<float> ReprojInputPredictorResponse {
+        1.0f
+    }; // 0.05..1 predicted-rotation scale; <1 under-rotates to follow games with smoothed aim
+    CustomOptional<bool> ReprojTargetPoseResolver { true };
+    CustomOptional<bool> ReprojTargetPoseShadow { true };
+    CustomOptional<bool> ReprojLateLatchFence { false };
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<bool> ReprojTelemetry { false };
@@ -650,6 +658,7 @@ class Config
     // Experimental, version-sensitive KCD2 late-UI interception.  It remains
     // opt-in until a retail build has been live-validated.
     CustomOptional<bool> ReprojKcd2HudIsolation { false };
+    CustomOptional<int> HybridGeneratedFrames { 1 };
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

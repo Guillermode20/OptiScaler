@@ -32,7 +32,13 @@ class RP_Dx12 : public Shader_Dx12
     // from COPY_SOURCE to UNORDERED_ACCESS (the caller returns it to COPY_SOURCE).
     bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor, D3D12_RESOURCE_STATES lastColorState,
                   ID3D12Resource* velocity, D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth,
-                  D3D12_RESOURCE_STATES depthState, ID3D12Resource* output, RP_Constants& constants);
+                  D3D12_RESOURCE_STATES depthState, ID3D12Resource* output, RP_Constants& constants,
+                  int constantSlot = -1, bool deferConstants = false);
+
+    // Completes a deferred dispatch after the command list has been queued
+    // behind a CPU-signaled fence. Each slot is immutable until its SC fence
+    // completes; the caller owns that ordering.
+    bool WriteConstants(int constantSlot, const RP_Constants& constants);
 
     RP_Dx12(std::string InName, ID3D12Device* InDevice);
 

@@ -480,8 +480,9 @@ bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
     std::scoped_lock lock(_reprojectionMutex);
     if (_reprojectionVirtualized)
         return true;
-    if (_reprojectionShuttingDown || !Config::Instance()->ReprojAsync.value_or_default() || _real2 == nullptr ||
-        _real3 == nullptr)
+    const bool asyncReprojection = Config::Instance()->ReprojAsync.value_or_default() ||
+                                   State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+    if (_reprojectionShuttingDown || !asyncReprojection || _real2 == nullptr || _real3 == nullptr)
         return false;
 
     DXGI_SWAP_CHAIN_DESC desc {};
@@ -508,8 +509,7 @@ bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
     // buffer as the worker's free present slot. Mismatching these makes engines that
     // enumerate by GetDesc() read past their own arrays (KCD2 crash).
     const auto gameCount = EffectiveGameBufferCount();
-    const auto visibleCount =
-        gameCount != 0 && gameCount < desc.BufferCount ? gameCount : desc.BufferCount;
+    const auto visibleCount = gameCount != 0 && gameCount < desc.BufferCount ? gameCount : desc.BufferCount;
     std::vector<VirtualBackBuffer> buffers(visibleCount);
     HRESULT result = S_OK;
     for (UINT i = 0; i < visibleCount; ++i)

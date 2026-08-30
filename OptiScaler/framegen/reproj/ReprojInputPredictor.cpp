@@ -21,7 +21,7 @@ constexpr float MIN_GAIN = 1.0e-6f;        // radians per count plausibility win
 constexpr float MAX_GAIN = 0.05f;
 constexpr double MIN_INTERVAL_MS = 2.0;
 constexpr double MAX_INTERVAL_MS = 200.0;
-constexpr double FRESH_MS = 2000.0;        // estimator expires without new samples
+constexpr double FRESH_MS = 2000.0; // estimator expires without new samples
 constexpr float MIN_CAMERA_MOTION_RAD = 1.0e-3f;
 constexpr float MIN_INPUT_COUNTS = 4.0f;   // quantization floor for a usable sample
 constexpr float MOTION_MEMORY_MS = 250.0f; // camera-motion gate decay time
@@ -174,7 +174,8 @@ void OnPoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawR
     if (poseTimestampMs <= state.lastPoseTimestampMs)
         return;
 
-    const double intervalMs = std::clamp(poseIntervalMs > 0.0 ? poseIntervalMs : 16.6, MIN_INTERVAL_MS, MAX_INTERVAL_MS);
+    const double intervalMs =
+        std::clamp(poseIntervalMs > 0.0 ? poseIntervalMs : 16.6, MIN_INTERVAL_MS, MAX_INTERVAL_MS);
     const double nowMs = ClockMs();
 
     // Closed-loop error statistic: what the CURRENT gain would have predicted
@@ -233,6 +234,27 @@ bool GetEstimatedGain(float* gainX, float* gainY)
     *gainX = state.gainX.median;
     *gainY = state.gainY.median;
     return true;
+}
+
+void GetAxisEstimates(AxisEstimate* yaw, AxisEstimate* pitch)
+{
+    auto& state = GetPredictorState();
+    std::scoped_lock lock(state.mutex);
+    const auto nowMs = ClockMs();
+    if (yaw != nullptr)
+    {
+        yaw->gain = state.gainX.median;
+        yaw->confidence = ComputeConfidence(state.gainX, nowMs);
+        yaw->errorDegrees = state.errorEmaYawDeg;
+        yaw->calibrated = state.gainX.count >= MIN_GAIN_SAMPLES && yaw->confidence > 0.0f;
+    }
+    if (pitch != nullptr)
+    {
+        pitch->gain = state.gainY.median;
+        pitch->confidence = ComputeConfidence(state.gainY, nowMs);
+        pitch->errorDegrees = state.errorEmaPitchDeg;
+        pitch->calibrated = state.gainY.count >= MIN_GAIN_SAMPLES && pitch->confidence > 0.0f;
+    }
 }
 
 float GetConfidence()

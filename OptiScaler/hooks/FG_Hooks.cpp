@@ -125,7 +125,7 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
         {
             State::Instance().currentFG = new DLSSG_Dx12();
         }
-        else if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        else if (IsReprojectionOutput(State::Instance().activeFgOutput))
         {
             State::Instance().currentFG = new AReproj_Dx12();
         }
@@ -133,7 +133,7 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
 
     // Create FG swapchain
     auto fg = State::Instance().currentFG;
-    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
         dynamic_cast<AReproj_Dx12*>(fg)->SetGameBufferCount(pDesc->BufferCount);
         State::Instance().reprojRequestedBufferCount = pDesc->BufferCount;
@@ -245,7 +245,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
         {
             State::Instance().currentFG = new DLSSG_Dx12();
         }
-        else if (State::Instance().activeFgOutput == FGOutput::Reproj)
+        else if (IsReprojectionOutput(State::Instance().activeFgOutput))
         {
             State::Instance().currentFG = new AReproj_Dx12();
         }
@@ -253,7 +253,7 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
 
     // Create FG swapchain
     auto fg = State::Instance().currentFG;
-    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
         dynamic_cast<AReproj_Dx12*>(fg)->SetGameBufferCount(pDesc->BufferCount);
         State::Instance().reprojRequestedBufferCount = pDesc->BufferCount;
@@ -433,8 +433,9 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
             DetourAttach(&(PVOID&) o_FGSCGetFrameLatencyWaitableObject, hkGetFrameLatencyWaitableObject);
 
         if (State::Instance().activeFgOutput == FGOutput::XeFG ||
-            (State::Instance().activeFgOutput == FGOutput::Reproj &&
-             Config::Instance()->ReprojAsync.value_or_default()))
+            (IsReprojectionOutput(State::Instance().activeFgOutput) &&
+             (Config::Instance()->ReprojAsync.value_or_default() ||
+              State::Instance().activeFgOutput == FGOutput::HybridTimewarp)))
         {
             if (o_FGSCGetFullscreenState != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenState, hkGetFullscreenState);
@@ -474,7 +475,7 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
     // XeFG and async reprojection both prefer borderless so their internal presents can tear
     const bool forceBorderless = Config::Instance()->FGXeFGForceBorderless.value_or_default() ||
-                                 (State::Instance().activeFgOutput == FGOutput::Reproj &&
+                                 (IsReprojectionOutput(State::Instance().activeFgOutput) &&
                                   Config::Instance()->ReprojForceBorderless.value_or_default());
 
     bool modeChanged = false;
@@ -554,13 +555,13 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
 
 HANDLE FGHooks::hkGetFrameLatencyWaitableObject(IDXGISwapChain2* This)
 {
-    if (State::Instance().activeFgOutput != FGOutput::XeFG && State::Instance().activeFgOutput != FGOutput::Reproj)
+    if (State::Instance().activeFgOutput != FGOutput::XeFG && !IsReprojectionOutput(State::Instance().activeFgOutput))
         return o_FGSCGetFrameLatencyWaitableObject(This);
     if (State::Instance().activeFgOutput == FGOutput::XeFG &&
         !Config::Instance()->SimulateWaitableObject.value_or_default() &&
         State::Instance().gameEngine != GameEngineType::Unity)
         return o_FGSCGetFrameLatencyWaitableObject(This);
-    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
         auto& state = State::Instance();
         if (state.currentWrappedSwapchain != This ||
@@ -670,20 +671,23 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
     }
 
     // Only async reprojection needs a third buffer while its worker owns the real swapchain.
-    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
-        if (Config::Instance()->ReprojAsync.value_or_default() && BufferCount > 0 && BufferCount < 3)
+        const bool asyncReprojection = Config::Instance()->ReprojAsync.value_or_default() ||
+                                       State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+        if (asyncReprojection && BufferCount > 0 && BufferCount < 3)
             BufferCount = 3;
 
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-        if (Config::Instance()->ReprojAsync.value_or_default())
+        if (asyncReprojection)
             SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     }
 
     // Wine/vkd3d crashes when a waitable swapchain is resized (KCD2 at startup). A
     // redundant resize (geometry unchanged) is a no-op anyway, so answer S_OK directly.
-    if (State::Instance().activeFgOutput == FGOutput::Reproj &&
-        Config::Instance()->ReprojAsync.value_or_default())
+    if (IsReprojectionOutput(State::Instance().activeFgOutput) &&
+        (Config::Instance()->ReprojAsync.value_or_default() ||
+         State::Instance().activeFgOutput == FGOutput::HybridTimewarp))
     {
         DXGI_SWAP_CHAIN_DESC scDesc {};
         // Compare against the real chain: wrapped GetDesc() reports the game-visible count.
@@ -692,8 +696,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
             realSc = static_cast<WrappedIDXGISwapChain4*>(This)->RealSwapChain3();
         if (realSc != nullptr && realSc->GetDesc(&scDesc) == S_OK &&
             (BufferCount == 0 || BufferCount == scDesc.BufferCount) &&
-            (Width == 0 || Width == scDesc.BufferDesc.Width) &&
-            (Height == 0 || Height == scDesc.BufferDesc.Height) &&
+            (Width == 0 || Width == scDesc.BufferDesc.Width) && (Height == 0 || Height == scDesc.BufferDesc.Height) &&
             (NewFormat == 0 || NewFormat == scDesc.BufferDesc.Format))
         {
             LOG_INFO("Reproj: skipping redundant ResizeBuffers on the waitable swapchain");
@@ -942,20 +945,23 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
     }
 
     // Only async reprojection needs a third buffer while its worker owns the real swapchain.
-    if (State::Instance().activeFgOutput == FGOutput::Reproj)
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
-        if (Config::Instance()->ReprojAsync.value_or_default() && BufferCount > 0 && BufferCount < 3)
+        const bool asyncReprojection = Config::Instance()->ReprojAsync.value_or_default() ||
+                                       State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+        if (asyncReprojection && BufferCount > 0 && BufferCount < 3)
             BufferCount = 3;
 
         SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-        if (Config::Instance()->ReprojAsync.value_or_default())
+        if (asyncReprojection)
             SwapChainFlags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     }
 
     // Wine/vkd3d crashes when a waitable swapchain is resized (KCD2 at startup). A
     // redundant resize (geometry unchanged) is a no-op anyway, so answer S_OK directly.
-    if (State::Instance().activeFgOutput == FGOutput::Reproj &&
-        Config::Instance()->ReprojAsync.value_or_default())
+    if (IsReprojectionOutput(State::Instance().activeFgOutput) &&
+        (Config::Instance()->ReprojAsync.value_or_default() ||
+         State::Instance().activeFgOutput == FGOutput::HybridTimewarp))
     {
         DXGI_SWAP_CHAIN_DESC scDesc {};
         // Compare against the real chain: wrapped GetDesc() reports the game-visible count.
@@ -964,8 +970,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
             realSc = static_cast<WrappedIDXGISwapChain4*>(This)->RealSwapChain3();
         if (realSc != nullptr && realSc->GetDesc(&scDesc) == S_OK &&
             (BufferCount == 0 || BufferCount == scDesc.BufferCount) &&
-            (Width == 0 || Width == scDesc.BufferDesc.Width) &&
-            (Height == 0 || Height == scDesc.BufferDesc.Height) &&
+            (Width == 0 || Width == scDesc.BufferDesc.Width) && (Height == 0 || Height == scDesc.BufferDesc.Height) &&
             (Format == 0 || Format == scDesc.BufferDesc.Format))
         {
             LOG_INFO("Reproj: skipping redundant ResizeBuffers on the waitable swapchain");
@@ -1324,7 +1329,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
             FSR3FG::ffxPresentCallback();
 
         const bool presentSucceeded = fg->Present();
-        if (state.activeFgOutput == FGOutput::Reproj)
+        if (IsReprojectionOutput(state.activeFgOutput))
         {
             reprojPresentAttempted = true;
             reprojPresentSucceeded = presentSucceeded;
@@ -1333,7 +1338,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     else if (willPresent && fg != nullptr)
     {
         LOG_TRACE("FGHooks::FGPresent: FG feature exists but is inactive/paused; pass-through present only");
-        if (state.activeFgOutput == FGOutput::Reproj && state.currentWrappedSwapchain == This)
+        if (IsReprojectionOutput(state.activeFgOutput) && state.currentWrappedSwapchain == This)
         {
             auto* wrapped = static_cast<WrappedIDXGISwapChain4*>(state.currentWrappedSwapchain);
             if (wrapped->IsReprojectionVirtualized())
@@ -1357,9 +1362,10 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
         state.fgPresentIsCalled = true;
 
     HRESULT result;
-    const bool reprojVirtualized = state.activeFgOutput == FGOutput::Reproj && state.currentWrappedSwapchain == This &&
+    const bool reprojVirtualized = IsReprojectionOutput(state.activeFgOutput) &&
+                                   state.currentWrappedSwapchain == This &&
                                    static_cast<WrappedIDXGISwapChain4*>(This)->IsReprojectionVirtualized();
-    if (willPresent && state.activeFgOutput == FGOutput::Reproj && (fgFeatureActive || reprojVirtualized))
+    if (willPresent && IsReprojectionOutput(state.activeFgOutput) && (fgFeatureActive || reprojVirtualized))
     {
         // AReproj_Dx12::Present() already presented the real frame
         // (and will present the reprojected frame once frame gen lands)
@@ -1397,7 +1403,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     // Reprojection owns pacing and must not be suppressed by Reflex/XeLL's limiter
     // selection. Its limiter applies to the real-frame cadence; the fake present is
     // emitted by AReproj_Dx12::Present().
-    if (willPresent && state.activeFgOutput == FGOutput::Reproj)
+    if (willPresent && IsReprojectionOutput(state.activeFgOutput))
     {
         const bool reprojActive = fg != nullptr && fg->IsActive() && !fg->IsPaused();
         FrameLimit::sleep(reprojActive && !reprojVirtualized && config->ReprojCapAtHalfRefresh.value_or_default());
@@ -1484,7 +1490,7 @@ ULONG FGHooks::hkFGRelease(IUnknown* This)
             ((IDXGISwapChain*) This)->GetDesc(&scDesc);
 
             // Virtual backbuffers are wrapper-owned and must follow normal COM lifetime.
-            const bool reprojVirtualized = State::Instance().activeFgOutput == FGOutput::Reproj &&
+            const bool reprojVirtualized = IsReprojectionOutput(State::Instance().activeFgOutput) &&
                                            State::Instance().currentWrappedSwapchain == This &&
                                            static_cast<WrappedIDXGISwapChain4*>(This)->IsReprojectionVirtualized();
             if (!reprojVirtualized)

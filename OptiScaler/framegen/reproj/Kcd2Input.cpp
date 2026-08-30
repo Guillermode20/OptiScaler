@@ -7,8 +7,10 @@
 #include <detours/detours.h>
 
 #include <atomic>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <mutex>
 
 // KCD2 input-event layout, look-axis ids, and signature strategy are derived
 // from tkhquang/KCD2Tools TPVCamera (MIT), retail KCD2 1.5.x. This adapter only
@@ -40,6 +42,31 @@ std::atomic<double> g_gamepadTimestampMs { 0.0 };
 std::atomic<std::uint64_t> g_mouseEventCount { 0 };
 std::atomic<std::uint64_t> g_gamepadEventCount { 0 };
 
+constexpr std::size_t MOUSE_HISTORY_CAPACITY = 2048;
+enum class MouseAxis : std::uint8_t
+{
+    Yaw,
+    Pitch,
+};
+struct MouseEvent
+{
+    double timestampMs = 0.0;
+    float value = 0.0f;
+    MouseAxis axis = MouseAxis::Yaw;
+};
+std::array<MouseEvent, MOUSE_HISTORY_CAPACITY> g_mouseHistory {};
+std::size_t g_mouseHistoryCursor = 0;
+std::size_t g_mouseHistoryCount = 0;
+std::mutex g_mouseHistoryMutex;
+
+void RecordMouseEvent(double timestampMs, float value, MouseAxis axis)
+{
+    std::scoped_lock lock(g_mouseHistoryMutex);
+    g_mouseHistory[g_mouseHistoryCursor] = { timestampMs, value, axis };
+    g_mouseHistoryCursor = (g_mouseHistoryCursor + 1) % MOUSE_HISTORY_CAPACITY;
+    g_mouseHistoryCount = std::min(g_mouseHistoryCount + 1, MOUSE_HISTORY_CAPACITY);
+}
+
 void Capture(uintptr_t inputEvent)
 {
     if (inputEvent < 0x10000)
@@ -60,12 +87,14 @@ void Capture(uintptr_t inputEvent)
         if (id == INPUT_MOUSE_YAW)
         {
             g_mouseYawTotal.fetch_add(static_cast<double>(value), std::memory_order_relaxed);
+            RecordMouseEvent(timestampMs, value, MouseAxis::Yaw);
             g_mouseTimestampMs.store(timestampMs, std::memory_order_release);
             g_mouseEventCount.fetch_add(1, std::memory_order_relaxed);
         }
         else if (id == INPUT_MOUSE_PITCH)
         {
             g_mousePitchTotal.fetch_add(static_cast<double>(value), std::memory_order_relaxed);
+            RecordMouseEvent(timestampMs, value, MouseAxis::Pitch);
             g_mouseTimestampMs.store(timestampMs, std::memory_order_release);
             g_mouseEventCount.fetch_add(1, std::memory_order_relaxed);
         }
@@ -165,6 +194,47 @@ bool ReadSnapshot(Snapshot& snapshot)
     snapshot.gamepadTimestampMs = g_gamepadTimestampMs.load(std::memory_order_acquire);
     snapshot.mouseEventCount = g_mouseEventCount.load(std::memory_order_relaxed);
     snapshot.gamepadEventCount = g_gamepadEventCount.load(std::memory_order_relaxed);
+    return true;
+}
+
+bool QueryMouseInterval(double beginTimestampMs, double endTimestampMs, MouseInterval& interval)
+{
+    interval = {};
+    if (!IsAvailable() || !std::isfinite(beginTimestampMs) || !std::isfinite(endTimestampMs) ||
+        endTimestampMs < beginTimestampMs)
+        return false;
+
+    std::scoped_lock lock(g_mouseHistoryMutex);
+    if (g_mouseHistoryCount == 0)
+    {
+        interval.complete = true;
+        return true;
+    }
+
+    const auto oldestIndex =
+        (g_mouseHistoryCursor + MOUSE_HISTORY_CAPACITY - g_mouseHistoryCount) % MOUSE_HISTORY_CAPACITY;
+    const auto oldestTimestamp = g_mouseHistory[oldestIndex].timestampMs;
+    interval.complete = g_mouseHistoryCount < MOUSE_HISTORY_CAPACITY || beginTimestampMs >= oldestTimestamp;
+
+    for (std::size_t offset = 0; offset < g_mouseHistoryCount; ++offset)
+    {
+        const auto& event = g_mouseHistory[(oldestIndex + offset) % MOUSE_HISTORY_CAPACITY];
+        if (event.timestampMs <= beginTimestampMs || event.timestampMs > endTimestampMs)
+            continue;
+        if (interval.firstTimestampMs <= 0.0)
+            interval.firstTimestampMs = event.timestampMs;
+        interval.lastTimestampMs = event.timestampMs;
+        if (event.axis == MouseAxis::Yaw)
+        {
+            interval.yaw += event.value;
+            ++interval.yawEvents;
+        }
+        else
+        {
+            interval.pitch += event.value;
+            ++interval.pitchEvents;
+        }
+    }
     return true;
 }
 

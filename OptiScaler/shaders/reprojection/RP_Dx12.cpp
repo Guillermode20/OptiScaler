@@ -27,7 +27,7 @@ void RP_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource
 bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor,
                        D3D12_RESOURCE_STATES lastColorState, ID3D12Resource* velocity,
                        D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth, D3D12_RESOURCE_STATES depthState,
-                       ID3D12Resource* output, RP_Constants& constants)
+                       ID3D12Resource* output, RP_Constants& constants, int constantSlot, bool deferConstants)
 {
     if (!_init || _device == nullptr || cmdList == nullptr || lastColor == nullptr || velocity == nullptr ||
         output == nullptr)
@@ -35,9 +35,14 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
         return false;
     }
 
-    _counter++;
-    _counter = _counter % RP_NUM_OF_HEAPS;
-    FrameDescriptorHeap& currentHeap = _frameHeaps[_counter];
+    int heapIndex = constantSlot;
+    if (heapIndex < 0 || heapIndex >= RP_NUM_OF_HEAPS)
+    {
+        _counter++;
+        _counter = _counter % RP_NUM_OF_HEAPS;
+        heapIndex = _counter;
+    }
+    FrameDescriptorHeap& currentHeap = _frameHeaps[heapIndex];
 
     // Transition inputs/output to the states the shader needs
     ResourceBarrier(cmdList, lastColor, lastColorState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -71,9 +76,10 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     CreateUnorderedAccessView(_device, output, currentHeap.GetUavCPU(0), 0);
 
-    if (_constantBufferData[_counter] == nullptr)
+    if (_constantBufferData[heapIndex] == nullptr)
         return false;
-    memcpy(_constantBufferData[_counter], &constants, sizeof(constants));
+    if (!deferConstants)
+        memcpy(_constantBufferData[heapIndex], &constants, sizeof(constants));
 
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
@@ -81,7 +87,8 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     cmdList->SetComputeRootSignature(_rootSignature);
 
     // v2 (depth-aware/camera rotation) uses depth pipeline; mode 0 uses MV-only PSO
-    auto pso = (constants.mode == 2 || (depth != nullptr && constants.mode != 0)) ? _pipelineStateDepth : _pipelineState;
+    auto pso =
+        (constants.mode == 2 || (depth != nullptr && constants.mode != 0)) ? _pipelineStateDepth : _pipelineState;
     cmdList->SetPipelineState(pso);
 
     cmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
@@ -99,6 +106,14 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     if (depth != nullptr)
         ResourceBarrier(cmdList, depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depthState);
 
+    return true;
+}
+
+bool RP_Dx12::WriteConstants(int constantSlot, const RP_Constants& constants)
+{
+    if (constantSlot < 0 || constantSlot >= RP_NUM_OF_HEAPS || _constantBufferData[constantSlot] == nullptr)
+        return false;
+    std::memcpy(_constantBufferData[constantSlot], &constants, sizeof(constants));
     return true;
 }
 

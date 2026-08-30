@@ -10,6 +10,7 @@
 #include <Logger.h>
 #include <misc/FrameLimit.h>
 #include <Util.h>
+#include "TargetPoseResolver.h"
 
 ReprojTelemetry::ReprojTelemetry()
 {
@@ -78,10 +79,16 @@ void ReprojTelemetry::FinalizeSlot(ReprojSlotRecord* slot)
         slot->presentBlockMs = static_cast<float>(_clock.DeltaMs(slot->presentBeginQpc, slot->presentEndQpc));
     if (slot->gpuValid && slot->calibratedGpuStartQpc != 0 && slot->queueSubmitQpc != 0)
         slot->gpuQueueDelayMs = static_cast<float>(_clock.DeltaMs(slot->queueSubmitQpc, slot->calibratedGpuStartQpc));
+    if (slot->gpuValid && slot->calibratedGpuStartQpc != 0 && slot->lateLatchSignalQpc != 0)
+        slot->lateLatchToGpuStartMs =
+            static_cast<float>(_clock.DeltaMs(slot->lateLatchSignalQpc, slot->calibratedGpuStartQpc));
+    if (slot->targetScanoutTimestampMs > 0.0 && slot->poseSampleTimestampMs > 0.0)
+        slot->cameraLatencyEstimateMs =
+            static_cast<float>(slot->targetScanoutTimestampMs - slot->poseSampleTimestampMs);
     if (slot->gpuValid && slot->gpuStartTimestamp != 0 && slot->gpuEndTimestamp != 0 && _timestampFrequency != 0)
     {
-        const double gpuMs =
-            static_cast<double>(slot->gpuEndTimestamp - slot->gpuStartTimestamp) * 1000.0 / static_cast<double>(_timestampFrequency);
+        const double gpuMs = static_cast<double>(slot->gpuEndTimestamp - slot->gpuStartTimestamp) * 1000.0 /
+                             static_cast<double>(_timestampFrequency);
         if (gpuMs >= 0.0 && gpuMs < 500.0)
             slot->gpuDurationMs = static_cast<float>(gpuMs);
     }
@@ -253,7 +260,8 @@ void ReprojTelemetry::PollCompletedGpuWork()
                             slot->gpuQueueDelayMs < 100.0f)
                             _recentGpuQueueDelayMs.store(slot->gpuQueueDelayMs, std::memory_order_relaxed);
                     }
-                    const double gpuMs = static_cast<double>(end - start) * 1000.0 / static_cast<double>(_timestampFrequency);
+                    const double gpuMs =
+                        static_cast<double>(end - start) * 1000.0 / static_cast<double>(_timestampFrequency);
                     if (gpuMs >= 0.0 && gpuMs < 500.0)
                     {
                         slot->gpuDurationMs = static_cast<float>(gpuMs);
@@ -353,10 +361,7 @@ void ReprojTelemetry::ClassifySlot(ReprojSlotRecord& slot, double refreshPeriodM
         slot.primaryMissCause = ReprojMissCause::Unknown;
 }
 
-bool ReprojTelemetry::ShouldPublish(int64_t nowQpc) const
-{
-    return _clock.DeltaMs(_lastPublishQpc, nowQpc) >= 1000.0;
-}
+bool ReprojTelemetry::ShouldPublish(int64_t nowQpc) const { return _clock.DeltaMs(_lastPublishQpc, nowQpc) >= 1000.0; }
 
 float ReprojTelemetry::Percentile(std::array<float, TRACE_SLOT_COUNT>& values, size_t count, double p)
 {
@@ -407,18 +412,21 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     std::array<float, TRACE_SLOT_COUNT> anchorAges {};
     std::array<float, TRACE_SLOT_COUNT> unclampedSteps {};
     std::array<float, TRACE_SLOT_COUNT> finalSteps {};
+    std::array<float, TRACE_SLOT_COUNT> latchToGpu {};
     std::array<float, TRACE_SLOT_COUNT> shadowRaw {};
     std::array<float, TRACE_SLOT_COUNT> shadowSource {};
 
     size_t nPresent = 0, nWake = 0, nWait = 0, nCmd = 0, nQueue = 0, nGpu = 0, nMargin = 0, nBlock = 0;
-    size_t nRaw = 0, nSelected = 0, nRatio = 0, nPoseInterval = 0, nAge = 0, nUnclamped = 0, nFinal = 0,
-           nShadowRaw = 0, nShadowSource = 0;
+    size_t nRaw = 0, nSelected = 0, nRatio = 0, nPoseInterval = 0, nAge = 0, nUnclamped = 0, nFinal = 0, nShadowRaw = 0,
+           nShadowSource = 0, nLatchToGpu = 0;
 
     uint32_t scheduled = 0, presented = 0, missed = 0, skippedRep = 0, newAnchor = 0, repeated = 0;
     uint32_t lateWakes = 0, clampCount = 0;
     uint32_t modeMv = 0, modeDepth = 0, modeRotation = 0, modeUnwarped = 0;
     uint32_t camAvail = 0, depthAvail = 0, depthConst = 0, hudless = 0;
-    uint32_t causeCpu = 0, causeWait = 0, causeCap = 0, causeQueue = 0, causeGpu = 0, causePresent = 0, causeClock = 0, causeUnknown = 0;
+    uint32_t contentReal = 0, contentGenerated = 0;
+    uint32_t causeCpu = 0, causeWait = 0, causeCap = 0, causeQueue = 0, causeGpu = 0, causePresent = 0, causeClock = 0,
+             causeUnknown = 0;
 
     double sumRefresh = 0.0, sumConfigured = 0.0, sumMeasured = 0.0;
     uint32_t nRefresh = 0;
@@ -454,6 +462,8 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
                 queueDelays[nQueue++] = slot->gpuQueueDelayMs;
             if (std::isfinite(slot->gpuDurationMs) && nGpu < TRACE_SLOT_COUNT)
                 gpuDurations[nGpu++] = slot->gpuDurationMs;
+            if (std::isfinite(slot->lateLatchToGpuStartMs) && nLatchToGpu < TRACE_SLOT_COUNT)
+                latchToGpu[nLatchToGpu++] = slot->lateLatchToGpuStartMs;
             if (std::isfinite(slot->gpuEndLatenessMs) && nMargin < TRACE_SLOT_COUNT)
                 gpuMargins[nMargin++] = slot->gpuEndLatenessMs;
             if (std::isfinite(slot->presentBlockMs) && nBlock < TRACE_SLOT_COUNT)
@@ -467,8 +477,7 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
             if (std::isfinite(slot->rawCaptureIntervalMs) && std::isfinite(slot->selectedFrameIntervalMs) &&
                 slot->selectedFrameIntervalMs > 0.0f && nRatio < TRACE_SLOT_COUNT)
                 ratios[nRatio++] = slot->rawCaptureIntervalMs / slot->selectedFrameIntervalMs;
-            if (std::isfinite(slot->poseIntervalMs) && slot->poseIntervalMs > 0.0f &&
-                nPoseInterval < TRACE_SLOT_COUNT)
+            if (std::isfinite(slot->poseIntervalMs) && slot->poseIntervalMs > 0.0f && nPoseInterval < TRACE_SLOT_COUNT)
                 poseIntervals[nPoseInterval++] = slot->poseIntervalMs;
             if (std::isfinite(slot->anchorAgeMs) && nAge < TRACE_SLOT_COUNT)
                 anchorAges[nAge++] = slot->anchorAgeMs;
@@ -482,8 +491,8 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
             // Shadow delta: current - raw
             if (std::isfinite(slot->finalTimeStep) && std::isfinite(slot->unclampedTimeStep))
             {
-                // For now approximate shadow as difference between final and unclamped (placeholder for rawInterval shadow)
-                // Real shadow calc needs rawIntervalStep; we store unclamped as alt for now.
+                // For now approximate shadow as difference between final and unclamped (placeholder for rawInterval
+                // shadow) Real shadow calc needs rawIntervalStep; we store unclamped as alt for now.
             }
 
             switch (slot->effectiveMode)
@@ -507,6 +516,8 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
             hudless += slot->hudlessSource ? 1 : 0;
             newAnchor += slot->newAnchor ? 1 : 0;
             repeated += slot->repeatedAnchor ? 1 : 0;
+            contentGenerated += slot->contentKind == 1 ? 1 : 0;
+            contentReal += slot->contentKind == 0 ? 1 : 0;
 
             if (slot->primaryMissCause != ReprojMissCause::None && slot->presentIntervalMs > 0)
             {
@@ -659,6 +670,12 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.finalP95 = Percentile(finalSteps, nFinal, 0.95);
     snap.finalMax = Percentile(finalSteps, nFinal, 1.0);
     snap.clampCount = clampCount;
+    snap.lateLatchToGpuStartP95 = Percentile(latchToGpu, nLatchToGpu, 0.95);
+    const auto targetStats = TargetPoseResolver::GetShadowStats();
+    snap.targetCoverage = targetStats.activeCoverage;
+    snap.targetErrorP95Degrees = targetStats.errorP95Degrees;
+    snap.contentReal = contentReal;
+    snap.contentGenerated = contentGenerated;
     snap.cameraBasisAvailable = camAvail;
     snap.depthAvailable = depthAvail;
     snap.depthConstantsValid = depthConst;
@@ -702,35 +719,42 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
 
     // Stable machine-parseable format per spec section 12.
     // Keep every key stable for parsing; do not include human prose inside values.
-    LOG_INFO(
-        "ReprojTelemetry v=1 slots={} presented={} missed={} legacyMissed={} newAnchor={} repeatAnchor={} skippedRep={} "
-        "cause.cpu={} cause.wait={} cause.capture={} cause.queue={} cause.gpu={} cause.present={} cause.clock={} cause.unknown={} "
-        "interval.p50={:.2f} interval.p95={:.2f} interval.p99={:.2f} interval.max={:.2f} "
-        "wake.p50={:.2f} wake.p95={:.2f} wake.p99={:.2f} wake.max={:.2f} lateWakes={} "
-        "wait.p50={:.2f} wait.p95={:.2f} wait.p99={:.2f} "
-        "queue.p50={:.2f} queue.p95={:.2f} queue.p99={:.2f} queue.max={:.2f} "
-        "gpu.p50={:.2f} gpu.p95={:.2f} gpu.p99={:.2f} gpu.max={:.2f} gpuMargin.p50={:.2f} gpuSkipped={} calibFail={} calibValid={} "
-        "present.p50={:.2f} present.p95={:.2f} present.p99={:.2f} present.max={:.2f} "
-        "mode.mv={} mode.depth={} mode.rotation={} mode.unwarped={} "
-        "source.raw.p50={:.2f} source.raw.p95={:.2f} source.selected.p50={:.2f} source.selected.p95={:.2f} ratio.p50={:.2f} ratio.p95={:.2f} source.capHz={:.2f} source.capError={:.2f} "
-        "anchorAge.p50={:.2f} anchorAge.p95={:.2f} anchorAge.max={:.2f} "
-        "step.raw.p50={:.2f} step.raw.p95={:.2f} step.raw.max={:.2f} step.final.p50={:.2f} step.final.p95={:.2f} step.final.max={:.2f} step.clamped={} "
-        "camera={}/{} depth={}/{} depthConstants={}/{} hudless={}/{} "
-        "fps={:.1f} poseInterval.p50={:.2f} poseInterval.p95={:.2f}",
-        snap.scheduledSlots, snap.presented, snap.classifiedMisses, snap.legacyMisses, snap.newAnchorOutputs,
-        snap.repeatedAnchorOutputs, snap.skippedRepresentedSlots, snap.causeCpu, snap.causeWaitable, snap.causeCapture,
-        snap.causeQueue, snap.causeGpu, snap.causePresent, snap.causeClock, snap.causeUnknown, snap.presentIntervalP50,
-        snap.presentIntervalP95, snap.presentIntervalP99, snap.presentIntervalMax, snap.wakeP50, snap.wakeP95, snap.wakeP99,
-        snap.wakeMax, snap.lateWakes, snap.waitP50, snap.waitP95, snap.waitP99, snap.queueP50, snap.queueP95, snap.queueP99,
-        snap.queueMax, snap.gpuP50, snap.gpuP95, snap.gpuP99, snap.gpuMax, snap.gpuMarginP50, snap.gpuQuerySkipped,
-        snap.calibrationFailures, snap.calibrationValid ? 1 : 0, snap.presentBlockP50, snap.presentBlockP95, snap.presentBlockP99,
-        snap.presentBlockMax, snap.modeMv, snap.modeDepth, snap.modeRotation, snap.modeUnwarped, snap.sourceRawP50,
-        snap.sourceRawP95, snap.sourceSelectedP50, snap.sourceSelectedP95, snap.sourceRatioP50, snap.sourceRatioP95,
-        snap.sourceCapHz, snap.sourceCapTimingErrorMs,
-        snap.anchorAgeP50, snap.anchorAgeP95, snap.anchorAgeMax, snap.unclampedP50, snap.unclampedP95, snap.unclampedMax,
-        snap.finalP50, snap.finalP95, snap.finalMax, snap.clampCount, snap.cameraBasisAvailable, snap.scheduledSlots,
-        snap.depthAvailable, snap.scheduledSlots, snap.depthConstantsValid, snap.scheduledSlots, snap.hudlessSource,
-        snap.scheduledSlots, snap.displayFps, snap.poseIntervalP50, snap.poseIntervalP95);
+    LOG_INFO("ReprojTelemetry v=1 slots={} presented={} missed={} legacyMissed={} newAnchor={} repeatAnchor={} "
+             "skippedRep={} "
+             "cause.cpu={} cause.wait={} cause.capture={} cause.queue={} cause.gpu={} cause.present={} cause.clock={} "
+             "cause.unknown={} "
+             "interval.p50={:.2f} interval.p95={:.2f} interval.p99={:.2f} interval.max={:.2f} "
+             "wake.p50={:.2f} wake.p95={:.2f} wake.p99={:.2f} wake.max={:.2f} lateWakes={} "
+             "wait.p50={:.2f} wait.p95={:.2f} wait.p99={:.2f} "
+             "queue.p50={:.2f} queue.p95={:.2f} queue.p99={:.2f} queue.max={:.2f} "
+             "gpu.p50={:.2f} gpu.p95={:.2f} gpu.p99={:.2f} gpu.max={:.2f} gpuMargin.p50={:.2f} gpuSkipped={} "
+             "calibFail={} calibValid={} "
+             "present.p50={:.2f} present.p95={:.2f} present.p99={:.2f} present.max={:.2f} "
+             "mode.mv={} mode.depth={} mode.rotation={} mode.unwarped={} "
+             "source.raw.p50={:.2f} source.raw.p95={:.2f} source.selected.p50={:.2f} source.selected.p95={:.2f} "
+             "ratio.p50={:.2f} ratio.p95={:.2f} source.capHz={:.2f} source.capError={:.2f} "
+             "anchorAge.p50={:.2f} anchorAge.p95={:.2f} anchorAge.max={:.2f} "
+             "step.raw.p50={:.2f} step.raw.p95={:.2f} step.raw.max={:.2f} step.final.p50={:.2f} step.final.p95={:.2f} "
+             "step.final.max={:.2f} step.clamped={} "
+             "camera={}/{} depth={}/{} depthConstants={}/{} hudless={}/{} "
+             "fps={:.1f} poseInterval.p50={:.2f} poseInterval.p95={:.2f} content.real={} content.generated={} "
+             "target.coverage={:.3f} target.errorP95={:.3f} latchGpu.p95={:.2f}",
+             snap.scheduledSlots, snap.presented, snap.classifiedMisses, snap.legacyMisses, snap.newAnchorOutputs,
+             snap.repeatedAnchorOutputs, snap.skippedRepresentedSlots, snap.causeCpu, snap.causeWaitable,
+             snap.causeCapture, snap.causeQueue, snap.causeGpu, snap.causePresent, snap.causeClock, snap.causeUnknown,
+             snap.presentIntervalP50, snap.presentIntervalP95, snap.presentIntervalP99, snap.presentIntervalMax,
+             snap.wakeP50, snap.wakeP95, snap.wakeP99, snap.wakeMax, snap.lateWakes, snap.waitP50, snap.waitP95,
+             snap.waitP99, snap.queueP50, snap.queueP95, snap.queueP99, snap.queueMax, snap.gpuP50, snap.gpuP95,
+             snap.gpuP99, snap.gpuMax, snap.gpuMarginP50, snap.gpuQuerySkipped, snap.calibrationFailures,
+             snap.calibrationValid ? 1 : 0, snap.presentBlockP50, snap.presentBlockP95, snap.presentBlockP99,
+             snap.presentBlockMax, snap.modeMv, snap.modeDepth, snap.modeRotation, snap.modeUnwarped, snap.sourceRawP50,
+             snap.sourceRawP95, snap.sourceSelectedP50, snap.sourceSelectedP95, snap.sourceRatioP50,
+             snap.sourceRatioP95, snap.sourceCapHz, snap.sourceCapTimingErrorMs, snap.anchorAgeP50, snap.anchorAgeP95,
+             snap.anchorAgeMax, snap.unclampedP50, snap.unclampedP95, snap.unclampedMax, snap.finalP50, snap.finalP95,
+             snap.finalMax, snap.clampCount, snap.cameraBasisAvailable, snap.scheduledSlots, snap.depthAvailable,
+             snap.scheduledSlots, snap.depthConstantsValid, snap.scheduledSlots, snap.hudlessSource,
+             snap.scheduledSlots, snap.displayFps, snap.poseIntervalP50, snap.poseIntervalP95, snap.contentReal,
+             snap.contentGenerated, snap.targetCoverage, snap.targetErrorP95Degrees, snap.lateLatchToGpuStartP95);
 }
 
 bool ReprojTelemetry::ShouldDumpMiss(const ReprojTelemetrySnapshot& snap) const
@@ -762,15 +786,19 @@ void ReprojTelemetry::DumpMissWindow(uint64_t triggerSequence)
         const auto* slot = GetSlot(seq);
         if (slot == nullptr || !slot->occupied)
             continue;
-        LOG_INFO(
-            "ReprojSlot v=1 seq={} outcome={} cause={} secondary={:X} anchor={} new={} repeat={} effMode={} wake={:.2f} wait={:.2f} queue={:.2f} gpu={:.2f} present={:.2f} interval={:.2f} age={:.2f} step={:.2f}/{:.2f} vel={} depth={} cam={} pred={} pyaw={:.4f} ppitch={:.4f}",
-            slot->sequence, static_cast<int>(slot->outcome), static_cast<int>(slot->primaryMissCause),
-            slot->secondaryCauseFlags, slot->anchorFrameId, slot->newAnchor ? 1 : 0, slot->repeatedAnchor ? 1 : 0,
-            static_cast<int>(slot->effectiveMode), slot->wakeLatenessMs, slot->waitableDurationMs, slot->gpuQueueDelayMs,
-            slot->gpuDurationMs, slot->presentBlockMs, slot->presentIntervalMs, slot->anchorAgeMs, slot->unclampedTimeStep,
-            slot->finalTimeStep, slot->velocityAvailable ? 1 : 0, slot->depthAvailable ? 1 : 0,
-            slot->cameraBasisAvailable ? 1 : 0, slot->inputPredicted ? 1 : 0, slot->predictedYawRad,
-            slot->predictedPitchRad);
+        LOG_INFO("ReprojSlot v=1 seq={} outcome={} cause={} secondary={:X} anchor={} new={} repeat={} effMode={} "
+                 "wake={:.2f} wait={:.2f} queue={:.2f} gpu={:.2f} present={:.2f} interval={:.2f} age={:.2f} "
+                 "step={:.2f}/{:.2f} vel={} depth={} cam={} pred={} pyaw={:.4f} ppitch={:.4f} content={} "
+                 "fraction={:.3f} posePath={} residual={:.2f} conf={:.2f}/{:.2f} err={:.3f}/{:.3f} latchGpu={:.2f}",
+                 slot->sequence, static_cast<int>(slot->outcome), static_cast<int>(slot->primaryMissCause),
+                 slot->secondaryCauseFlags, slot->anchorFrameId, slot->newAnchor ? 1 : 0, slot->repeatedAnchor ? 1 : 0,
+                 static_cast<int>(slot->effectiveMode), slot->wakeLatenessMs, slot->waitableDurationMs,
+                 slot->gpuQueueDelayMs, slot->gpuDurationMs, slot->presentBlockMs, slot->presentIntervalMs,
+                 slot->anchorAgeMs, slot->unclampedTimeStep, slot->finalTimeStep, slot->velocityAvailable ? 1 : 0,
+                 slot->depthAvailable ? 1 : 0, slot->cameraBasisAvailable ? 1 : 0, slot->inputPredicted ? 1 : 0,
+                 slot->predictedYawRad, slot->predictedPitchRad, slot->contentKind, slot->contentFraction,
+                 slot->posePath, slot->residualPredictionIntervalMs, slot->yawConfidence, slot->pitchConfidence,
+                 slot->yawErrorDegrees, slot->pitchErrorDegrees, slot->lateLatchToGpuStartMs);
     }
 }
 

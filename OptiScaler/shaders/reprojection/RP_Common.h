@@ -37,14 +37,13 @@ struct alignas(256) RP_Constants
     float cameraFar;
     float cameraVFov; // radians, vertical
     float cameraAspect;
-    // Input-predicted warp target (mode 1): the shader composes this rotation
-    // onto the current pose instead of extrapolating prev->current by
-    // timeStep. The basis lerp is replaced; the position lerp keeps the
-    // rendered velocity.
-    float targetYaw;
-    float targetPitch;
-    uint32_t targetFromInput;
-    uint32_t targetReserved;
+    // Explicit immutable scanout target. The full basis preserves roll and
+    // supports generated frames whose source pose is between real anchors.
+    // targetPosition.w is 1 when the target is valid.
+    float targetPosition[4];
+    float targetRight[4];
+    float targetUp[4];
+    float targetForward[4];
 };
 
 static_assert(offsetof(RP_Constants, cameraPosition) == 64, "RP_Constants must match HLSL cbuffer packing");
@@ -77,10 +76,10 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
-    float  TargetYaw;      // input-predicted target rotation (mode 1)
-    float  TargetPitch;
-    uint   TargetFromInput;
-    uint   TargetReserved;
+    float4 TargetPosition;
+    float4 TargetRight;
+    float4 TargetUp;
+    float4 TargetForward;
 };
 
 Texture2D<float4> LastColor : register(t0);
@@ -164,10 +163,10 @@ cbuffer RP_Constants : register(b0)
     float  CameraFar;
     float  CameraVFov;
     float  CameraAspect;
-    float  TargetYaw;      // input-predicted target rotation (mode 1)
-    float  TargetPitch;
-    uint   TargetFromInput;
-    uint   TargetReserved;
+    float4 TargetPosition;
+    float4 TargetRight;
+    float4 TargetUp;
+    float4 TargetForward;
 };
 
 Texture2D<float4> LastColor : register(t0);
@@ -266,16 +265,11 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float3 midRight;
     float3 midUp;
     float3 midForward;
-    if (TargetFromInput)
+    if (TargetPosition.w > 0.5f)
     {
-        float yawSin, yawCos, pitchSin, pitchCos;
-        sincos(TargetYaw, yawSin, yawCos);
-        sincos(TargetPitch, pitchSin, pitchCos);
-        const float3 yawRight = right * yawCos - forward * yawSin;
-        const float3 yawForward = forward * yawCos + right * yawSin;
-        midRight = normalize(yawRight);
-        midUp = normalize(up * pitchCos - yawForward * pitchSin);
-        midForward = normalize(yawForward * pitchCos + up * pitchSin);
+        midRight = normalize(TargetRight.xyz);
+        midUp = normalize(TargetUp.xyz);
+        midForward = normalize(TargetForward.xyz);
     }
     else
     {
@@ -297,7 +291,7 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float depthZ =
         LinearizeDepth(Depth.SampleLevel(Bilinear, mvUV, 0).r, CameraNear, CameraFar, InvertedDepth);
     float3 worldPos = ReconstructWorld(ndc, depthZ, camPos, right, up, forward, tanHalf, CameraAspect);
-    float3 midPos = lerp(PrevCameraPos.xyz, camPos, s);
+    float3 midPos = TargetPosition.w > 0.5f ? TargetPosition.xyz : lerp(PrevCameraPos.xyz, camPos, s);
     float3 pMid = float3(dot(midRight, worldPos - midPos), dot(midUp, worldPos - midPos),
                          dot(midForward, worldPos - midPos));
     float2 ndcMid =

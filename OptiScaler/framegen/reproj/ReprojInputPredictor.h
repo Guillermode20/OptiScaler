@@ -30,6 +30,14 @@ struct RotationEstimate
     float pitchRadians;
 };
 
+struct AxisEstimate
+{
+    float gain = 0.0f;
+    float confidence = 0.0f;
+    float errorDegrees = 0.0f;
+    bool calibrated = false;
+};
+
 // Clear all calibration and statistics state (context reset, mode change).
 void Reset();
 
@@ -44,6 +52,10 @@ void OnPoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawR
 // applies the +X->+yaw / +Y->-pitch conventions). Returns false until enough
 // consistent samples exist.
 bool GetEstimatedGain(float* gainX, float* gainY);
+
+// Independent axis state. A weak/unmoving axis must not disable a calibrated
+// orthogonal axis in the target-pose resolver.
+void GetAxisEstimates(AxisEstimate* yaw, AxisEstimate* pitch);
 
 // Confidence of the current gain estimate, 0..1. Hysteresis thresholds are
 // applied by the caller (enter ~0.55, exit ~0.35).

@@ -23,6 +23,8 @@ FrustumBuildFn g_original = nullptr;
 // 0 waits for WHGame.dll, 1 installs, 2 installed, 3 permanent signature/detour failure.
 std::atomic<int> g_initState { 0 };
 std::atomic<uint64_t> g_sequence { 0 };
+std::atomic<uint64_t> g_poseSequence { 0 };
+std::atomic<uint64_t> g_cutGeneration { 1 };
 
 struct Pose
 {
@@ -45,6 +47,9 @@ struct Pose
     static constexpr int PROJECTION_FLOAT_COUNT = 20;
     float projectionRaw[PROJECTION_FLOAT_COUNT] {};
     double timestampMs = 0.0;
+    uintptr_t cameraIdentity = 0;
+    uint64_t sequence = 0;
+    uint64_t cutGeneration = 0;
 };
 
 // Seqlock: the render thread writes; game/presenter capture threads read without blocking.
@@ -67,11 +72,10 @@ bool IsFiniteBasis(const Pose& p)
     for (float value : p.position)
         if (!std::isfinite(value))
             return false;
-    return std::isfinite(p.verticalFov) && p.verticalFov > 0.05f && p.verticalFov < 3.0f &&
-           length2(p.right) > 0.8f && length2(p.right) < 1.2f && length2(p.up) > 0.8f &&
-           length2(p.up) < 1.2f && length2(p.forward) > 0.8f && length2(p.forward) < 1.2f &&
-           std::abs(dot(p.right, p.up)) < 0.1f && std::abs(dot(p.right, p.forward)) < 0.1f &&
-           std::abs(dot(p.up, p.forward)) < 0.1f;
+    return std::isfinite(p.verticalFov) && p.verticalFov > 0.05f && p.verticalFov < 3.0f && length2(p.right) > 0.8f &&
+           length2(p.right) < 1.2f && length2(p.up) > 0.8f && length2(p.up) < 1.2f && length2(p.forward) > 0.8f &&
+           length2(p.forward) < 1.2f && std::abs(dot(p.right, p.up)) < 0.1f &&
+           std::abs(dot(p.right, p.forward)) < 0.1f && std::abs(dot(p.up, p.forward)) < 0.1f;
 }
 
 bool PoseChanged(const Pose& current, const Pose& next)
@@ -87,11 +91,31 @@ bool PoseChanged(const Pose& current, const Pose& next)
         const double rightDelta = static_cast<double>(next.right[i]) - current.right[i];
         const double upDelta = static_cast<double>(next.up[i]) - current.up[i];
         const double forwardDelta = static_cast<double>(next.forward[i]) - current.forward[i];
-        delta2 += positionDelta * positionDelta + rightDelta * rightDelta + upDelta * upDelta +
-                  forwardDelta * forwardDelta;
+        delta2 +=
+            positionDelta * positionDelta + rightDelta * rightDelta + upDelta * upDelta + forwardDelta * forwardDelta;
     }
     const double fovDelta = static_cast<double>(next.verticalFov) - current.verticalFov;
     return delta2 + fovDelta * fovDelta > 1.0e-12;
+}
+
+bool IsCameraCut(const Pose& current, const Pose& next)
+{
+    if (current.timestampMs <= 0.0)
+        return true;
+    if (current.cameraIdentity != next.cameraIdentity)
+        return true;
+
+    double positionDelta2 = 0.0;
+    for (int i = 0; i < 3; ++i)
+    {
+        const auto delta = static_cast<double>(next.position[i]) - current.position[i];
+        positionDelta2 += delta * delta;
+    }
+    const auto forwardDot = static_cast<double>(current.forward[0]) * next.forward[0] +
+                            static_cast<double>(current.forward[1]) * next.forward[1] +
+                            static_cast<double>(current.forward[2]) * next.forward[2];
+    return positionDelta2 > 25.0 || forwardDot < 0.5 ||
+           std::abs(static_cast<double>(next.verticalFov) - current.verticalFov) > 0.05;
 }
 
 bool IsCViewVtable(uintptr_t vtable)
@@ -122,7 +146,7 @@ void PublishPose(uintptr_t camera)
         if (!IsCViewVtable(*reinterpret_cast<const uintptr_t*>(cview)))
             return;
 
-        const auto matrix = reinterpret_cast<const float(*)[4]>(camera);
+        const auto matrix = reinterpret_cast<const float (*)[4]>(camera);
         Pose pose {};
         for (int i = 0; i < 3; ++i)
         {
@@ -135,17 +159,22 @@ void PublishPose(uintptr_t camera)
         std::memcpy(pose.projectionRaw, reinterpret_cast<const float*>(camera + 0x30),
                     sizeof(float) * Pose::PROJECTION_FLOAT_COUNT);
         pose.timestampMs = Util::MillisecondsNow();
+        pose.cameraIdentity = cview;
         if (!IsFiniteBasis(pose))
             return;
 
         g_sequence.fetch_add(1, std::memory_order_acq_rel); // odd: write in progress
+        const bool cut = IsCameraCut(g_current, pose);
+        pose.cutGeneration = cut ? g_cutGeneration.fetch_add(1, std::memory_order_relaxed) + 1
+                                 : g_cutGeneration.load(std::memory_order_relaxed);
+        pose.sequence = g_poseSequence.fetch_add(1, std::memory_order_relaxed) + 1;
         // Frustum construction can run repeatedly for one rendered view. Exact duplicates inside the
         // callback burst must not become a false zero-velocity pair, but a stationary camera still needs
         // a fresh zero-velocity pair on the next rendered frame or the last nonzero turn delta keeps being
         // extrapolated as a slow creep. KCD2's capped source frames are ~16.7 ms apart; 8 ms separates
         // callback bursts without the overly aggressive old 2 ms threshold.
         constexpr double DISTINCT_FRAME_GAP_MS = 8.0;
-        if (g_current.timestampMs <= 0.0)
+        if (cut || g_current.timestampMs <= 0.0)
             g_previous = pose;
         else if (PoseChanged(g_current, pose) || pose.timestampMs - g_current.timestampMs >= DISTINCT_FRAME_GAP_MS)
             g_previous = g_current;
@@ -228,6 +257,32 @@ bool IsAvailable()
 {
     Pose current, previous;
     return ReadPoses(current, previous) && Util::MillisecondsNow() - current.timestampMs < 250.0;
+}
+
+bool ReadSnapshots(Snapshot& current, Snapshot& previous)
+{
+    Pose currentPose, previousPose;
+    if (!ReadPoses(currentPose, previousPose))
+        return false;
+
+    const auto copy = [](const Pose& source, Snapshot& target)
+    {
+        std::memcpy(target.position, source.position, sizeof(target.position));
+        std::memcpy(target.right, source.right, sizeof(target.right));
+        std::memcpy(target.up, source.up, sizeof(target.up));
+        std::memcpy(target.forward, source.forward, sizeof(target.forward));
+        target.verticalFov = source.verticalFov;
+        target.pixelAspect = source.projectionRaw[4];
+        target.nearPlane = source.projectionRaw[9];
+        target.farPlane = source.projectionRaw[15];
+        target.timestampMs = source.timestampMs;
+        target.cameraIdentity = source.cameraIdentity;
+        target.sequence = source.sequence;
+        target.cutGeneration = source.cutGeneration;
+    };
+    copy(currentPose, current);
+    copy(previousPose, previous);
+    return true;
 }
 
 double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* poseIntervalMs)

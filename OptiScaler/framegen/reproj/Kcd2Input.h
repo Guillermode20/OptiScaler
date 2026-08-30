@@ -20,11 +20,27 @@ struct Snapshot
     std::uint64_t gamepadEventCount = 0;
 };
 
+struct MouseInterval
+{
+    double yaw = 0.0;
+    double pitch = 0.0;
+    std::uint32_t yawEvents = 0;
+    std::uint32_t pitchEvents = 0;
+    double firstTimestampMs = 0.0;
+    double lastTimestampMs = 0.0;
+    bool complete = false;
+};
+
 // Lazily installs the read-only WHGame input-dispatch hook. Unknown builds
 // fail closed and leave KCD2's input path untouched.
 bool Initialize();
 bool IsAvailable();
 bool ReadSnapshot(Snapshot& snapshot);
+
+// Sums post-map mouse-look events in the exact half-open interval
+// (beginTimestampMs, endTimestampMs]. The fixed ring never allocates. complete
+// is false if the requested beginning predates retained history.
+bool QueryMouseInterval(double beginTimestampMs, double endTimestampMs, MouseInterval& interval);
 
 // Rate-limited caller diagnostic. Returns false until the hook is installed.
 bool DescribeStats(char* buffer, std::size_t size);

@@ -82,7 +82,7 @@ class ReprojectionTests(unittest.TestCase):
         presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
             "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
         self.assertEqual(presenter.count("PresentCompositorFrame("), 1)
-        self.assertIn("PresentCompositorFrame(1, 0, !newAnchor, false)", presenter)
+        self.assertIn("PresentCompositorFrame(1, 0, generatedContent || !newContent, false)", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
     def test_async_hot_path_has_no_per_output_debug_logging(self):
@@ -102,7 +102,7 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
             "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
-        self.assertIn("packet.sourcePoseTimestamp", presenter)
+        self.assertIn("selectedContent->sourcePoseTimestamp", presenter)
         self.assertIn("warpOriginMs", presenter)
         self.assertNotIn("(targetDisplayMs - packet.renderTimestamp)", presenter)
 
@@ -229,7 +229,7 @@ class ReprojectionTests(unittest.TestCase):
         telemetry = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.cpp").read_text(encoding="utf-8")
         self.assertIn("ReprojAdaptiveQueueLead { true }", config)
         self.assertIn("RecentGpuQueueDelayMs", presenter)
-        self.assertIn("queueAwareLead ? 16.0 : 8.0", presenter)
+        self.assertIn("queueAwareLead ? 20.0 : 8.0", presenter)
         self.assertIn("_recentGpuQueueDelayMs.store(slot->gpuQueueDelayMs", telemetry)
 
     def test_source_cap_does_not_burn_two_ms_of_cpu_every_frame(self):

@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.34 (2026-08-30)
+* Hybrid frame generation and scanout-time late warp
+
 ## v10.0.0.33 (2026-08-30)
 * Reproj efficiency: high-priority presenter queue with fallback, persistent warp constants, asynchronous-only GPU timing, and one fewer output-state barrier
 

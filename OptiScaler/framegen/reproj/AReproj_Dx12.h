@@ -3,6 +3,9 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
 #include "ReprojTelemetry.h"
+#include "TargetPoseResolver.h"
+#include "ContentFrame.h"
+#include "HybridFsrGenerator.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -65,23 +68,13 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         Failed,
     };
 
-    struct ReprojFramePacket
+    struct ReprojFramePacket : ContentFrame
     {
-        ID3D12Resource* color = nullptr;
-        ID3D12Resource* depth = nullptr;
-        ID3D12Resource* velocity = nullptr;
-        ID3D12Resource* ui = nullptr;
-        D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_COMMON;
-        D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON;
-        D3D12_RESOURCE_STATES velocityState = D3D12_RESOURCE_STATE_COMMON;
-        D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON;
-        RP_Constants constants {};
+        ContentFrame generated[3] {};
+        uint32_t generatedCount = 0;
         UINT64 frameId = 0;
         UINT64 captureFenceValue = 0;
         UINT64 retirementFenceValue = 0;
-        double renderTimestamp = 0.0;
-        double sourcePoseTimestamp = 0.0;
-        double sourcePoseInterval = 0.0; // exact interval represented by camera current/previous poses
         double frameDelta = 0.0;
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
         UINT syncInterval = 0;
@@ -97,7 +90,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         std::atomic<PacketState> state { PacketState::Free };
     };
 
-    std::unique_ptr<RP_Dx12> _warp;                // the reprojection pass (v1/v2 PSOs)
+    std::unique_ptr<RP_Dx12> _warp; // the reprojection pass (v1/v2 PSOs)
+    std::unique_ptr<HybridFsrGenerator> _hybridGenerator;
     ID3D12Resource* _lastColor[BUFFER_COUNT] = {}; // copy of the last presented real frame
     D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
     ID3D12Resource* _uiColor[BUFFER_COUNT] = {}; // sync-path UI capture composited after warping
@@ -120,6 +114,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12QueryHeap* _warpTimestampHeap = nullptr;
     ID3D12Resource* _warpTimestampReadback = nullptr;
     UINT64 _presentTimestampFrequency = 0;
+    ID3D12Fence* _lateLatchFence = nullptr;
+    UINT64 _lateLatchFenceValue = 0;
     ReprojTelemetry _telemetry;
     ReprojSlotRecord* _currentTelemetrySlot = nullptr;
     class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use
@@ -128,7 +124,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
 
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
-    UINT64 _scFenceValue = 0; // monotonic SC fence value (fence outlives context recreate)
+    UINT64 _scFenceValue = 0;  // monotonic SC fence value (fence outlives context recreate)
 
     bool CopyLastFrame(int fIndex, ID3D12Resource* source);
     static DXGI_FORMAT NormalizeReprojFormat(DXGI_FORMAT format);
@@ -140,7 +136,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             bool warpAllowed);
     bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
                             uint32_t telemetryQueryStart = UINT32_MAX, bool inputPredicted = false,
-                            float predictedYaw = 0.0f, float predictedPitch = 0.0f);
+                            float predictedYaw = 0.0f, float predictedPitch = 0.0f,
+                            const TargetPoseResolver::Pose* targetPose = nullptr, ContentFrame* contentFrame = nullptr);
     bool DisplayPacket(int packetIndex, bool composeUi, uint32_t telemetryQueryStart = UINT32_MAX);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
@@ -155,6 +152,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void FeedInputPredictorFromPacket(int sourceIndex, const RP_Constants& constants, double poseTimestampMs,
                                       double poseIntervalMs, bool hookPose);
     bool TryInputPredictedRotation(double poseTimestampMs, float* yawRadians, float* pitchRadians);
+    TargetPoseResolver::Result ResolveTargetPose(const ContentFrame& content, double targetScanoutMs);
     bool ShouldCaptureAnchor(double nowMs);
     int AcquirePacket();
     void RetirePackets();
@@ -222,10 +220,11 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::atomic<float> _trackedMouseSensitivityX { 0.001f };
     std::atomic<float> _trackedMouseSensitivityY { 0.001f };
     std::atomic<bool> _hasTrackedMouseSensitivity { false };
-    bool _inputPredictorActive = false;  // hysteresis state of the input-predicted warp path
+    bool _inputPredictorActive = false;    // hysteresis state of the input-predicted warp path
     double _lastPredictorFeedPoseMs = 0.0; // estimator dedup guard (newest fed pose)
-    uint32_t _inputPredictedSlots = 0;   // async presenter diagnostics window
+    uint32_t _inputPredictedSlots = 0;     // async presenter diagnostics window
     uint32_t _predictorLogSlots = 0;
+
   protected:
     void ReleaseObjects() override final;
     void CreateObjects(ID3D12Device* InDevice) override final;

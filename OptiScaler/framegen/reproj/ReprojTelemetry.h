@@ -122,6 +122,7 @@ struct ReprojSlotRecord
     int64_t commandRecordingBeginQpc = 0;
     int64_t commandRecordingEndQpc = 0;
     int64_t queueSubmitQpc = 0;
+    int64_t lateLatchSignalQpc = 0;
     int64_t presentBeginQpc = 0;
     int64_t presentEndQpc = 0;
     int64_t latestDxgiSyncQpc = 0;
@@ -183,6 +184,18 @@ struct ReprojSlotRecord
     bool inputPredicted = false;
     float predictedYawRad = 0.0f;
     float predictedPitchRad = 0.0f;
+    uint8_t contentKind = 0;
+    uint8_t posePath = 0;
+    float contentFraction = 1.0f;
+    float contentAgeMs = std::numeric_limits<float>::quiet_NaN();
+    double poseSampleTimestampMs = 0.0;
+    double targetScanoutTimestampMs = 0.0;
+    float residualPredictionIntervalMs = std::numeric_limits<float>::quiet_NaN();
+    float yawConfidence = 0.0f;
+    float pitchConfidence = 0.0f;
+    float yawErrorDegrees = std::numeric_limits<float>::quiet_NaN();
+    float pitchErrorDegrees = std::numeric_limits<float>::quiet_NaN();
+    float fgDurationMs = std::numeric_limits<float>::quiet_NaN();
 
     // Result
     HRESULT waitableResult = S_OK;
@@ -194,6 +207,8 @@ struct ReprojSlotRecord
     float waitableDurationMs = std::numeric_limits<float>::quiet_NaN();
     float commandRecordingMs = std::numeric_limits<float>::quiet_NaN();
     float gpuQueueDelayMs = std::numeric_limits<float>::quiet_NaN();
+    float lateLatchToGpuStartMs = std::numeric_limits<float>::quiet_NaN();
+    float cameraLatencyEstimateMs = std::numeric_limits<float>::quiet_NaN();
     float gpuDurationMs = std::numeric_limits<float>::quiet_NaN();
     float gpuEndLatenessMs = std::numeric_limits<float>::quiet_NaN();
     float presentBlockMs = std::numeric_limits<float>::quiet_NaN();
@@ -286,6 +301,11 @@ struct ReprojTelemetrySnapshot
     float finalP95 = std::numeric_limits<float>::quiet_NaN();
     float finalMax = std::numeric_limits<float>::quiet_NaN();
     uint32_t clampCount = 0;
+    float lateLatchToGpuStartP95 = std::numeric_limits<float>::quiet_NaN();
+    float targetCoverage = 0.0f;
+    float targetErrorP95Degrees = std::numeric_limits<float>::quiet_NaN();
+    uint32_t contentReal = 0;
+    uint32_t contentGenerated = 0;
 
     // Shadow calculations (current vs alternative)
     float shadowRawDeltaP50 = std::numeric_limits<float>::quiet_NaN(); // current - rawIntervalStep
@@ -347,7 +367,7 @@ class ReprojTelemetry
     float RecentGpuQueueDelayMs() const { return _recentGpuQueueDelayMs.load(std::memory_order_relaxed); }
     float RecentGpuDurationMs() const { return _recentGpuDurationMs.load(std::memory_order_relaxed); }
     void SetTimestampResources(ID3D12QueryHeap* heap, ID3D12Resource* readback, ID3D12Fence* scFence,
-                              uint64_t timestampFrequency);
+                               uint64_t timestampFrequency);
 
     // Aggregation
     bool ShouldPublish(int64_t nowQpc) const;

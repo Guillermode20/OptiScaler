@@ -106,6 +106,8 @@ bool Config::Reload(std::filesystem::path iniPath)
                 else if (lstrcmpiA(FGOutputString.value().c_str(), "reproj") == 0 ||
                          lstrcmpiA(FGOutputString.value().c_str(), "asynctimewarp") == 0)
                     FGOutput.set_from_config(FGOutput::Reproj);
+                else if (lstrcmpiA(FGOutputString.value().c_str(), "hybridtimewarp") == 0)
+                    FGOutput.set_from_config(FGOutput::HybridTimewarp);
             }
 
             const bool canUseNvngxReplacement =
@@ -211,11 +213,15 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojLateLatch.set_from_config(readBool("Reproj", "LateLatch"));
             ReprojInputPredictor.set_from_config(readBool("Reproj", "InputPredictor"));
             ReprojInputPredictorResponse.set_from_config(readFloat("Reproj", "InputPredictorResponse"));
+            ReprojTargetPoseResolver.set_from_config(readBool("Reproj", "TargetPoseResolver"));
+            ReprojTargetPoseShadow.set_from_config(readBool("Reproj", "TargetPoseShadow"));
+            ReprojLateLatchFence.set_from_config(readBool("Reproj", "LateLatchFence"));
             ReprojMouseSensitivityX.set_from_config(readFloat("Reproj", "MouseSensitivityX"));
             ReprojMouseSensitivityY.set_from_config(readFloat("Reproj", "MouseSensitivityY"));
             ReprojTelemetry.set_from_config(readBool("Reproj", "Telemetry"));
             ReprojTelemetryMissDump.set_from_config(readBool("Reproj", "TelemetryMissDump"));
             ReprojKcd2HudIsolation.set_from_config(readBool("Reproj", "Kcd2HudIsolation"));
+            HybridGeneratedFrames.set_from_config(readInt("HybridTimewarp", "GeneratedFrames"));
         }
 
         // OptiFG
@@ -952,6 +958,8 @@ bool Config::SaveIni()
                 FGOutputString = "DLSSG";
             else if (FGOutputHeld.value() == FGOutput::Reproj)
                 FGOutputString = "AsyncTimewarp";
+            else if (FGOutputHeld.value() == FGOutput::HybridTimewarp)
+                FGOutputString = "HybridTimewarp";
         }
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
 
@@ -1079,6 +1087,12 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojInputPredictor.value_for_config()).c_str());
         ini.SetValue("Reproj", "InputPredictorResponse",
                      GetFloatValue(Instance()->ReprojInputPredictorResponse.value_for_config()).c_str());
+        ini.SetValue("Reproj", "TargetPoseResolver",
+                     GetBoolValue(Instance()->ReprojTargetPoseResolver.value_for_config()).c_str());
+        ini.SetValue("Reproj", "TargetPoseShadow",
+                     GetBoolValue(Instance()->ReprojTargetPoseShadow.value_for_config()).c_str());
+        ini.SetValue("Reproj", "LateLatchFence",
+                     GetBoolValue(Instance()->ReprojLateLatchFence.value_for_config()).c_str());
         ini.SetValue("Reproj", "MouseSensitivityX",
                      GetFloatValue(Instance()->ReprojMouseSensitivityX.value_for_config()).c_str());
         ini.SetValue("Reproj", "MouseSensitivityY",
@@ -1088,6 +1102,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojTelemetryMissDump.value_for_config()).c_str());
         ini.SetValue("Reproj", "Kcd2HudIsolation",
                      GetBoolValue(Instance()->ReprojKcd2HudIsolation.value_for_config()).c_str());
+        ini.SetValue("HybridTimewarp", "GeneratedFrames",
+                     GetIntValue(Instance()->HybridGeneratedFrames.value_for_config()).c_str());
     }
 
     // XeFG output

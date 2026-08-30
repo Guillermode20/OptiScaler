@@ -155,7 +155,7 @@ void fakenvapi::reportFGPresent(IDXGISwapChain* pSwapChain, bool fg_state, bool 
     static std::mutex presentMutex;
     std::scoped_lock lock(presentMutex);
     const auto output = State::Instance().activeFgOutput;
-    if (!isUsingAsMainNvapi() || (output != FGOutput::FSRFG && output != FGOutput::Reproj))
+    if (!isUsingAsMainNvapi() || (output != FGOutput::FSRFG && !IsReprojectionOutput(output)))
         return;
 
     auto lowLatencyCtx = LowLatencyCtx::get();
@@ -167,7 +167,7 @@ void fakenvapi::reportFGPresent(IDXGISwapChain* pSwapChain, bool fg_state, bool 
         LOG_ERROR("Couldn't get low latency context");
 
     // Reprojection owns its presenter and has no FFX AntiLag context to register.
-    if (output == FGOutput::Reproj)
+    if (IsReprojectionOutput(output))
     {
         if (lowLatencyCtx && fg_state)
             lowLatencyCtx->set_fg_type(frame_interpolated, 0);

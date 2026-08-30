@@ -404,6 +404,12 @@
     <ClInclude Include="framegen\reproj\AReproj_Dx12.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="framegen\reproj\ContentFrame.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\reproj\HybridFsrGenerator.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="framegen\reproj\Kcd2Input.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -411,6 +417,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="framegen\reproj\ReprojTelemetry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="framegen\reproj\TargetPoseResolver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="framegen\IFGFeature.h">
@@ -1205,6 +1214,9 @@
     <ClCompile Include="framegen\reproj\AReproj_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="framegen\reproj\HybridFsrGenerator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="framegen\reproj\Kcd2Camera.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -1221,6 +1233,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\reproj\ReprojTelemetry.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="framegen\reproj\TargetPoseResolver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\IFGFeature.cpp">
