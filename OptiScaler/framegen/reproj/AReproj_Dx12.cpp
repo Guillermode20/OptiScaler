@@ -284,9 +284,9 @@ bool AReproj_Dx12::CreateWarpOutput(int fIndex, ID3D12Resource* source)
     // Every use follows the same UAV -> COPY_SOURCE cycle. Starting and ending
     // in COPY_SOURCE removes the otherwise redundant COPY_SOURCE -> COMMON ->
     // UAV transition between display slots.
-    hr = _device->CreateCommittedResource(
-        &heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr,
-        IID_PPV_ARGS(&_warpOutput[fIndex]));
+    const auto initialState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    hr = _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, initialState, nullptr,
+                                          IID_PPV_ARGS(&_warpOutput[fIndex]));
 
     if (hr != S_OK)
     {
