@@ -345,6 +345,7 @@ class ReprojTelemetry
     // Latest completed submit-to-GPU-start delay. The presenter reads this
     // summary without a fence wait or readback of its own.
     float RecentGpuQueueDelayMs() const { return _recentGpuQueueDelayMs.load(std::memory_order_relaxed); }
+    float RecentGpuDurationMs() const { return _recentGpuDurationMs.load(std::memory_order_relaxed); }
     void SetTimestampResources(ID3D12QueryHeap* heap, ID3D12Resource* readback, ID3D12Fence* scFence,
                               uint64_t timestampFrequency);
 
@@ -398,6 +399,7 @@ class ReprojTelemetry
     std::array<GpuSlot, TRACE_SLOT_COUNT> _gpuSlots {};
     uint32_t _gpuQuerySkipped = 0;
     std::atomic<float> _recentGpuQueueDelayMs { 0.0f };
+    std::atomic<float> _recentGpuDurationMs { 2.0f };
 
     // Aggregation window
     mutable std::mutex _snapshotMutex;

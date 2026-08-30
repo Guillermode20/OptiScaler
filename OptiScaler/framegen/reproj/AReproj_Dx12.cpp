@@ -1098,7 +1098,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         return false;
     }
 
-    UpdateWarpGpuDuration(outputIndex);
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
     uint32_t queryStart = telemetryQueryStart;
@@ -1111,9 +1110,9 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     else if (queryStart != UINT32_MAX)
         useTelemetryQuery = true;
 
-    // Legacy fallback uses outputIndex*2, telemetry uses sequence-indexed
-    const UINT timestampStart = useTelemetryQuery ? queryStart : static_cast<UINT>(outputIndex * 2);
-    if (_warpTimestampHeap != nullptr && timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
+    // Sequence-indexed timestamps are emitted only while telemetry is active.
+    const UINT timestampStart = useTelemetryQuery ? queryStart : UINT32_MAX;
+    if (useTelemetryQuery && _warpTimestampHeap != nullptr && timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = packet.constants;
     constants.timeStep = timeStep;
@@ -1145,7 +1144,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
         _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
 
-    if (_warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr && timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
+    if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
+        timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
     {
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart + 1);
         cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart, 2,
@@ -1159,36 +1159,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
     return true;
-}
-
-void AReproj_Dx12::UpdateWarpGpuDuration(int outputIndex)
-{
-    if (_warpTimestampReadback == nullptr || _presentTimestampFrequency == 0 || outputIndex < 0 ||
-        outputIndex >= BUFFER_COUNT || _scAllocatorFenceValues[outputIndex] == 0 || _scFence == nullptr ||
-        _scFence->GetCompletedValue() < _scAllocatorFenceValues[outputIndex])
-        return;
-
-    const SIZE_T offset = static_cast<SIZE_T>(outputIndex * 2 * sizeof(UINT64));
-    D3D12_RANGE range { offset, offset + 2 * sizeof(UINT64) };
-    void* mapped = nullptr;
-    if (FAILED(_warpTimestampReadback->Map(0, &range, &mapped)))
-        return;
-    const auto* timestamps = reinterpret_cast<const UINT64*>(static_cast<const uint8_t*>(mapped) + offset);
-    if (timestamps[1] >= timestamps[0])
-    {
-        const double durationMs = static_cast<double>(timestamps[1] - timestamps[0]) * 1000.0 /
-                                  static_cast<double>(_presentTimestampFrequency);
-        if (durationMs > 0.0 && durationMs < 50.0)
-        {
-            std::scoped_lock metricsLock(_metricsMutex);
-            _warpDurationEmaMs = _warpDurationEmaMs * 0.9 + durationMs * 0.1;
-            // PresenterMain owns the dispatch lead. Do not reset it from the GPU-only duration:
-            // on Proton the timer can wake several milliseconds late even though the warp itself is
-            // sub-millisecond. Resetting here silently defeated the presenter's scheduler adaptation.
-        }
-    }
-    D3D12_RANGE written { 0, 0 };
-    _warpTimestampReadback->Unmap(0, &written);
 }
 
 bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
@@ -1695,7 +1665,8 @@ void AReproj_Dx12::PresenterMain()
             const auto queueDelayMs = _telemetry.RecentGpuQueueDelayMs();
             if (std::isfinite(queueDelayMs) && queueDelayMs > 0.0f)
             {
-                const auto desiredLeadMs = std::clamp(static_cast<double>(queueDelayMs) + _warpDurationEmaMs + 0.75,
+                const auto warpDurationMs = _telemetry.RecentGpuDurationMs();
+                const auto desiredLeadMs = std::clamp(static_cast<double>(queueDelayMs + warpDurationMs) + 0.75,
                                                        3.0, 16.0);
                 _dispatchLeadMs = desiredLeadMs >= _dispatchLeadMs
                                       ? desiredLeadMs
@@ -1833,7 +1804,7 @@ void AReproj_Dx12::PresenterMain()
 
             // Adapt from usable headroom after the actual wake, not from loop-top lateness. Present(1)
             // normally blocks for most of a refresh, so loop-top is early even when Wine's timer then
-            // overshoots the requested wake by 3-10 ms. UpdateWarpGpuDuration used to reset this to 3 ms
+            // overshoots the requested wake by 3-10 ms. An older GPU-duration path reset this to 3 ms
             // every slot, making the old adaptation ineffective (telemetry always reported lead=3.00).
             constexpr double LEAD_GROW_MS = 0.5;
             constexpr double LEAD_DECAY_MS = 0.05;
