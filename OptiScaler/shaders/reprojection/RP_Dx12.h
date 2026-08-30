@@ -19,6 +19,7 @@ class RP_Dx12 : public Shader_Dx12
   private:
     FrameDescriptorHeap _frameHeaps[RP_NUM_OF_HEAPS];
     ID3D12Resource* _constantBuffers[RP_NUM_OF_HEAPS] = {};
+    UINT8* _constantBufferData[RP_NUM_OF_HEAPS] = {};
     ID3D12PipelineState* _pipelineStateDepth = nullptr;
 
     static void ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource,
