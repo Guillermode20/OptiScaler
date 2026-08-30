@@ -175,7 +175,7 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
 
         D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc {};
         cbvDesc.BufferLocation = _constantBuffers[i]->GetGPUVirtualAddress();
-        cbvDesc.SizeInBytes = sizeof(RP_Constants);
+        cbvDesc.SizeInBytes = static_cast<UINT>(sizeof(RP_Constants));
         InDevice->CreateConstantBufferView(&cbvDesc, _frameHeaps[i].GetCbvCPU(0));
     }
 }

@@ -1446,7 +1446,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
             _telemetry.SetTimestampResources(_warpTimestampHeap, _warpTimestampReadback, _scFence, _presentTimestampFrequency);
         }
     }
-    LOG_INFO("Reproj: main-swapchain async presenter created");
+    LOG_INFO("Reproj: main-swapchain async presenter created ({} GPU queue priority)",
+             queueDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH ? "high" : "normal");
     return true;
 }
 
@@ -1643,15 +1644,15 @@ void AReproj_Dx12::PresenterMain()
     uint32_t consecutiveJammedPresents = 0;
     LARGE_INTEGER qpcFrequency {};
     QueryPerformanceFrequency(&qpcFrequency);
+    const auto* config = Config::Instance();
 
     // Telemetry: ensure clock initialized (already in ReprojTelemetry ctor)
     // Poll calibration once at thread start if enabled.
-    if (Config::Instance()->ReprojTelemetry.value_or_default())
+    if (config->ReprojTelemetry.value_or_default())
         _telemetry.TryCalibrate();
 
     while (!_stopPresenter.load())
     {
-        const auto* config = Config::Instance();
         const auto refreshHz = TargetRefreshHz();
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
         const auto requestedLeadMs = config->ReprojDispatchLeadOverrideMs.value_or_default();
@@ -1698,7 +1699,7 @@ void AReproj_Dx12::PresenterMain()
 
         // Telemetry per-slot record (only if enabled, otherwise dummy to avoid overhead)
         ReprojSlotRecord* tSlot = nullptr;
-        const bool telemetryEnabled = Config::Instance()->ReprojTelemetry.value_or_default();
+        const bool telemetryEnabled = config->ReprojTelemetry.value_or_default();
         if (telemetryEnabled)
         {
             tSlot = _telemetry.BeginSlot();
@@ -1994,7 +1995,7 @@ void AReproj_Dx12::PresenterMain()
                                      packet.sourcePoseTimestamp <= targetDisplayMs;
         const auto warpOriginMs = poseOriginValid ? packet.sourcePoseTimestamp : packet.renderTimestamp;
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
-        auto maxTimeStep = std::max(0.25f, Config::Instance()->ReprojMaxTimeStep.value_or_default());
+        auto maxTimeStep = std::max(0.25f, config->ReprojMaxTimeStep.value_or_default());
         // KCD2's rendered camera path is accurate, but source stalls can leave an anchor 2-3 frames
         // old. A hard displacement cap freezes the image mid-turn (every slot re-renders the same
         // maximum warp) and then snaps forward on anchor arrival. For KCD2 the cap instead bounds the
@@ -2003,8 +2004,8 @@ void AReproj_Dx12::PresenterMain()
         // generic value; only growth is limited, because KCD2's natural per-slot step (age/period with
         // 16-32ms alternating frames and 27-45ms anchor ages) legitimately exceeds 1.5 in normal play.
         const bool rateLimitedWarp = Kcd2Camera::IsAvailable();
-        const auto unclampedStep = static_cast<float>((anchorAgeMs / realPeriodMs) *
-                                                      Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f);
+        const auto unclampedStep =
+            static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default() * 2.0f);
         auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
         if (rateLimitedWarp)
         {
@@ -2037,7 +2038,8 @@ void AReproj_Dx12::PresenterMain()
             tSlot->sourceProvidedFrameIntervalMs = static_cast<float>(State::Instance().lastFGFrameTime);
             tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
             tSlot->anchorAgeMs = static_cast<float>(anchorAgeMs);
-            tSlot->unclampedTimeStep = static_cast<float>((anchorAgeMs / realPeriodMs) * Config::Instance()->ReprojTimeStep.value_or_default() * 2.0f);
+            tSlot->unclampedTimeStep =
+                static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default() * 2.0f);
             tSlot->finalTimeStep = timeStep;
             tSlot->maxTimeStep = maxTimeStep;
             tSlot->timestepClamped = tSlot->unclampedTimeStep > maxTimeStep || tSlot->unclampedTimeStep < 0;
@@ -2049,7 +2051,7 @@ void AReproj_Dx12::PresenterMain()
             tSlot->cameraAspect = packet.constants.cameraAspect;
             tSlot->cameraNear = packet.constants.cameraNear;
             tSlot->cameraFar = packet.constants.cameraFar;
-            tSlot->requestedMode = static_cast<ReprojEffectiveMode>(Config::Instance()->ReprojMode.value_or_default());
+            tSlot->requestedMode = static_cast<ReprojEffectiveMode>(config->ReprojMode.value_or_default());
             // Record the actual constants submitted to the shader.  Packet resource
             // availability alone cannot distinguish the stable rotation-only path
             // from full depth/camera reprojection.
@@ -2119,7 +2121,7 @@ void AReproj_Dx12::PresenterMain()
         // whether prediction is calibrating and engaging.
         static double lastPresenterPredictorLogMs = 0.0;
         const auto predictorLogMs = Util::MillisecondsNow();
-        if (Config::Instance()->ReprojInputPredictor.value_or_default() &&
+        if (config->ReprojInputPredictor.value_or_default() &&
             predictorLogMs - lastPresenterPredictorLogMs > 10000.0)
         {
             lastPresenterPredictorLogMs = predictorLogMs;
