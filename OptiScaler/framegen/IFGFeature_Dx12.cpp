@@ -119,7 +119,7 @@ ID3D12GraphicsCommandList* IFGFeature_Dx12::GetUICommandList(int index)
     if (index < 0 || index >= BUFFER_COUNT)
         index = GetIndex();
 
-    LOG_DEBUG("index: {}", index);
+    LOG_TRACE("index: {}", index);
 
     if (_uiCommandAllocator[0] == nullptr)
     {

@@ -211,14 +211,16 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("FrameLimit::paceReprojectionSource(false)", skip_path)
         self.assertIn("ShouldCaptureAnchor", source)
 
-    def test_experimental_clock_and_gpu_lead_are_opt_in(self):
+    def test_completion_clock_is_the_safe_default_and_lead_is_slot_bounded(self):
         root = Path(__file__).resolve().parents[2]
         config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        self.assertIn("ReprojPresentCompletionClock { false }", config)
+        self.assertIn("ReprojPresentCompletionClock { true }", config)
         self.assertIn("ReprojDispatchLeadOverrideMs { 0.0f }", config)
         self.assertIn("if (!completionClock && SampleDisplayClock", presenter)
         self.assertIn("if (completionClock || nextDeadlineMs <= 0.0)", presenter)
+        self.assertIn("maxUsableLeadMs", presenter)
+        self.assertIn("std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs)", presenter)
 
     def test_queue_aware_lead_uses_completed_gpu_queue_telemetry(self):
         root = Path(__file__).resolve().parents[2]
@@ -227,8 +229,21 @@ class ReprojectionTests(unittest.TestCase):
         telemetry = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.cpp").read_text(encoding="utf-8")
         self.assertIn("ReprojAdaptiveQueueLead { true }", config)
         self.assertIn("RecentGpuQueueDelayMs", presenter)
-        self.assertIn("queueAwareLead ? 20.0 : 8.0", presenter)
+        self.assertIn("queueAwareLead ? maxUsableLeadMs", presenter)
         self.assertIn("_recentGpuQueueDelayMs.store(slot->gpuQueueDelayMs", telemetry)
+
+    def test_telemetry_separates_slips_from_absent_slots(self):
+        root = Path(__file__).resolve().parents[2]
+        header = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.h").read_text(encoding="utf-8")
+        telemetry = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.cpp").read_text(encoding="utf-8")
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        analyzer = (root / "tests/reprojection/analyze_telemetry.py").read_text(encoding="utf-8")
+        self.assertIn("slippedPresents", header)
+        self.assertIn("SoftwareScheduleSkip", header)
+        self.assertIn("slippedPresents = slipped", telemetry)
+        self.assertNotIn("Count slipped presents as misses", telemetry)
+        self.assertIn("tSlot->representedSlots = 1", presenter)
+        self.assertIn("slippedPresented", analyzer)
 
     def test_source_cap_does_not_burn_two_ms_of_cpu_every_frame(self):
         # KCD2 can sustain more than 60 FPS uncapped. A full 2 ms busy tail in

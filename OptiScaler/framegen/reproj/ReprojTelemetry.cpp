@@ -288,11 +288,15 @@ void ReprojTelemetry::ClassifySlot(ReprojSlotRecord& slot, double refreshPeriodM
     // Already has outcome? Still classify miss cause for Presented with long interval.
     if (slot.outcome == ReprojSlotOutcome::SoftwareSkipped)
     {
-        // Distinguish ClockCorrection vs CpuWakeLate — for now use wake lateness.
-        if (std::isfinite(slot.wakeLatenessMs) && slot.wakeLatenessMs > 1.0f)
+        // A correction is only a clock cause when this slot actually had one
+        // applied. The old path left wakeTargetQpc unset for software skips,
+        // which made every ordinary late loop look like ClockCorrection.
+        if (slot.displayClockCorrectionApplied)
+            slot.primaryMissCause = ReprojMissCause::ClockCorrection;
+        else if (std::isfinite(slot.wakeLatenessMs) && slot.wakeLatenessMs > 1.0f)
             slot.primaryMissCause = ReprojMissCause::CpuWakeLate;
         else
-            slot.primaryMissCause = ReprojMissCause::ClockCorrection;
+            slot.primaryMissCause = ReprojMissCause::SoftwareScheduleSkip;
         return;
     }
     if (slot.outcome == ReprojSlotOutcome::WaitableTimeout)
@@ -420,13 +424,49 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     size_t nRaw = 0, nSelected = 0, nRatio = 0, nPoseInterval = 0, nAge = 0, nUnclamped = 0, nFinal = 0, nShadowRaw = 0,
            nShadowSource = 0, nLatchToGpu = 0;
 
-    uint32_t scheduled = 0, presented = 0, missed = 0, skippedRep = 0, newAnchor = 0, repeated = 0;
+    uint32_t scheduled = 0, presented = 0, missed = 0, skippedRep = 0, newAnchor = 0, repeated = 0, slipped = 0;
     uint32_t lateWakes = 0, clampCount = 0;
     uint32_t modeMv = 0, modeDepth = 0, modeRotation = 0, modeUnwarped = 0;
     uint32_t camAvail = 0, depthAvail = 0, depthConst = 0, hudless = 0;
     uint32_t contentReal = 0, contentGenerated = 0;
     uint32_t causeCpu = 0, causeWait = 0, causeCap = 0, causeQueue = 0, causeGpu = 0, causePresent = 0, causeClock = 0,
-             causeUnknown = 0;
+             causeSchedule = 0, causeUnknown = 0;
+
+    const auto countMissCause = [&](ReprojMissCause cause)
+    {
+        switch (cause)
+        {
+        case ReprojMissCause::CpuWakeLate:
+            ++causeCpu;
+            break;
+        case ReprojMissCause::WaitableLate:
+            ++causeWait;
+            break;
+        case ReprojMissCause::CaptureNotReady:
+            ++causeCap;
+            break;
+        case ReprojMissCause::PresentQueueBacklog:
+            ++causeQueue;
+            break;
+        case ReprojMissCause::WarpGpuSlow:
+            ++causeGpu;
+            break;
+        case ReprojMissCause::PresentSlip:
+            ++causePresent;
+            break;
+        case ReprojMissCause::ClockCorrection:
+            ++causeClock;
+            break;
+        case ReprojMissCause::SoftwareScheduleSkip:
+            ++causeSchedule;
+            break;
+        case ReprojMissCause::Unknown:
+            ++causeUnknown;
+            break;
+        default:
+            break;
+        }
+    };
 
     double sumRefresh = 0.0, sumConfigured = 0.0, sumMeasured = 0.0;
     uint32_t nRefresh = 0;
@@ -445,6 +485,16 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
         if (slot->outcome == ReprojSlotOutcome::Presented)
         {
             ++presented;
+            const bool presentSlipped = std::isfinite(slot->presentIntervalMs) && slot->refreshPeriodMs > 1.0f &&
+                                        slot->presentIntervalMs > slot->refreshPeriodMs * 1.5f;
+            if (presentSlipped)
+            {
+                ++slipped;
+                const auto represented = static_cast<uint32_t>(
+                    std::floor(slot->presentIntervalMs / slot->refreshPeriodMs + 0.5f));
+                if (represented > 1)
+                    skippedRep += represented - 1;
+            }
             if (std::isfinite(slot->presentIntervalMs) && nPresent < TRACE_SLOT_COUNT)
                 presentIntervals[nPresent++] = slot->presentIntervalMs;
             // Wake
@@ -519,70 +569,14 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
             contentGenerated += slot->contentKind == 1 ? 1 : 0;
             contentReal += slot->contentKind == 0 ? 1 : 0;
 
-            if (slot->primaryMissCause != ReprojMissCause::None && slot->presentIntervalMs > 0)
-            {
-                // Count slipped presents as misses for cause totals
-                switch (slot->primaryMissCause)
-                {
-                case ReprojMissCause::CpuWakeLate:
-                    ++causeCpu;
-                    break;
-                case ReprojMissCause::WaitableLate:
-                    ++causeWait;
-                    break;
-                case ReprojMissCause::CaptureNotReady:
-                    ++causeCap;
-                    break;
-                case ReprojMissCause::PresentQueueBacklog:
-                    ++causeQueue;
-                    break;
-                case ReprojMissCause::WarpGpuSlow:
-                    ++causeGpu;
-                    break;
-                case ReprojMissCause::PresentSlip:
-                    ++causePresent;
-                    break;
-                case ReprojMissCause::ClockCorrection:
-                    ++causeClock;
-                    break;
-                default:
-                    ++causeUnknown;
-                    break;
-                }
-            }
         }
         else
         {
             ++missed;
-            // Missed-slot causes
-            switch (slot->primaryMissCause)
-            {
-            case ReprojMissCause::CpuWakeLate:
-                ++causeCpu;
-                break;
-            case ReprojMissCause::WaitableLate:
-                ++causeWait;
-                break;
-            case ReprojMissCause::CaptureNotReady:
-                ++causeCap;
-                break;
-            case ReprojMissCause::PresentQueueBacklog:
-                ++causeQueue;
-                break;
-            case ReprojMissCause::WarpGpuSlow:
-                ++causeGpu;
-                break;
-            case ReprojMissCause::PresentSlip:
-                ++causePresent;
-                break;
-            case ReprojMissCause::ClockCorrection:
-                ++causeClock;
-                break;
-            default:
-                if (slot->primaryMissCause == ReprojMissCause::Unknown)
-                    ++causeUnknown;
-                break;
-            }
+            // Cause totals describe slots that were not presented. A
+            // successful but long-interval present is reported separately as
+            // slipped and must not inflate the miss budget.
+            countMissCause(slot->primaryMissCause);
         }
 
         if (slot->refreshPeriodMs > 0 && std::isfinite(slot->refreshPeriodMs))
@@ -606,6 +600,7 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.skippedRepresentedSlots = skippedRep;
     snap.newAnchorOutputs = newAnchor;
     snap.repeatedAnchorOutputs = repeated;
+    snap.slippedPresents = slipped;
     snap.displayFps = windowMs > 0.0 ? presented * 1000.0 / windowMs : 0.0;
 
     snap.presentIntervalP50 = Percentile(presentIntervals, nPresent, 0.50);
@@ -660,6 +655,11 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     const auto sourcePacing = FrameLimit::reprojectionSourcePacingStats();
     snap.sourceCapHz = sourcePacing.capHz;
     snap.sourceCapTimingErrorMs = sourcePacing.timingErrorMs;
+    const auto requestedSourceCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
+    snap.sourceCapRequestedHz = std::isfinite(requestedSourceCap) && requestedSourceCap > 0.0f
+                                    ? std::clamp(requestedSourceCap, 0.0f, 1000.0f)
+                                    : 0.0f;
+    snap.sourceCapActive = sourcePacing.capHz > 0.0f;
     snap.anchorAgeP50 = Percentile(anchorAges, nAge, 0.50);
     snap.anchorAgeP95 = Percentile(anchorAges, nAge, 0.95);
     snap.anchorAgeMax = Percentile(anchorAges, nAge, 1.0);
@@ -673,7 +673,10 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.lateLatchToGpuStartP95 = Percentile(latchToGpu, nLatchToGpu, 0.95);
     const auto targetStats = TargetPoseResolver::GetShadowStats();
     snap.targetCoverage = targetStats.activeCoverage;
-    snap.targetErrorP95Degrees = targetStats.errorP95Degrees;
+    snap.targetErrorP95Degrees = targetStats.errorSamples > 0 ? targetStats.errorP95Degrees
+                                                               : std::numeric_limits<float>::quiet_NaN();
+    snap.targetResolverEnabled = Config::Instance()->ReprojTargetPoseResolver.value_or_default();
+    snap.targetActiveSamples = targetStats.activeSamples;
     snap.contentReal = contentReal;
     snap.contentGenerated = contentGenerated;
     snap.cameraBasisAvailable = camAvail;
@@ -688,6 +691,7 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.causeGpu = causeGpu;
     snap.causePresent = causePresent;
     snap.causeClock = causeClock;
+    snap.causeSchedule = causeSchedule;
     snap.causeUnknown = causeUnknown;
 
     snap.valid = scheduled > 0;
@@ -722,7 +726,7 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
     LOG_INFO("ReprojTelemetry v=1 slots={} presented={} missed={} legacyMissed={} newAnchor={} repeatAnchor={} "
              "skippedRep={} "
              "cause.cpu={} cause.wait={} cause.capture={} cause.queue={} cause.gpu={} cause.present={} cause.clock={} "
-             "cause.unknown={} "
+             "cause.schedule={} cause.unknown={} "
              "interval.p50={:.2f} interval.p95={:.2f} interval.p99={:.2f} interval.max={:.2f} "
              "wake.p50={:.2f} wake.p95={:.2f} wake.p99={:.2f} wake.max={:.2f} lateWakes={} "
              "wait.p50={:.2f} wait.p95={:.2f} wait.p99={:.2f} "
@@ -738,10 +742,12 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              "step.final.max={:.2f} step.clamped={} "
              "camera={}/{} depth={}/{} depthConstants={}/{} hudless={}/{} "
              "fps={:.1f} poseInterval.p50={:.2f} poseInterval.p95={:.2f} content.real={} content.generated={} "
-             "target.coverage={:.3f} target.errorP95={:.3f} latchGpu.p95={:.2f}",
+             "target.coverage={:.3f} target.errorP95={:.3f} latchGpu.p95={:.2f} slipped={} "
+             "source.capRequestedHz={:.2f} source.capActive={} target.enabled={} target.samples={}",
              snap.scheduledSlots, snap.presented, snap.classifiedMisses, snap.legacyMisses, snap.newAnchorOutputs,
              snap.repeatedAnchorOutputs, snap.skippedRepresentedSlots, snap.causeCpu, snap.causeWaitable,
-             snap.causeCapture, snap.causeQueue, snap.causeGpu, snap.causePresent, snap.causeClock, snap.causeUnknown,
+             snap.causeCapture, snap.causeQueue, snap.causeGpu, snap.causePresent, snap.causeClock, snap.causeSchedule,
+             snap.causeUnknown,
              snap.presentIntervalP50, snap.presentIntervalP95, snap.presentIntervalP99, snap.presentIntervalMax,
              snap.wakeP50, snap.wakeP95, snap.wakeP99, snap.wakeMax, snap.lateWakes, snap.waitP50, snap.waitP95,
              snap.waitP99, snap.queueP50, snap.queueP95, snap.queueP99, snap.queueMax, snap.gpuP50, snap.gpuP95,
@@ -754,7 +760,9 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              snap.finalMax, snap.clampCount, snap.cameraBasisAvailable, snap.scheduledSlots, snap.depthAvailable,
              snap.scheduledSlots, snap.depthConstantsValid, snap.scheduledSlots, snap.hudlessSource,
              snap.scheduledSlots, snap.displayFps, snap.poseIntervalP50, snap.poseIntervalP95, snap.contentReal,
-             snap.contentGenerated, snap.targetCoverage, snap.targetErrorP95Degrees, snap.lateLatchToGpuStartP95);
+             snap.contentGenerated, snap.targetCoverage, snap.targetErrorP95Degrees, snap.lateLatchToGpuStartP95,
+             snap.slippedPresents, snap.sourceCapRequestedHz, snap.sourceCapActive ? 1 : 0,
+             snap.targetResolverEnabled ? 1 : 0, snap.targetActiveSamples);
 }
 
 bool ReprojTelemetry::ShouldDumpMiss(const ReprojTelemetrySnapshot& snap) const
@@ -764,7 +772,7 @@ bool ReprojTelemetry::ShouldDumpMiss(const ReprojTelemetrySnapshot& snap) const
     if (!snap.valid)
         return false;
     // Severe miss or burst
-    if (snap.classifiedMisses >= 6 || snap.presentIntervalP95 > 25.0f)
+    if (snap.classifiedMisses + snap.skippedRepresentedSlots >= 6 || snap.presentIntervalP95 > 25.0f)
         return true;
     return false;
 }
@@ -811,12 +819,13 @@ void ReprojTelemetry::FillOverlayText(char* buffer, size_t size) const
         return;
     }
     snprintf(buffer, size,
-             "Display %.1f Hz | p95 %.1f ms | missed %u (legacy %u)\n"
-             "Misses: queue %u | capture %u | CPU %u | GPU %u | present %u\n"
+             "Display %.1f Hz | p95 %.1f ms | missed %u (skipped %u, slipped %u; legacy %u)\n"
+             "Misses: queue %u | capture %u | CPU %u | GPU %u | present %u | schedule %u\n"
              "Queue p95 %.1f ms | GPU p95 %.1f ms | Present p95 %.1f ms\n"
              "Effective: MV %u depth %u rot %u | source %.1f/%.1f ms cap %.1f Hz err %.2f ms | step %.2f/%.2f",
-             snap.displayFps, snap.presentIntervalP95, snap.classifiedMisses, snap.legacyMisses, snap.causeQueue,
-             snap.causeCapture, snap.causeCpu, snap.causeGpu, snap.causePresent, snap.queueP95, snap.gpuP95,
+             snap.displayFps, snap.presentIntervalP95, snap.classifiedMisses, snap.skippedRepresentedSlots,
+             snap.slippedPresents, snap.legacyMisses, snap.causeQueue, snap.causeCapture, snap.causeCpu, snap.causeGpu,
+             snap.causePresent, snap.causeSchedule, snap.queueP95, snap.gpuP95,
              snap.presentBlockP95, snap.modeMv, snap.modeDepth, snap.modeRotation, snap.sourceRawP50, snap.sourceRawP95,
              snap.sourceCapHz, snap.sourceCapTimingErrorMs, snap.finalP50, snap.finalP95);
 }

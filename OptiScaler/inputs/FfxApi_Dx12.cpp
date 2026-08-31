@@ -193,7 +193,7 @@ static std::optional<float> GetQualityOverrideRatioFfx(const uint32_t input)
 ffxReturnCode_t ffxCreateContext_Dx12(ffxContext* context, ffxCreateContextDescHeader* desc,
                                       const ffxAllocationCallbacks* memCb)
 {
-    LOG_DEBUG("");
+    LOG_TRACE("");
 
     if (desc == nullptr)
         return FFX_API_RETURN_ERROR_PARAMETER;
@@ -402,7 +402,7 @@ ffxReturnCode_t ffxQuery_Dx12(ffxContext* context, ffxQueryDescHeader* desc)
         return FFX_API_RETURN_ERROR_PARAMETER;
 
     auto type = FfxApiProxy::GetIndirectType(desc);
-    LOG_DEBUG("Header type: {}, Indirect type: {}", FfxApiProxy::GetTypeName(desc->type), magic_enum::enum_name(type));
+    LOG_TRACE("Header type: {}, Indirect type: {}", FfxApiProxy::GetTypeName(desc->type), magic_enum::enum_name(type));
 
     if (type == FFXStructType::SwapchainDX12 || type == FFXStructType::FG)
     {
@@ -429,7 +429,7 @@ ffxReturnCode_t ffxQuery_Dx12(ffxContext* context, ffxQueryDescHeader* desc)
             *ratioDesc->pOutRenderWidth = (uint32_t) (ratioDesc->displayWidth / ratio);
 
         if (ratioDesc->pOutRenderWidth != nullptr && ratioDesc->pOutRenderHeight != nullptr)
-            LOG_DEBUG("Quality mode: {}, Render resolution: {}x{}", ratioDesc->qualityMode, *ratioDesc->pOutRenderWidth,
+            LOG_TRACE("Quality mode: {}, Render resolution: {}x{}", ratioDesc->qualityMode, *ratioDesc->pOutRenderWidth,
                       *ratioDesc->pOutRenderHeight);
         else
             LOG_WARN("Quality mode: {}, pOutRenderWidth or pOutRenderHeight is null!", ratioDesc->qualityMode);
@@ -442,7 +442,7 @@ ffxReturnCode_t ffxQuery_Dx12(ffxContext* context, ffxQueryDescHeader* desc)
         *scaleDesc->pOutUpscaleRatio = GetQualityOverrideRatioFfx((FfxApiUpscaleQualityMode) scaleDesc->qualityMode)
                                            .value_or(qualityRatios[scaleDesc->qualityMode]);
 
-        LOG_DEBUG("Quality mode: {}, Upscale ratio: {}", scaleDesc->qualityMode, *scaleDesc->pOutUpscaleRatio);
+        LOG_TRACE("Quality mode: {}, Upscale ratio: {}", scaleDesc->qualityMode, *scaleDesc->pOutUpscaleRatio);
 
         return FFX_API_RETURN_OK;
     }
@@ -461,7 +461,7 @@ ffxReturnCode_t ffxQuery_Dx12(ffxContext* context, ffxQueryDescHeader* desc)
         {
             float ratio = (float) jitterPhaseDesc->displayWidth / (float) jitterPhaseDesc->renderWidth;
             *jitterPhaseDesc->pOutPhaseCount = static_cast<int32_t>(ceil(ratio * ratio * 8.0f)); // ceil(8*n^2)
-            LOG_DEBUG("Render resolution: {}, Display resolution: {}, Ratio: {}, Jitter phase count: {}",
+            LOG_TRACE("Render resolution: {}, Display resolution: {}, Ratio: {}, Jitter phase count: {}",
                       jitterPhaseDesc->renderWidth, jitterPhaseDesc->displayWidth, ratio,
                       *jitterPhaseDesc->pOutPhaseCount);
 

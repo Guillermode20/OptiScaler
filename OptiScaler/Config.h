@@ -242,7 +242,7 @@ class Config
     CustomOptional<bool> LogToNGX { false };
     CustomOptional<bool> OpenConsole { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
-    CustomOptional<int> LogLevel { 0 };
+    CustomOptional<int> LogLevel { 2 }; // Information; trace/debug remain opt-in for profiling
     CustomOptional<std::wstring> LogFileName { L"OptiScaler.log" };
     CustomOptional<bool> LogSingleFile { true };
     CustomOptional<bool> LogAsync { false };
@@ -630,10 +630,10 @@ class Config
     // a game can be tested with one timing change at a time.
     CustomOptional<bool> ReprojNonBlockingAnchorSampling { false }; // sample anchors, never sleep the game thread
     CustomOptional<float> ReprojAnchorSampleHz { 0.0f };            // 0 = SourceFramerateLimit, then TargetRefresh / 2
-    CustomOptional<float> ReprojDispatchLeadOverrideMs { 0.0f };    // 0 = adaptive 3..8 ms; otherwise 3..20 ms
+    CustomOptional<float> ReprojDispatchLeadOverrideMs { 0.0f };    // 0 = adaptive; bounded to 75% of one refresh slot
     CustomOptional<bool> ReprojHighPriorityQueue { false };         // Windows only: use HIGH priority presenter queue
     CustomOptional<bool> ReprojAdaptiveQueueLead { true }; // account for measured present-queue delay (async only)
-    CustomOptional<bool> ReprojPresentCompletionClock { false }; // use completed Present timestamps, not DXGI stats
+    CustomOptional<bool> ReprojPresentCompletionClock { true }; // use completed Present timestamps, not DXGI stats
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { true };     // safer default: no generic late camera translation exists
     CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose

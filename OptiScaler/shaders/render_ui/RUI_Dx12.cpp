@@ -12,7 +12,9 @@
 bool RUI_Dx12::CreateBufferResource(UINT index, ID3D12Device* InDevice, ID3D12Resource* InSource,
                                     D3D12_RESOURCE_STATES InState)
 {
-    LOG_DEBUG("[{0}] Start!", _name);
+    // This runs for every UI composition frame; retain it only for trace-level
+    // diagnostics so normal debug logs do not become a second hot path.
+    LOG_TRACE("[{0}] Start!", _name);
 
     auto resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 

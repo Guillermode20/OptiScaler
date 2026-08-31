@@ -85,6 +85,11 @@ enum class ReprojMissCause : uint8_t
     PresentSlip = 6,
     ClockCorrection = 7,
     Unknown = 8,
+    // A presenter loop reached a scheduled slot after its deadline without a
+    // specific waitable/GPU failure. This is distinct from a display-clock
+    // correction so telemetry does not turn ordinary scheduling misses into
+    // clock faults.
+    SoftwareScheduleSkip = 9,
 };
 
 // Secondary cause flags (bitmask, fits in uint32_t)
@@ -180,6 +185,7 @@ struct ReprojSlotRecord
     bool depthConstantsValid = false;
     bool captureFenceReadyAtSelection = false;
     bool hudlessSource = false;
+    bool displayClockCorrectionApplied = false;
     // Input-predicted timewarp: what the estimator applied for this slot.
     bool inputPredicted = false;
     float predictedYawRad = 0.0f;
@@ -234,6 +240,7 @@ struct ReprojTelemetrySnapshot
     uint32_t skippedRepresentedSlots = 0;
     uint32_t newAnchorOutputs = 0;
     uint32_t repeatedAnchorOutputs = 0;
+    uint32_t slippedPresents = 0; // successful presents spanning >1.5 refresh periods
     double displayFps = 0.0;
     float presentIntervalP50 = std::numeric_limits<float>::quiet_NaN();
     float presentIntervalP95 = std::numeric_limits<float>::quiet_NaN();
@@ -287,6 +294,8 @@ struct ReprojTelemetrySnapshot
     float sourceSelectedP95 = std::numeric_limits<float>::quiet_NaN();
     float sourceRatioP50 = std::numeric_limits<float>::quiet_NaN();
     float sourceRatioP95 = std::numeric_limits<float>::quiet_NaN();
+    float sourceCapRequestedHz = 0.0f;
+    bool sourceCapActive = false;
     float poseIntervalP50 = std::numeric_limits<float>::quiet_NaN();
     float poseIntervalP95 = std::numeric_limits<float>::quiet_NaN();
     float sourceCapHz = 0.0f;
@@ -324,7 +333,11 @@ struct ReprojTelemetrySnapshot
     uint32_t causeGpu = 0;
     uint32_t causePresent = 0;
     uint32_t causeClock = 0;
+    uint32_t causeSchedule = 0;
     uint32_t causeUnknown = 0;
+
+    bool targetResolverEnabled = false;
+    uint32_t targetActiveSamples = 0;
 
     bool valid = false;
 };

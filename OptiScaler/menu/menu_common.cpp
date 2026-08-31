@@ -4088,16 +4088,17 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             const auto tSnap = reproj->GetTelemetrySnapshot();
             if (reprojTelemetry && tSnap.valid)
             {
-                ImGui::TextDisabled("Display %.1f / %.0f Hz | p95 %.1f ms | missed %u (legacy %u) | new %u repeat %u",
+                ImGui::TextDisabled("Display %.1f / %.0f Hz | p95 %.1f ms | missed %u (skip %u, slip %u; legacy %u) | new %u repeat %u",
                                     tSnap.displayFps,
                                     tSnap.frameStatisticsPeriodMs > 1.0 ? 1000.0 / tSnap.frameStatisticsPeriodMs
                                                                         : metrics.targetRefreshHz,
-                                    tSnap.presentIntervalP95, tSnap.classifiedMisses, tSnap.legacyMisses,
-                                    tSnap.newAnchorOutputs, tSnap.repeatedAnchorOutputs);
+                                    tSnap.presentIntervalP95, tSnap.classifiedMisses, tSnap.skippedRepresentedSlots,
+                                    tSnap.slippedPresents, tSnap.legacyMisses, tSnap.newAnchorOutputs,
+                                    tSnap.repeatedAnchorOutputs);
                 ImGui::TextDisabled(
-                    "Misses: queue %u | capture %u | CPU %u | GPU %u | present %u | wait %u | clock %u | unknown %u",
+                    "Misses: queue %u | capture %u | CPU %u | GPU %u | present %u | wait %u | clock %u | schedule %u | unknown %u",
                     tSnap.causeQueue, tSnap.causeCapture, tSnap.causeCpu, tSnap.causeGpu, tSnap.causePresent,
-                    tSnap.causeWaitable, tSnap.causeClock, tSnap.causeUnknown);
+                    tSnap.causeWaitable, tSnap.causeClock, tSnap.causeSchedule, tSnap.causeUnknown);
                 ImGui::TextDisabled("Queue p95 %.1f ms | GPU p95 %.1f ms | Present p95 %.1f ms | wake p95 %.1f ms",
                                     tSnap.queueP95, tSnap.gpuP95, tSnap.presentBlockP95, tSnap.wakeP95);
                 const char* effMode = "MV";
@@ -4107,11 +4108,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                     effMode = "Rotation";
                 else if (tSnap.modeUnwarped > 0)
                     effMode = "Unwarped";
-                ImGui::TextDisabled("Effective: %s (MV %u depth %u rot %u) | source %.1f/%.1f ms | cap %.1f Hz err "
-                                    "%.2f ms | step %.2f/%.2f clamped %u",
+                ImGui::TextDisabled("Effective: %s (MV %u depth %u rot %u) | source %.1f/%.1f ms | cap %.1f requested %.1f "
+                                    "(%s) err %.2f ms | step %.2f/%.2f clamped %u",
                                     effMode, tSnap.modeMv, tSnap.modeDepth, tSnap.modeRotation, tSnap.sourceRawP50,
-                                    tSnap.sourceRawP95, tSnap.sourceCapHz, tSnap.sourceCapTimingErrorMs, tSnap.finalP50,
-                                    tSnap.finalP95, tSnap.clampCount);
+                                    tSnap.sourceRawP95, tSnap.sourceCapHz, tSnap.sourceCapRequestedHz,
+                                    tSnap.sourceCapActive ? "active" : "inactive", tSnap.sourceCapTimingErrorMs,
+                                    tSnap.finalP50, tSnap.finalP95, tSnap.clampCount);
                 ImGui::TextDisabled("Velocity %s | depth %u/%u | camera basis %u/%u | constants %u/%u | HUD %u/%u | "
                                     "GPU calib %s (%u skipped)",
                                     tSnap.queueP50 == tSnap.queueP50 ? "yes" : "no", tSnap.depthAvailable,

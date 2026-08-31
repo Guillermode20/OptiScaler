@@ -254,6 +254,11 @@ void AReproj_Dx12::PresenterMain()
     {
         const auto refreshHz = TargetRefreshHz();
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
+        // A serial Present(1) loop cannot make a preparation lead longer than
+        // one refresh useful: after Present returns, an older grid deadline can
+        // already be in the past. Keep adaptive and manual leads inside the
+        // current slot while retaining a small safety margin.
+        const auto maxUsableLeadMs = std::max(3.0, std::min(20.0, refreshPeriodMs * 0.75));
         const auto requestedLeadMs = config->ReprojDispatchLeadOverrideMs.value_or_default();
         const bool fixedDispatchLead = std::isfinite(requestedLeadMs) && requestedLeadMs > 0.0f;
         if (!fixedDispatchLead && config->ReprojAdaptiveQueueLead.value_or_default() &&
@@ -269,15 +274,16 @@ void AReproj_Dx12::PresenterMain()
             {
                 const auto warpDurationMs = _telemetry.RecentGpuDurationMs();
                 const auto desiredLeadMs =
-                    std::clamp(static_cast<double>(queueDelayMs + warpDurationMs) + 0.75, 3.0, 20.0);
+                    std::clamp(static_cast<double>(queueDelayMs + warpDurationMs) + 0.75, 3.0, maxUsableLeadMs);
                 _dispatchLeadMs =
                     desiredLeadMs >= _dispatchLeadMs ? desiredLeadMs : std::max(desiredLeadMs, _dispatchLeadMs - 0.10);
             }
         }
         const bool queueAwareLead =
             config->ReprojAdaptiveQueueLead.value_or_default() && config->ReprojTelemetry.value_or_default();
-        const auto dispatchLeadMs = fixedDispatchLead ? std::clamp(static_cast<double>(requestedLeadMs), 3.0, 20.0)
-                                                      : std::clamp(_dispatchLeadMs, 3.0, queueAwareLead ? 20.0 : 8.0);
+        const auto dispatchLeadMs = fixedDispatchLead
+                                        ? std::clamp(static_cast<double>(requestedLeadMs), 3.0, maxUsableLeadMs)
+                                        : std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs);
         const bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
 
         // Handle TargetRefresh change without restart: reset EMA and grid
@@ -334,6 +340,8 @@ void AReproj_Dx12::PresenterMain()
                 {
                     nextDeadlineMs += appliedDeltaMs;
                     totalEarlyCorrectionMs += appliedDeltaMs;
+                    if (tSlot)
+                        tSlot->displayClockCorrectionApplied = true;
                 }
             }
         }
@@ -353,6 +361,7 @@ void AReproj_Dx12::PresenterMain()
             const auto lateness = now - nextDeadlineMs;
             if (lateness >= refreshPeriodMs)
             {
+                const auto missedDeadlineMs = nextDeadlineMs;
                 const auto skipped = static_cast<uint32_t>(std::floor(lateness / refreshPeriodMs));
                 nextDeadlineMs += skipped * refreshPeriodMs;
                 std::scoped_lock metricsLock(_metricsMutex);
@@ -360,11 +369,18 @@ void AReproj_Dx12::PresenterMain()
                 if (tSlot)
                 {
                     tSlot->outcome = ReprojSlotOutcome::SoftwareSkipped;
-                    tSlot->representedSlots = skipped;
+                    // representedSlots describes the output produced by this
+                    // record. These are absent slots, so keep it at one and
+                    // account for the skipped vblanks exactly once below.
+                    tSlot->representedSlots = 1;
                     tSlot->skippedSlotsBeforeAttempt = skipped;
-                    tSlot->softwareDeadlineQpc = tSlot->loopBeginQpc; // approx
-                    tSlot->wakeTargetQpc = 0;
-                    tSlot->wakeCompletedQpc = _telemetry.NowQpc();
+                    const auto nowQpc = _telemetry.NowQpc();
+                    const auto deadlineQpc =
+                        nowQpc + static_cast<int64_t>((missedDeadlineMs - now) * qpcFrequency.QuadPart / 1000.0);
+                    tSlot->softwareDeadlineQpc = deadlineQpc;
+                    tSlot->wakeTargetQpc =
+                        deadlineQpc - static_cast<int64_t>(dispatchLeadMs * qpcFrequency.QuadPart / 1000.0);
+                    tSlot->wakeCompletedQpc = nowQpc;
                     tSlot->targetRefreshHz = refreshHz;
                     _telemetry.FinalizeSlot(tSlot);
                     _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
@@ -412,7 +428,7 @@ void AReproj_Dx12::PresenterMain()
             const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
             if (!fixedDispatchLead)
             {
-                const double growCap = queueAwareLead ? 20.0 : 8.0;
+                const double growCap = queueAwareLead ? maxUsableLeadMs : std::min(8.0, maxUsableLeadMs);
                 // On Proton the timer can overshoot even with 1ms spin window; grow faster so we
                 // recover from a burst of late wakes in fewer slots.
                 if (wakeHeadroomMs < (State::Instance().isRunningOnLinux ? 2.5 : 2.0))

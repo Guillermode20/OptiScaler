@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.1 (2026-08-31)
+* Fix async reprojection telemetry accounting and Proton presenter pacing
+
 ## v10.0.0.38 (2026-08-31)
 * Reproj: wire KCD2 input-predicted warps + 1ms Linux deadline spin to fix hitch
 

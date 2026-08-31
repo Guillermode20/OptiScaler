@@ -15,7 +15,8 @@ import statistics
 TELEMETRY_RE = re.compile(
     r"ReprojTelemetry v=1 slots=(?P<slots>\d+) presented=(?P<presented>\d+) missed=(?P<missed>\d+) legacyMissed=(?P<legacy>\d+) "
     r"newAnchor=(?P<newAnchor>\d+) repeatAnchor=(?P<repeat>\d+) skippedRep=(?P<skipped>\d+) "
-    r"cause\.cpu=(?P<ccpu>\d+) cause\.wait=(?P<cwait>\d+) cause\.capture=(?P<ccap>\d+) cause\.queue=(?P<cqueue>\d+) cause\.gpu=(?P<cgpu>\d+) cause\.present=(?P<cpresent>\d+) cause\.clock=(?P<cclock>\d+) cause\.unknown=(?P<cunknown>\d+) "
+    r"cause\.cpu=(?P<ccpu>\d+) cause\.wait=(?P<cwait>\d+) cause\.capture=(?P<ccap>\d+) cause\.queue=(?P<cqueue>\d+) cause\.gpu=(?P<cgpu>\d+) cause\.present=(?P<cpresent>\d+) cause\.clock=(?P<cclock>\d+) "
+    r"(?:cause\.schedule=(?P<cschedule>\d+) )?cause\.unknown=(?P<cunknown>\d+) "
     r"interval\.p50=(?P<ip50>[-\d\.NaN]+) interval\.p95=(?P<ip95>[-\d\.NaN]+) interval\.p99=(?P<ip99>[-\d\.NaN]+) interval\.max=(?P<imax>[-\d\.NaN]+) "
     r"wake\.p50=(?P<wp50>[-\d\.NaN]+) wake\.p95=(?P<wp95>[-\d\.NaN]+) wake\.p99=(?P<wp99>[-\d\.NaN]+) wake\.max=(?P<wmax>[-\d\.NaN]+) lateWakes=(?P<lateWakes>\d+) "
     r"wait\.p50=(?P<waitp50>[-\d\.NaN]+) wait\.p95=(?P<waitp95>[-\d\.NaN]+) wait\.p99=(?P<waitp99>[-\d\.NaN]+) "
@@ -28,6 +29,15 @@ TELEMETRY_RE = re.compile(
     r"step\.raw\.p50=(?P<stepRaw50>[-\d\.NaN]+) step\.raw\.p95=(?P<stepRaw95>[-\d\.NaN]+) step\.raw\.max=(?P<stepRawMax>[-\d\.NaN]+) step\.final\.p50=(?P<stepF50>[-\d\.NaN]+) step\.final\.p95=(?P<stepF95>[-\d\.NaN]+) step\.final\.max=(?P<stepFMax>[-\d\.NaN]+) step\.clamped=(?P<clamped>\d+) "
     r"camera=(?P<camAvail>\d+)/(?P<camTotal>\d+) depth=(?P<depthAvail>\d+)/(?P<depthTotal>\d+) depthConstants=(?P<dcAvail>\d+)/(?P<dcTotal>\d+) hudless=(?P<hAvail>\d+)/(?P<hTotal>\d+) "
     r"fps=(?P<fps>[-\d\.NaN]+)"
+)
+
+# Kept separate from the core v1 expression so the parser can reliably read
+# the extension on both legacy lines and new lines. The core expression is
+# intentionally unanchored for compatibility with logger prefixes.
+TELEMETRY_EXT_RE = re.compile(
+    r"slipped=(?P<slipped>\d+) source\.capRequestedHz=(?P<sourceCapRequestedHz>[-\d\.NaN]+) "
+    r"source\.capActive=(?P<sourceCapActive>\d+) target\.enabled=(?P<targetEnabled>\d+) "
+    r"target\.samples=(?P<targetSamples>\d+)"
 )
 
 SLOT_RE = re.compile(
@@ -51,6 +61,9 @@ def load_log(path):
             m = TELEMETRY_RE.search(line)
             if m:
                 d = m.groupdict()
+                extension = TELEMETRY_EXT_RE.search(line)
+                if extension:
+                    d.update(extension.groupdict())
                 # convert numeric
                 for k in d:
                     if d[k] is None:
@@ -101,7 +114,8 @@ def analyze(path):
     fps_vals = [t["fps"] for t in telemetry if isinstance(t["fps"], (int,float)) and t["fps"] is not None]
     print(f"Display FPS: p50 {percentile(fps_vals,0.5):.1f} p95 {percentile(fps_vals,0.95):.1f} max {max(fps_vals):.1f}" if fps_vals else "No FPS data")
 
-    # Misses by cause
+    # Miss causes are emitted only for slots that were not presented. A
+    # successful long-interval present is reported separately as "slipped".
     cause_totals = Counter()
     for t in telemetry:
         cause_totals["cpu"] += t.get("ccpu",0) or 0
@@ -111,11 +125,20 @@ def analyze(path):
         cause_totals["gpu"] += t.get("cgpu",0) or 0
         cause_totals["present"] += t.get("cpresent",0) or 0
         cause_totals["clock"] += t.get("cclock",0) or 0
+        cause_totals["schedule"] += t.get("cschedule",0) or 0
         cause_totals["unknown"] += t.get("cunknown",0) or 0
+    slipped_total = sum(t.get("slipped", 0) or 0 for t in telemetry)
+    total_missed = sum(t.get("missed", 0) or 0 for t in telemetry)
+    total_skipped = sum(t.get("skipped", 0) or 0 for t in telemetry)
     print("Misses by cause:", dict(cause_totals))
-    total_missed = sum(cause_totals.values())
     total_sched = sum(t.get("slots",0) for t in telemetry)
-    print(f"Total scheduled {total_sched} missed {total_missed} ({(total_missed/total_sched*100 if total_sched else 0):.1f}%)")
+    effective_slots = sum((t.get("presented", 0) or 0) + (t.get("missed", 0) or 0) +
+                          (t.get("skipped", 0) or 0) for t in telemetry)
+    print(f"Total scheduled {total_sched} missed {total_missed} ({(total_missed/total_sched*100 if total_sched else 0):.1f}%) "
+          f"coalescedSkipped {total_skipped} slippedPresented {slipped_total}")
+    if effective_slots:
+        print(f"Effective display slots {effective_slots} presented {sum(t.get('presented', 0) or 0 for t in telemetry)} "
+              f"drop rate {((total_missed + total_skipped) / effective_slots * 100):.1f}%")
 
     # Interval percentiles
     ip50 = [t["ip50"] for t in telemetry if t.get("ip50") is not None]
@@ -134,6 +157,18 @@ def analyze(path):
     cap_error = [t["sourceCapError"] for t in telemetry if t.get("sourceCapError") is not None]
     if cap_hz:
         print(f"Source cap: {percentile(cap_hz,0.5):.1f} Hz | last timing error p95 {percentile(cap_error,0.95):.2f} ms")
+    requested_caps = [t["sourceCapRequestedHz"] for t in telemetry
+                      if t.get("sourceCapRequestedHz") is not None and t.get("sourceCapRequestedHz", 0) > 0]
+    active_caps = [t["sourceCapActive"] for t in telemetry if t.get("sourceCapActive") is not None]
+    if requested_caps:
+        active_windows = sum(1 for t in telemetry if t.get("sourceCapActive") == 1)
+        print(f"Source cap requested: {percentile(requested_caps,0.5):.1f} Hz | active windows "
+              f"{active_windows}/{len(active_caps) if active_caps else len(telemetry)}")
+
+    target_flags = [t.get("targetEnabled") for t in telemetry if t.get("targetEnabled") is not None]
+    if target_flags:
+        target_samples = sum(t.get("targetSamples", 0) or 0 for t in telemetry)
+        print(f"Target-pose resolver: {'enabled' if any(target_flags) else 'disabled'} | active samples {target_samples}")
 
     # Timestep
     stepF95 = [t["stepF95"] for t in telemetry if t.get("stepF95") is not None]

@@ -512,7 +512,9 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
         return false;
 
     // std::lock_guard<std::mutex> lock(_vkPresentMutex);
-    LOG_DEBUG("rendering menu, swapchain count: {0}", pPresentInfo->swapchainCount);
+    // QueuePresent is called for every Vulkan frame. Keep this diagnostic at
+    // trace level so Debug logs remain usable during reprojection profiling.
+    LOG_TRACE("rendering menu, swapchain count: {0}", pPresentInfo->swapchainCount);
 
     ImGuiIO& io = ImGui::GetIO();
     (void) io;
@@ -569,7 +571,7 @@ bool MenuOverlayVk::QueuePresent(VkQueue queue, VkPresentInfoKHR* pPresentInfo)
                 }
 
                 // Submit queue and semaphores
-                LOG_DEBUG("waitSemaphoreCount: {0}", pPresentInfo->waitSemaphoreCount);
+                LOG_TRACE("waitSemaphoreCount: {0}", pPresentInfo->waitSemaphoreCount);
                 VkPipelineStageFlags waitStages[8] = { VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT };
 
                 VkSubmitInfo submit_info = {};
