@@ -38,6 +38,15 @@ struct AxisEstimate
     bool calibrated = false;
 };
 
+struct Kcd2PhaseModel
+{
+    float phaseOffsetMs = 0.0f;
+    float gainX = 0.0f;
+    float gainY = 0.0f;
+    bool yawCalibrated = false;
+    bool pitchCalibrated = false;
+};
+
 // Clear all calibration and statistics state (context reset, mode change).
 void Reset();
 
@@ -47,6 +56,15 @@ void Reset();
 // the SAME interval. Repeated timestamps are ignored by the caller.
 void OnPoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawRadians, float deltaPitchRadians,
                   float inputDeltaX, float inputDeltaY);
+
+// KCD2 input dispatch and CView publication happen in different engine
+// phases. Evaluate a bounded set of input-history offsets against each camera
+// pair, then lock the most stable phase and gains until Reset. This prevents
+// the warp from changing sensitivity or prediction path inside a turn.
+void OnKcd2PoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawRadians, float deltaPitchRadians);
+
+// Returns the immutable phase/gain model selected by OnKcd2PoseSample.
+bool GetKcd2PhaseModel(Kcd2PhaseModel* model);
 
 // Calibrated gain magnitudes (radians per count, always positive; the caller
 // applies the +X->+yaw / +Y->-pitch conventions). Returns false until enough

@@ -2,6 +2,7 @@
 """Deterministic regression tests for the async display-clock invariants."""
 
 from pathlib import Path
+import math
 import unittest
 
 
@@ -212,6 +213,15 @@ class ReprojectionTests(unittest.TestCase):
         self.assertLess(skip_path.index("AdvanceReprojectionBuffer"), skip_path.index("FrameLimit::paceReprojectionSource(true)"))
         self.assertIn("ShouldCaptureAnchor", source)
 
+    def test_capped_source_has_one_authoritative_anchor_clock(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        sampler = source.split("bool AReproj_Dx12::ShouldCaptureAnchor", 1)[1].split(
+            "void AReproj_Dx12::RecordWarpFrame", 1)[0]
+        self.assertIn("ReprojSourceFramerateLimit", sampler)
+        self.assertIn("Publish every paced frame", sampler)
+        self.assertLess(sampler.index("ReprojSourceFramerateLimit"), sampler.index("ReprojNonBlockingAnchorSampling"))
+
     def test_kcd2_rotation_path_is_rigid_and_bounded(self):
         root = Path(__file__).resolve().parents[2]
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
@@ -265,8 +275,49 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
         pacer = source.split("void FrameLimit::paceReprojectionSource", 1)[1].split(
             "FrameLimit::SourcePacingStats", 1)[0]
-        self.assertIn("sleepForPrecisePacingMs", pacer)
+        self.assertIn("sleepForReprojectionSourceMs", pacer)
+        source_sleep = source.split("void FrameLimit::sleepForReprojectionSourceMs", 1)[1].split(
+            "void FrameLimit::paceReprojectionSource", 1)[0]
+        self.assertIn("SOURCE_SPIN_NS = 200'000", source_sleep)
+        self.assertNotIn("isRunningOnLinux", source_sleep)
         self.assertNotIn("combined_sleep(static_cast<int64_t>(deadlineNs - nowNs))", pacer)
+
+    def test_kcd2_prediction_requires_a_locked_phase_model(self):
+        root = Path(__file__).resolve().parents[2]
+        predictor = (root / "OptiScaler/framegen/reproj/ReprojInputPredictor.cpp").read_text(encoding="utf-8")
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        camera = (root / "OptiScaler/framegen/reproj/Kcd2Camera.cpp").read_text(encoding="utf-8")
+        self.assertIn("KCD2_PHASE_CANDIDATE_COUNT", predictor)
+        self.assertIn("KCD2_PHASE_LOCK_STREAK", predictor)
+        self.assertIn("state.kcd2PhaseLocked", predictor)
+        self.assertIn("OnKcd2PoseSample", reproj)
+        kcd2_predict = reproj.split("if (Kcd2Camera::IsAvailable())", 1)[1].split(
+            "const auto nowMs = Util::MillisecondsNow();", 1)[0]
+        self.assertIn("GetKcd2PhaseModel", kcd2_predict)
+        self.assertIn("phaseAlignedMousePrediction", camera)
+        self.assertIn("Kcd2Input::IsAvailable", camera)
+
+    def test_phase_fit_selects_input_window_that_explains_camera_motion(self):
+        # Model the C++ through-origin least-squares score. Camera response is
+        # delayed by two 4 ms candidates; the aligned candidate must have the
+        # smallest normalized residual rather than merely a plausible gain.
+        inputs = [0, 3, 8, 12, 5, -4, -9, -2, 7, 11, 4, -6] * 4
+        camera = [0.0024 * (inputs[i - 2] if i >= 2 else 0) for i in range(len(inputs))]
+
+        def score(offset):
+            pairs = [(inputs[i - offset] if i >= offset else 0, camera[i]) for i in range(len(camera))]
+            input2 = sum(value * value for value, _ in pairs)
+            input_camera = sum(value * motion for value, motion in pairs)
+            camera2 = sum(motion * motion for _, motion in pairs)
+            gain = input_camera / input2
+            residual = max(
+                0.0,
+                camera2 - 2.0 * gain * input_camera + gain * gain * input2,
+            )
+            return math.sqrt(residual / camera2)
+
+        self.assertEqual(min(range(6), key=score), 2)
+        self.assertLess(score(2), 1.0e-6)
 
 
 if __name__ == "__main__":

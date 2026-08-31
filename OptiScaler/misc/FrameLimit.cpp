@@ -13,13 +13,14 @@ namespace
 {
 std::atomic<float> g_reprojectionSourceCapHz { 0.0f };
 std::atomic<float> g_reprojectionSourceTimingErrorMs { 0.0f };
-}
+} // namespace
 
 inline uint64_t FrameLimit::get_timestamp()
 {
     // Monotonic QPC in nanoseconds - wall clock (GetSystemTimePreciseAsFileTime) drifts under Wine/Proton
     // and NTP jumps cause 1fps lock. QPC is steady and matches Util::MillisecondsNow().
-    static LARGE_INTEGER s_freq = [] {
+    static LARGE_INTEGER s_freq = []
+    {
         LARGE_INTEGER f {};
         QueryPerformanceFrequency(&f);
         return f;
@@ -34,7 +35,8 @@ inline uint64_t FrameLimit::get_timestamp()
     LARGE_INTEGER now {};
     QueryPerformanceCounter(&now);
     // QPC * 1e9 / freq = ns (avoid overflow via double - < 10y uptime fits 53b mantissa)
-    return static_cast<uint64_t>(static_cast<double>(now.QuadPart) * 1'000'000'000.0 / static_cast<double>(s_freq.QuadPart));
+    return static_cast<uint64_t>(static_cast<double>(now.QuadPart) * 1'000'000'000.0 /
+                                 static_cast<double>(s_freq.QuadPart));
 }
 
 // https://learn.microsoft.com/en-us/windows/win32/sync/using-waitable-timer-objects
@@ -156,6 +158,19 @@ void FrameLimit::sleepForPrecisePacingMs(double ms)
         LOG_ERROR("Precise pacing sleep failed: {}", res);
 }
 
+void FrameLimit::sleepForReprojectionSourceMs(double ms)
+{
+    if (ms <= 0.0)
+        return;
+
+    // The capped game thread does not need the presenter's 1 ms Proton spin
+    // tail. Burning it on both threads can push an otherwise sustainable KCD2
+    // source below 60 FPS. Retain a short tail for deadline precision.
+    constexpr int64_t SOURCE_SPIN_NS = 200'000;
+    if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), SOURCE_SPIN_NS); res)
+        LOG_ERROR("Reprojection source pacing sleep failed: {}", res);
+}
+
 void FrameLimit::paceReprojectionSource(bool active)
 {
     struct SourcePacer
@@ -199,8 +214,8 @@ void FrameLimit::paceReprojectionSource(bool active)
     // The legacy limiter's 2 ms spin tail costs about 12% of a CPU core at
     // 60 Hz. That contention turns an otherwise sustainable 60 FPS KCD2
     // source into 25-30 ms frames. Keep the same absolute deadline grid, but
-    // use the 0.2 ms precision tail used by the async presenter.
-    sleepForPrecisePacingMs(static_cast<double>(deadlineNs - nowNs) / 1'000'000.0);
+    // use the source-specific 0.2 ms precision tail.
+    sleepForReprojectionSourceMs(static_cast<double>(deadlineNs - nowNs) / 1'000'000.0);
     const uint64_t completedNs = get_timestamp();
     g_reprojectionSourceTimingErrorMs.store(
         static_cast<float>(static_cast<double>(completedNs - deadlineNs) / 1'000'000.0), std::memory_order_relaxed);

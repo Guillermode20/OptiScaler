@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "ReprojInputPredictor.h"
+#include "Kcd2Input.h"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,10 @@ constexpr double FRESH_MS = 2000.0; // estimator expires without new samples
 constexpr float MIN_CAMERA_MOTION_RAD = 1.0e-3f;
 constexpr float MIN_INPUT_COUNTS = 4.0f;   // quantization floor for a usable sample
 constexpr float MOTION_MEMORY_MS = 250.0f; // camera-motion gate decay time
+constexpr std::size_t KCD2_PHASE_CANDIDATE_COUNT = 11;
+constexpr float KCD2_PHASE_STEP_MS = 4.0f;
+constexpr std::size_t KCD2_MIN_PHASE_SAMPLES = 24;
+constexpr std::uint32_t KCD2_PHASE_LOCK_STREAK = 12;
 
 struct PoseSample
 {
@@ -78,6 +83,43 @@ struct GainRing
     }
 };
 
+struct Kcd2PhaseCandidate
+{
+    struct AxisFit
+    {
+        double input2 = 0.0;
+        double inputCamera = 0.0;
+        double camera2 = 0.0;
+        std::size_t count = 0;
+
+        void Add(float cameraDelta, float inputDelta)
+        {
+            if (std::abs(cameraDelta) < 1.0e-4f)
+                return;
+            input2 += static_cast<double>(inputDelta) * inputDelta;
+            inputCamera += static_cast<double>(inputDelta) * cameraDelta;
+            camera2 += static_cast<double>(cameraDelta) * cameraDelta;
+            ++count;
+        }
+
+        float Error() const
+        {
+            if (count < KCD2_MIN_PHASE_SAMPLES || input2 <= 1.0e-8 || camera2 <= 1.0e-8)
+                return INFINITY;
+            const double gain = inputCamera / input2;
+            if (!(gain > MIN_GAIN && gain < MAX_GAIN))
+                return INFINITY;
+            const double residual = std::max(0.0, camera2 - 2.0 * gain * inputCamera + gain * gain * input2);
+            return static_cast<float>(std::sqrt(residual / camera2));
+        }
+    };
+
+    GainRing gainX;
+    GainRing gainY;
+    AxisFit fitX;
+    AxisFit fitY;
+};
+
 struct PredictorState
 {
     std::mutex mutex;
@@ -92,6 +134,11 @@ struct PredictorState
     float errorEmaPitchDeg = 0.0f;
     uint32_t errorSamples = 0;
     float confidence = 0.0f;
+    std::array<Kcd2PhaseCandidate, KCD2_PHASE_CANDIDATE_COUNT> kcd2Phase {};
+    std::size_t kcd2BestCandidate = KCD2_PHASE_CANDIDATE_COUNT;
+    std::uint32_t kcd2BestStreak = 0;
+    bool kcd2PhaseLocked = false;
+    Kcd2PhaseModel kcd2Model {};
 };
 
 PredictorState& GetPredictorState()
@@ -141,6 +188,43 @@ void PushGainSample(GainRing& ring, float cameraDelta, float inputDelta, double 
         return;
     ring.Push(gain, nowMs);
 }
+
+float PhaseCandidateScore(const Kcd2PhaseCandidate& candidate)
+{
+    float score = 0.0f;
+    std::uint32_t axes = 0;
+    const auto addAxis = [&](const Kcd2PhaseCandidate::AxisFit& fit)
+    {
+        const float error = fit.Error();
+        if (!std::isfinite(error))
+            return;
+        score += error;
+        ++axes;
+    };
+    addAxis(candidate.fitX);
+    addAxis(candidate.fitY);
+    return axes > 0 ? score / static_cast<float>(axes) : INFINITY;
+}
+
+void UpdateMotionState(PredictorState& state, double poseTimestampMs, double intervalMs, float deltaYawRadians,
+                       float deltaPitchRadians, float inputDeltaX, float inputDeltaY)
+{
+    const float sampleMotion = std::max(std::abs(deltaYawRadians), std::abs(deltaPitchRadians));
+    const float decay = std::exp(-static_cast<float>(intervalMs) / MOTION_MEMORY_MS);
+    state.recentCameraMotion = std::max(sampleMotion, state.recentCameraMotion * decay);
+
+    auto& sample = state.motion[state.motionCursor];
+    sample.timestampMs = poseTimestampMs;
+    sample.intervalMs = intervalMs;
+    sample.cameraYaw = deltaYawRadians;
+    sample.cameraPitch = deltaPitchRadians;
+    sample.inputX = inputDeltaX;
+    sample.inputY = inputDeltaY;
+    state.motionCursor = (state.motionCursor + 1) % MOTION_SAMPLE_COUNT;
+    if (state.motionCount < MOTION_SAMPLE_COUNT)
+        ++state.motionCount;
+    state.lastPoseTimestampMs = poseTimestampMs;
+}
 } // namespace
 
 namespace ReprojInputPredictor
@@ -159,6 +243,11 @@ void Reset()
     state.errorEmaPitchDeg = 0.0f;
     state.errorSamples = 0;
     state.confidence = 0.0f;
+    state.kcd2Phase = {};
+    state.kcd2BestCandidate = KCD2_PHASE_CANDIDATE_COUNT;
+    state.kcd2BestStreak = 0;
+    state.kcd2PhaseLocked = false;
+    state.kcd2Model = {};
 }
 
 void OnPoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawRadians, float deltaPitchRadians,
@@ -197,26 +286,110 @@ void OnPoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawR
     // so the usable gain magnitude flips the sign of the camera delta.
     PushGainSample(state.gainY, -deltaPitchRadians, inputDeltaY, nowMs);
 
-    // Camera-motion gate memory: proves the camera is input-driven right now,
-    // decaying over MOTION_MEMORY_MS so brief pauses do not close the gate.
-    const float sampleMotion = std::max(std::abs(deltaYawRadians), std::abs(deltaPitchRadians));
-    const float decay = std::exp(-static_cast<float>(intervalMs) / MOTION_MEMORY_MS);
-    state.recentCameraMotion = std::max(sampleMotion, state.recentCameraMotion * decay);
-
-    auto& sample = state.motion[state.motionCursor];
-    sample.timestampMs = poseTimestampMs;
-    sample.intervalMs = intervalMs;
-    sample.cameraYaw = deltaYawRadians;
-    sample.cameraPitch = deltaPitchRadians;
-    sample.inputX = inputDeltaX;
-    sample.inputY = inputDeltaY;
-    state.motionCursor = (state.motionCursor + 1) % MOTION_SAMPLE_COUNT;
-    if (state.motionCount < MOTION_SAMPLE_COUNT)
-        ++state.motionCount;
-    state.lastPoseTimestampMs = poseTimestampMs;
+    UpdateMotionState(state, poseTimestampMs, intervalMs, deltaYawRadians, deltaPitchRadians, inputDeltaX, inputDeltaY);
 
     // Both axes must be trustworthy before the warp may use them.
     state.confidence = std::min(ComputeConfidence(state.gainX, nowMs), ComputeConfidence(state.gainY, nowMs));
+}
+
+void OnKcd2PoseSample(double poseTimestampMs, double poseIntervalMs, float deltaYawRadians, float deltaPitchRadians)
+{
+    if (poseTimestampMs <= 0.0 || !std::isfinite(deltaYawRadians) || !std::isfinite(deltaPitchRadians))
+        return;
+
+    const double intervalMs =
+        std::clamp(poseIntervalMs > 0.0 ? poseIntervalMs : 16.6, MIN_INTERVAL_MS, MAX_INTERVAL_MS);
+    std::array<Kcd2Input::MouseInterval, KCD2_PHASE_CANDIDATE_COUNT> intervals {};
+    std::array<bool, KCD2_PHASE_CANDIDATE_COUNT> valid {};
+    for (std::size_t candidate = 0; candidate < KCD2_PHASE_CANDIDATE_COUNT; ++candidate)
+    {
+        const double offsetMs = static_cast<double>(candidate) * KCD2_PHASE_STEP_MS;
+        valid[candidate] = Kcd2Input::QueryMouseInterval(poseTimestampMs - intervalMs - offsetMs,
+                                                         poseTimestampMs - offsetMs, intervals[candidate]) &&
+                           intervals[candidate].complete;
+    }
+
+    auto& state = GetPredictorState();
+    std::scoped_lock lock(state.mutex);
+    if (poseTimestampMs <= state.lastPoseTimestampMs)
+        return;
+
+    const double nowMs = ClockMs();
+    for (std::size_t candidate = 0; candidate < KCD2_PHASE_CANDIDATE_COUNT; ++candidate)
+    {
+        if (!valid[candidate])
+            continue;
+        state.kcd2Phase[candidate].fitX.Add(deltaYawRadians, static_cast<float>(intervals[candidate].yaw));
+        state.kcd2Phase[candidate].fitY.Add(-deltaPitchRadians, static_cast<float>(intervals[candidate].pitch));
+        PushGainSample(state.kcd2Phase[candidate].gainX, deltaYawRadians, static_cast<float>(intervals[candidate].yaw),
+                       nowMs);
+        PushGainSample(state.kcd2Phase[candidate].gainY, -deltaPitchRadians,
+                       static_cast<float>(intervals[candidate].pitch), nowMs);
+    }
+
+    if (!state.kcd2PhaseLocked)
+    {
+        std::size_t best = KCD2_PHASE_CANDIDATE_COUNT;
+        float bestScore = INFINITY;
+        for (std::size_t candidate = 0; candidate < KCD2_PHASE_CANDIDATE_COUNT; ++candidate)
+        {
+            const float score = PhaseCandidateScore(state.kcd2Phase[candidate]);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                best = candidate;
+            }
+        }
+
+        if (best < KCD2_PHASE_CANDIDATE_COUNT && bestScore < 0.45f)
+        {
+            if (best == state.kcd2BestCandidate)
+                ++state.kcd2BestStreak;
+            else
+            {
+                state.kcd2BestCandidate = best;
+                state.kcd2BestStreak = 1;
+            }
+
+            if (state.kcd2BestStreak >= KCD2_PHASE_LOCK_STREAK)
+            {
+                const auto& selected = state.kcd2Phase[best];
+                state.kcd2Model.phaseOffsetMs = static_cast<float>(best) * KCD2_PHASE_STEP_MS;
+                state.kcd2Model.yawCalibrated =
+                    selected.fitX.count >= KCD2_MIN_PHASE_SAMPLES && selected.gainX.count >= MIN_GAIN_SAMPLES;
+                state.kcd2Model.pitchCalibrated =
+                    selected.fitY.count >= KCD2_MIN_PHASE_SAMPLES && selected.gainY.count >= MIN_GAIN_SAMPLES;
+                state.kcd2Model.gainX = selected.gainX.median;
+                state.kcd2Model.gainY = selected.gainY.median;
+                // Do not mix input prediction on one axis with rendered
+                // velocity on the other. Engage only after one shared phase
+                // has calibrated both axes, then keep that model immutable.
+                state.kcd2PhaseLocked = state.kcd2Model.yawCalibrated && state.kcd2Model.pitchCalibrated;
+            }
+        }
+        else
+        {
+            state.kcd2BestCandidate = KCD2_PHASE_CANDIDATE_COUNT;
+            state.kcd2BestStreak = 0;
+        }
+    }
+
+    const auto& zeroPhase = intervals[0];
+    UpdateMotionState(state, poseTimestampMs, intervalMs, deltaYawRadians, deltaPitchRadians,
+                      valid[0] ? static_cast<float>(zeroPhase.yaw) : 0.0f,
+                      valid[0] ? static_cast<float>(zeroPhase.pitch) : 0.0f);
+}
+
+bool GetKcd2PhaseModel(Kcd2PhaseModel* model)
+{
+    if (model == nullptr)
+        return false;
+    auto& state = GetPredictorState();
+    std::scoped_lock lock(state.mutex);
+    if (!state.kcd2PhaseLocked)
+        return false;
+    *model = state.kcd2Model;
+    return true;
 }
 
 bool GetEstimatedGain(float* gainX, float* gainY)
@@ -317,12 +490,30 @@ bool DescribeStats(char* buffer, size_t size)
 
     auto& state = GetPredictorState();
     std::scoped_lock lock(state.mutex);
-    if (state.gainX.count < MIN_GAIN_SAMPLES && state.gainY.count < MIN_GAIN_SAMPLES)
+    bool hasKcd2Samples = state.kcd2PhaseLocked;
+    for (const auto& candidate : state.kcd2Phase)
+        hasKcd2Samples = hasKcd2Samples || candidate.gainX.count > 0 || candidate.gainY.count > 0;
+    if (!hasKcd2Samples && state.gainX.count < MIN_GAIN_SAMPLES && state.gainY.count < MIN_GAIN_SAMPLES)
         return false;
 
-    snprintf(buffer, size, "gainX %.5f gainY %.5f rad/ct conf %.2f errX %.3f deg errY %.3f deg n %u",
-             state.gainX.median, state.gainY.median, state.confidence, state.errorEmaYawDeg, state.errorEmaPitchDeg,
-             state.errorSamples);
+    if (state.kcd2PhaseLocked)
+    {
+        snprintf(buffer, size, "KCD2 phase %.1fms LOCKED gainX %.5f%s gainY %.5f%s", state.kcd2Model.phaseOffsetMs,
+                 state.kcd2Model.gainX, state.kcd2Model.yawCalibrated ? "" : "?", state.kcd2Model.gainY,
+                 state.kcd2Model.pitchCalibrated ? "" : "?");
+    }
+    else if (state.kcd2BestCandidate < KCD2_PHASE_CANDIDATE_COUNT)
+    {
+        snprintf(buffer, size, "KCD2 phase %.1fms acquiring %u/%u",
+                 static_cast<float>(state.kcd2BestCandidate) * KCD2_PHASE_STEP_MS, state.kcd2BestStreak,
+                 KCD2_PHASE_LOCK_STREAK);
+    }
+    else
+    {
+        snprintf(buffer, size, "gainX %.5f gainY %.5f rad/ct conf %.2f errX %.3f deg errY %.3f deg n %u",
+                 state.gainX.median, state.gainY.median, state.confidence, state.errorEmaYawDeg, state.errorEmaPitchDeg,
+                 state.errorSamples);
+    }
     return true;
 }
 } // namespace ReprojInputPredictor

@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.3 (2026-08-31)
+* Unify KCD2 source pacing and add phase-locked input prediction
+
 ## v10.0.1.2 (2026-08-31)
 * Stabilize KCD2 timewarp cadence and camera rotation
 

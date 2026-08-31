@@ -12,9 +12,12 @@ class FrameLimit
 
     static void sleep(bool fgActive);
     static void sleepForMs(double ms);
-    // High-resolution sleep with a small spin tail for async presentation and
-    // source pacing, rather than consuming a full 2 ms of CPU every slot.
+    // High-resolution sleep with the larger Proton spin tail required by the
+    // latency-critical async presenter.
     static void sleepForPrecisePacingMs(double ms);
+    // Source pacing uses a separate short spin tail so the game thread does
+    // not compete with the presenter for a full millisecond every frame.
+    static void sleepForReprojectionSourceMs(double ms);
     // Called by the virtualized async-reprojection game thread after an anchor
     // has been published. This deliberately never runs on the presenter thread.
     static void paceReprojectionSource(bool active);

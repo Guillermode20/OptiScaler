@@ -719,39 +719,30 @@ void AReproj_Dx12::FeedInputPredictorFromPacket(int sourceIndex, const RP_Consta
         return;
 
     const double intervalMs = poseIntervalMs > 1.0 ? poseIntervalMs : 16.6;
-    float inputX = 0.0f;
-    float inputY = 0.0f;
-    Kcd2Input::MouseInterval kcd2Input {};
-    if (hookPose && Kcd2Input::QueryMouseInterval(poseTimestampMs - intervalMs, poseTimestampMs, kcd2Input) &&
-        kcd2Input.complete && (kcd2Input.yawEvents > 0 || kcd2Input.pitchEvents > 0))
-    {
-        inputX = static_cast<float>(kcd2Input.yaw);
-        inputY = static_cast<float>(kcd2Input.pitch);
-    }
-    else
-    {
-        OptiInput::RefreshMouseMotion();
-        const auto mouseAtPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
-        const auto mouseAtPrevPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs - intervalMs);
-        inputX = static_cast<float>(mouseAtPose.TotalX - mouseAtPrevPose.TotalX);
-        inputY = static_cast<float>(mouseAtPose.TotalY - mouseAtPrevPose.TotalY);
-    }
-
     float deltaYaw = 0.0f;
     float deltaPitch = 0.0f;
     if (hookPose)
     {
         DecomposeCameraPairRotation(constants.cameraForward, constants.prevCameraForward, constants.prevCameraRight,
                                     constants.prevCameraUp, &deltaYaw, &deltaPitch);
+        ReprojInputPredictor::OnKcd2PoseSample(poseTimestampMs, intervalMs, deltaYaw, deltaPitch);
+        _lastPredictorFeedPoseMs = poseTimestampMs;
+        return;
     }
-    else
-    {
-        const auto prevIndex = (sourceIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
-        if (_reset[sourceIndex] || _reset[prevIndex] || IsCameraAllZero(sourceIndex) || IsCameraAllZero(prevIndex))
-            return;
-        DecomposeCameraPairRotation(_cameraForward[sourceIndex], _cameraForward[prevIndex], _cameraRight[prevIndex],
-                                    _cameraUp[prevIndex], &deltaYaw, &deltaPitch);
-    }
+
+    float inputX = 0.0f;
+    float inputY = 0.0f;
+    OptiInput::RefreshMouseMotion();
+    const auto mouseAtPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
+    const auto mouseAtPrevPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs - intervalMs);
+    inputX = static_cast<float>(mouseAtPose.TotalX - mouseAtPrevPose.TotalX);
+    inputY = static_cast<float>(mouseAtPose.TotalY - mouseAtPrevPose.TotalY);
+
+    const auto prevIndex = (sourceIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    if (_reset[sourceIndex] || _reset[prevIndex] || IsCameraAllZero(sourceIndex) || IsCameraAllZero(prevIndex))
+        return;
+    DecomposeCameraPairRotation(_cameraForward[sourceIndex], _cameraForward[prevIndex], _cameraRight[prevIndex],
+                                _cameraUp[prevIndex], &deltaYaw, &deltaPitch);
 
     ReprojInputPredictor::OnPoseSample(poseTimestampMs, intervalMs, deltaYaw, deltaPitch, inputX, inputY);
     _lastPredictorFeedPoseMs = poseTimestampMs;
@@ -766,15 +757,62 @@ bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawR
     if (yawRadians == nullptr || pitchRadians == nullptr || poseTimestampMs <= 0.0)
         return false;
 
-    // KCD2's post-map input and hooked render pose are sampled on different
-    // engine phases. Live telemetry showed the fitted gain moving by ~36% and
-    // prediction flapping on/off within a turn, producing a discontinuous warp
-    // direction. Keep collecting calibration data, but use the stable hooked
-    // camera-pair rotation until a phase-aligned KCD2 target pose is qualified.
     if (Kcd2Camera::IsAvailable())
     {
-        _inputPredictorActive = false;
-        return false;
+        ReprojInputPredictor::Kcd2PhaseModel model {};
+        if (!Kcd2Input::IsAvailable() || !ReprojInputPredictor::GetKcd2PhaseModel(&model))
+        {
+            _inputPredictorActive = false;
+            return false;
+        }
+
+        const auto nowMs = Util::MillisecondsNow();
+        const auto inputCutoffMs = poseTimestampMs - static_cast<double>(model.phaseOffsetMs);
+        if (inputCutoffMs <= 0.0 || nowMs <= inputCutoffMs ||
+            nowMs - inputCutoffMs > Config::Instance()->ReprojMaxPoseAgeMs.value_or_default())
+            return false;
+
+        Kcd2Input::MouseInterval interval {};
+        if (!Kcd2Input::QueryMouseInterval(inputCutoffMs, nowMs, interval) || !interval.complete)
+            return false;
+
+        const bool yawActive = model.yawCalibrated && std::abs(interval.yaw) >= 1.0e-5;
+        const bool pitchActive = model.pitchCalibrated && std::abs(interval.pitch) >= 1.0e-5;
+        if (!yawActive && !pitchActive)
+        {
+            // A locked mouse model with no fresh delta should hold the rendered
+            // pose, not resume old rendered velocity and overshoot after the
+            // player stops. Once input is no longer recent, allow the generic
+            // fallback for gamepad or scripted camera motion.
+            Kcd2Input::Snapshot snapshot {};
+            if (Kcd2Input::ReadSnapshot(snapshot) && snapshot.mouseTimestampMs > 0.0 &&
+                nowMs - snapshot.mouseTimestampMs <= 100.0)
+            {
+                *yawRadians = 0.0f;
+                *pitchRadians = 0.0f;
+                _inputPredictorActive = true;
+                return true;
+            }
+            _inputPredictorActive = false;
+            return false;
+        }
+
+        const float response =
+            std::clamp(Config::Instance()->ReprojInputPredictorResponse.value_or_default(), 0.05f, 1.0f);
+        float yaw = yawActive ? model.gainX * static_cast<float>(interval.yaw) * response : 0.0f;
+        float pitch = pitchActive ? -model.gainY * static_cast<float>(interval.pitch) * response : 0.0f;
+        constexpr float maxRotationRad = 0.35f;
+        const float magnitude = std::hypot(yaw, pitch);
+        if (magnitude > maxRotationRad)
+        {
+            const float scale = maxRotationRad / magnitude;
+            yaw *= scale;
+            pitch *= scale;
+        }
+        *yawRadians = yaw;
+        *pitchRadians = pitch;
+        _inputPredictorActive = true;
+        return true;
     }
 
     const auto nowMs = Util::MillisecondsNow();
@@ -1678,6 +1716,16 @@ void AReproj_Dx12::RecordRealFrame()
 bool AReproj_Dx12::ShouldCaptureAnchor(double nowMs)
 {
     auto* config = Config::Instance();
+    const float sourceCapHz = config->ReprojSourceFramerateLimit.value_or_default();
+    if (std::isfinite(sourceCapHz) && sourceCapHz > 0.0f)
+    {
+        // A capped source already has one authoritative deadline grid. An
+        // independent sampler at the same nominal rate aliases harmless phase
+        // jitter into periodic 30-33 ms anchor gaps. Publish every paced frame.
+        _nextAnchorSampleMs = 0.0;
+        _anchorSampleHz = 0.0f;
+        return true;
+    }
     if (!config->ReprojNonBlockingAnchorSampling.value_or_default())
     {
         _nextAnchorSampleMs = 0.0;
