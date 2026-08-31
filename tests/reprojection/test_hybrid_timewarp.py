@@ -69,12 +69,13 @@ class HybridTimewarpTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         state = (root / "OptiScaler/State.h").read_text(encoding="utf-8")
         config = (root / "OptiScaler/Config.cpp").read_text(encoding="utf-8")
-        presenter = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         self.assertIn("HybridTimewarp", state)
         self.assertIn('"hybridtimewarp") == 0', config.lower())
         self.assertIn("!contentSequencePending", presenter)
         self.assertIn("nextContentIndex > packet.generatedCount", presenter)
-        self.assertIn("packet.constants.mode = 2", presenter)
+        self.assertIn("packet.constants.mode = 2", source)
 
     def test_constant_slice_is_written_before_cpu_fence_release(self):
         root = Path(__file__).resolve().parents[2]

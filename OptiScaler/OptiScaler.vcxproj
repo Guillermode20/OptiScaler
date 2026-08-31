@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -615,6 +615,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />
     <ClCompile Include="framegen\reproj\AReproj_Dx12.cpp" />
     <ClCompile Include="framegen\reproj\AReprojTiming.cpp" />
+    <ClCompile Include="framegen\reproj\AReprojPresenter.cpp" />
     <ClCompile Include="framegen\reproj\HybridFsrGenerator.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2Camera.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2HudIsolation.cpp" />

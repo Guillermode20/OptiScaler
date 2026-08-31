@@ -78,9 +78,8 @@ class ReprojectionTests(unittest.TestCase):
 
     def test_runtime_presenter_has_one_vsync_present_site(self):
         root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
-            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
         self.assertEqual(presenter.count("PresentCompositorFrame("), 1)
         self.assertIn("PresentCompositorFrame(1, 0, hybridOutput ?", presenter)
         self.assertIn(": !newAnchor,", presenter)
@@ -88,7 +87,7 @@ class ReprojectionTests(unittest.TestCase):
 
     def test_async_hot_path_has_no_per_output_debug_logging(self):
         root = Path(__file__).resolve().parents[2]
-        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        reproj = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         dispatch = (root / "OptiScaler/shaders/reprojection/RP_Dx12.cpp").read_text(encoding="utf-8")
         present = reproj.split("HRESULT AReproj_Dx12::PresentCompositorFrame", 1)[1].split(
             "void AReproj_Dx12::PresenterMain", 1)[0]
@@ -100,9 +99,8 @@ class ReprojectionTests(unittest.TestCase):
         # Capture-completion timestamps carry the game's pipeline latency and its
         # jitter into the warp phase; the pose-sample time is the valid origin.
         root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
-            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
         self.assertIn("selectedContent->sourcePoseTimestamp", presenter)
         self.assertIn("warpOriginMs", presenter)
         self.assertNotIn("(targetDisplayMs - packet.renderTimestamp)", presenter)
@@ -117,9 +115,7 @@ class ReprojectionTests(unittest.TestCase):
 
     def test_presenter_locks_to_measured_vblank_grid(self):
         root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
-            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         timing = (root / "OptiScaler/framegen/reproj/AReprojTiming.cpp").read_text(encoding="utf-8")
         self.assertIn("GetFrameStatistics", timing)
         self.assertIn("_displayClockAnchorMs", presenter)
@@ -146,9 +142,8 @@ class ReprojectionTests(unittest.TestCase):
         # it the deadline drifts far ahead of scanout and latency-1 presents
         # block progressively until the pipeline wedges.
         root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
-            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
         self.assertIn("MAX_TOTAL_EARLY_CORRECTION_MS", presenter)
         self.assertIn("totalEarlyCorrectionMs += appliedDeltaMs", presenter)
 
@@ -157,9 +152,8 @@ class ReprojectionTests(unittest.TestCase):
         # multi-second wedge must fail the worker so the game thread's Failed
         # handling downgrades to the synchronous presenter instead of freezing.
         root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
-            "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
+        source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
         self.assertIn("WATCHDOG_CONSECUTIVE_JAMS", presenter)
         self.assertIn("WATCHDOG_WEDGE_MS", presenter)
         self.assertGreater(presenter.count("_presenterState.store(PresenterState::Failed)"), 1)
@@ -217,7 +211,7 @@ class ReprojectionTests(unittest.TestCase):
     def test_experimental_clock_and_gpu_lead_are_opt_in(self):
         root = Path(__file__).resolve().parents[2]
         config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
-        presenter = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         self.assertIn("ReprojPresentCompletionClock { false }", config)
         self.assertIn("ReprojDispatchLeadOverrideMs { 0.0f }", config)
         self.assertIn("if (!completionClock && SampleDisplayClock", presenter)
@@ -226,7 +220,7 @@ class ReprojectionTests(unittest.TestCase):
     def test_queue_aware_lead_uses_completed_gpu_queue_telemetry(self):
         root = Path(__file__).resolve().parents[2]
         config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
-        presenter = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         telemetry = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.cpp").read_text(encoding="utf-8")
         self.assertIn("ReprojAdaptiveQueueLead { true }", config)
         self.assertIn("RecentGpuQueueDelayMs", presenter)

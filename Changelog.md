@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.37 (2026-08-31)
+* Reproj: split presenter lifecycle and PresenterMain into AReprojPresenter.cpp
+
 ## v10.0.0.36 (2026-08-31)
 * Split reprojection timing and display clock
 
