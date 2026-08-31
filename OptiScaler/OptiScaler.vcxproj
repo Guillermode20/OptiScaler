@@ -614,6 +614,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp" />
     <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />
     <ClCompile Include="framegen\reproj\AReproj_Dx12.cpp" />
+    <ClCompile Include="framegen\reproj\AReprojTiming.cpp" />
     <ClCompile Include="framegen\reproj\HybridFsrGenerator.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2Camera.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2HudIsolation.cpp" />

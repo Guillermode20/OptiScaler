@@ -1214,6 +1214,9 @@
     <ClCompile Include="framegen\reproj\AReproj_Dx12.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="framegen\reproj\AReprojTiming.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="framegen\reproj\HybridFsrGenerator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

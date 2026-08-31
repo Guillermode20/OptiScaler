@@ -91,7 +91,7 @@ class ReprojectionTests(unittest.TestCase):
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         dispatch = (root / "OptiScaler/shaders/reprojection/RP_Dx12.cpp").read_text(encoding="utf-8")
         present = reproj.split("HRESULT AReproj_Dx12::PresentCompositorFrame", 1)[1].split(
-            "bool AReproj_Dx12::SampleDisplayClock", 1)[0]
+            "void AReproj_Dx12::PresenterMain", 1)[0]
         warp = dispatch.split("bool RP_Dx12::Dispatch", 1)[1].split("RP_Dx12::RP_Dx12", 1)[0]
         self.assertNotIn("LOG_DEBUG", present)
         self.assertNotIn("LOG_DEBUG", warp)
@@ -120,7 +120,8 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
             "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
-        self.assertIn("GetFrameStatistics", source.split("void AReproj_Dx12::PresenterMain()", 1)[0])
+        timing = (root / "OptiScaler/framegen/reproj/AReprojTiming.cpp").read_text(encoding="utf-8")
+        self.assertIn("GetFrameStatistics", timing)
         self.assertIn("_displayClockAnchorMs", presenter)
         self.assertIn("_measuredRefreshPeriodMs", presenter)
 
@@ -129,9 +130,8 @@ class ReprojectionTests(unittest.TestCase):
         # 120 Hz slot. The presenter must keep the final sub-2ms wait on the
         # high-resolution QPC timer path.
         root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        wait = source.split("bool AReproj_Dx12::WaitForPresenterDeadline", 1)[1].split(
-            "bool AReproj_Dx12::CreateAsyncPresenter", 1)[0]
+        timing = (root / "OptiScaler/framegen/reproj/AReprojTiming.cpp").read_text(encoding="utf-8")
+        wait = timing.split("bool AReproj_Dx12::WaitForPresenterDeadline", 1)[1]
         self.assertIn("if (chunk > 0.2)", wait)
         self.assertIn("FrameLimit::sleepForPrecisePacingMs(chunk)", wait)
         self.assertNotIn("_presentCv.wait_for", wait)
