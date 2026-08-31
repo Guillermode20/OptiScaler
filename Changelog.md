@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.35 (2026-08-31)
+* Restore KCD2 rotation-only async timewarp path
+
 ## v10.0.0.34 (2026-08-30)
 * Hybrid frame generation and scanout-time late warp
 

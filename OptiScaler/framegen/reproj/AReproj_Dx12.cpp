@@ -703,6 +703,12 @@ bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawR
     if (yawRadians == nullptr || pitchRadians == nullptr || poseTimestampMs <= 0.0)
         return false;
 
+    // Kcd2Input remains passive until its timing and camera response are
+    // validated live. Do not alternate KCD2 between this estimator and the
+    // rendered-pose fallback in the middle of a turn.
+    if (Kcd2Camera::IsAvailable())
+        return false;
+
     const auto nowMs = Util::MillisecondsNow();
     const auto windowMs = nowMs - poseTimestampMs;
     if (windowMs <= 0.0 || windowMs > Config::Instance()->ReprojMaxPoseAgeMs.value_or_default())
@@ -1008,13 +1014,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     Kcd2Input::Initialize();
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
-    if (kcd2CameraTimestamp > 0.0 && packet.constants.mode == 0)
+    if (kcd2CameraTimestamp > 0.0)
     {
-        // The legacy camera fields are empty for KCD2 (its pose comes from the WHGame hook),
-        // so FillConstants zeroed the mode above. The hooked pose is authoritative here:
-        // restore the configured warp mode, clamped to supported values.
-        const auto configuredMode = Config::Instance()->ReprojMode.value_or_default();
-        packet.constants.mode = configuredMode > 2u ? 2u : configuredMode;
+        // KCD2's depth/projection conventions are not validated for reprojection.
+        // Its hook supplies an authoritative orientation, so do not let a stale
+        // generic depth-warp setting override the safe title-specific path.
+        packet.constants.mode = 2;
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     Kcd2Camera::Snapshot currentCamera {};
@@ -1912,6 +1917,7 @@ void AReproj_Dx12::PresenterMain()
     LARGE_INTEGER qpcFrequency {};
     QueryPerformanceFrequency(&qpcFrequency);
     const auto* config = Config::Instance();
+    const bool hybridOutput = State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
 
     // Telemetry: ensure clock initialized (already in ReprojTelemetry ctor)
     // Poll calibration once at thread start if enabled.
@@ -2179,7 +2185,7 @@ void AReproj_Dx12::PresenterMain()
                 // Once a generated/real sequence begins, finish it in order.
                 // New anchors remain queued until the next display slot rather
                 // than replacing the current real content with a burst.
-                if (!contentSequencePending && _packets[i].frameId > newestFrame)
+                if ((!hybridOutput || !contentSequencePending) && _packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
                     newestPacketIndex = i;
@@ -2216,7 +2222,7 @@ void AReproj_Dx12::PresenterMain()
                 activeFrame = newest.frameId;
                 newAnchor = true;
                 nextContentIndex = 0;
-                contentSequencePending = true;
+                contentSequencePending = hybridOutput;
                 for (int i = 0; i < BUFFER_COUNT; ++i)
                     if (i != activePacketIndex && _packets[i].state.load() == PacketState::Ready &&
                         _packets[i].frameId < activeFrame)
@@ -2256,9 +2262,9 @@ void AReproj_Dx12::PresenterMain()
 
         auto& packet = _packets[activePacketIndex];
         ContentFrame* selectedContent = &packet;
-        if (contentSequencePending && nextContentIndex < packet.generatedCount)
+        if (hybridOutput && contentSequencePending && nextContentIndex < packet.generatedCount)
             selectedContent = &packet.generated[nextContentIndex];
-        const bool newContent = contentSequencePending;
+        const bool newContent = hybridOutput ? contentSequencePending : newAnchor;
         const bool generatedContent = selectedContent->kind == ContentFrameKind::Generated;
         if (tSlot)
         {
@@ -2485,7 +2491,8 @@ void AReproj_Dx12::PresenterMain()
             tSlot->presentBeginQpc = _telemetry.NowQpc();
 
         const auto presentCallStartMs = Util::MillisecondsNow();
-        const auto result = PresentCompositorFrame(1, 0, generatedContent || !newContent, false);
+        const auto result = PresentCompositorFrame(1, 0, hybridOutput ? (generatedContent || !newContent) : !newAnchor,
+                                                   false);
         const auto presentedAt = Util::MillisecondsNow();
         const auto presentDurationMs = presentedAt - presentCallStartMs;
         const auto poseAge = static_cast<float>(std::max(0.0, targetDisplayMs - selectedContent->sourcePoseTimestamp));
@@ -2520,7 +2527,7 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
 
-        if (contentSequencePending)
+        if (hybridOutput && contentSequencePending)
         {
             ++nextContentIndex;
             if (nextContentIndex > packet.generatedCount)

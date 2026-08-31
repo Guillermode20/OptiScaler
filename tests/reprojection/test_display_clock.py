@@ -82,7 +82,8 @@ class ReprojectionTests(unittest.TestCase):
         presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1].split(
             "bool AReproj_Dx12::DrainGpuWork()", 1)[0]
         self.assertEqual(presenter.count("PresentCompositorFrame("), 1)
-        self.assertIn("PresentCompositorFrame(1, 0, generatedContent || !newContent, false)", presenter)
+        self.assertIn("PresentCompositorFrame(1, 0, hybridOutput ?", presenter)
+        self.assertIn(": !newAnchor,", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
     def test_async_hot_path_has_no_per_output_debug_logging(self):

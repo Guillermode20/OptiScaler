@@ -648,7 +648,10 @@ class Config
     CustomOptional<float> ReprojInputPredictorResponse {
         1.0f
     }; // 0.05..1 predicted-rotation scale; <1 under-rotates to follow games with smoothed aim
-    CustomOptional<bool> ReprojTargetPoseResolver { true };
+    // The scanout target-pose resolver remains experimental. The established
+    // async path must not switch to a second estimator unless a validated
+    // profile explicitly requests it.
+    CustomOptional<bool> ReprojTargetPoseResolver { false };
     CustomOptional<bool> ReprojTargetPoseShadow { true };
     CustomOptional<bool> ReprojLateLatchFence { false };
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
