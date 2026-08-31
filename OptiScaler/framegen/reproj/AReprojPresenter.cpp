@@ -9,18 +9,13 @@
 #include <cmath>
 #include <thread>
 
-#include <Config.h>
-#include <Logger.h>
-#include <OptiInput.h>
 #include <State.h>
+#include <Config.h>
 #include <Util.h>
-#include <directx/d3dx12.h>
-#include <dxgi/WrappedIDXGISwapChain4.h>
-#include <menu/input/input_system.h>
 #include <misc/FrameLimit.h>
 #include <nvapi/fakenvapi.h>
-#include <shaders/rui/RUI_Dx12.h>
 #include <wrapped/wrapped_swapchain.h>
+#include <menu/input/input_system.h>
 
 bool AReproj_Dx12::CreateAsyncPresenter()
 {
