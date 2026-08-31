@@ -653,7 +653,13 @@ class Config
     // profile explicitly requests it.
     CustomOptional<bool> ReprojTargetPoseResolver { false };
     CustomOptional<bool> ReprojTargetPoseShadow { true };
-    CustomOptional<bool> ReprojLateLatchFence { false };
+    // Presenter warps queue behind a CPU-signaled fence and write their constant
+    // slice ~0.75 ms before the present deadline. That keeps warp input sampling
+    // anchored to the display-clock grid: sampling at dispatch time instead
+    // jitters with the adaptive dispatch lead and the Proton waitable signal
+    // phase, which re-introduces source-rate judder into the warp trajectory.
+    // Set false to sample input at dispatch-lead time.
+    CustomOptional<bool> ReprojLateLatchFence { true };
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<bool> ReprojTelemetry { false };

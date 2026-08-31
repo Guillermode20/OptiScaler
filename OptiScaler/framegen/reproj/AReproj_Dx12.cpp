@@ -777,7 +777,23 @@ bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawR
 
         Kcd2Input::MouseInterval interval {};
         if (!Kcd2Input::QueryMouseInterval(inputCutoffMs, nowMs, interval) || !interval.complete)
+        {
+            // An incomplete window (history gap right after an anchor switch)
+            // must not fall back to rendered velocity: that resumes a stale
+            // trajectory and snaps against the next predicted slot, which reads
+            // as source-rate judder during pans. Hold while the mouse is recent;
+            // defer to the generic fallback only for gamepad/scripted motion.
+            Kcd2Input::Snapshot snapshot {};
+            if (Kcd2Input::ReadSnapshot(snapshot) && snapshot.mouseTimestampMs > 0.0 &&
+                nowMs - snapshot.mouseTimestampMs <= 100.0)
+            {
+                *yawRadians = 0.0f;
+                *pitchRadians = 0.0f;
+                _inputPredictorActive = true;
+                return true;
+            }
             return false;
+        }
 
         const bool yawActive = model.yawCalibrated && std::abs(interval.yaw) >= 1.0e-5;
         const bool pitchActive = model.pitchCalibrated && std::abs(interval.pitch) >= 1.0e-5;
