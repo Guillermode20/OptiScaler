@@ -297,6 +297,16 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("phaseAlignedMousePrediction", camera)
         self.assertIn("Kcd2Input::IsAvailable", camera)
 
+    def test_kcd2_input_yaw_uses_world_up_before_pitch(self):
+        root = Path(__file__).resolve().parents[2]
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        composition = reproj.split("if (inputLatched)", 1)[1].split(
+            "if (inputLatched && constants.mode == 1)", 1)[0]
+        self.assertIn("ReprojVec3 { 0.0f, 0.0f, 1.0f }", composition)
+        self.assertIn("RotateReprojVec3(right, yawAxis, -lateYaw)", composition)
+        self.assertIn("RotateReprojVec3(yawForward, yawRight, latePitch)", composition)
+        self.assertLess(composition.index("yawForward"), composition.index("latePitch"))
+
     def test_phase_fit_selects_input_window_that_explains_camera_motion(self):
         # Model the C++ through-origin least-squares score. Camera response is
         # delayed by two 4 ms candidates; the aligned candidate must have the

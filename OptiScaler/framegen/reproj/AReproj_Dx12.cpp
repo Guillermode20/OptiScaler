@@ -508,15 +508,18 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
 
     if (inputLatched)
     {
-        const float yawSin = std::sin(lateYaw);
-        const float yawCos = std::cos(lateYaw);
-        const float pitchSin = std::sin(latePitch);
-        const float pitchCos = std::cos(latePitch);
-        const auto yawRight = CombineReprojVec3(right, yawCos, forward, -yawSin);
-        const auto yawForward = CombineReprojVec3(forward, yawCos, right, yawSin);
+        // KCD2 is world-Z-up. Yawing around the camera's local up vector is
+        // only correct near level pitch; while looking steeply up/down that
+        // tilted axis injects visible roll during a horizontal pan. Rotate the
+        // complete basis around world up first, then pitch around the yawed
+        // camera-right axis. Generic cameras retain their local-up convention.
+        const auto yawAxis = Kcd2Camera::IsAvailable() ? ReprojVec3 { 0.0f, 0.0f, 1.0f } : up;
+        const auto yawRight = NormalizeReprojVec3(RotateReprojVec3(right, yawAxis, -lateYaw));
+        const auto yawUp = NormalizeReprojVec3(RotateReprojVec3(up, yawAxis, -lateYaw));
+        const auto yawForward = NormalizeReprojVec3(RotateReprojVec3(forward, yawAxis, -lateYaw));
         predictedRight = NormalizeReprojVec3(yawRight);
-        predictedUp = NormalizeReprojVec3(CombineReprojVec3(up, pitchCos, yawForward, -pitchSin));
-        predictedForward = NormalizeReprojVec3(CombineReprojVec3(yawForward, pitchCos, up, pitchSin));
+        predictedUp = NormalizeReprojVec3(RotateReprojVec3(yawUp, yawRight, latePitch));
+        predictedForward = NormalizeReprojVec3(RotateReprojVec3(yawForward, yawRight, latePitch));
     }
     else if (constants.mode == 2)
     {
