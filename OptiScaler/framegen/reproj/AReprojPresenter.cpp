@@ -1,8 +1,5 @@
 #include "pch.h"
 #include "AReproj_Dx12.h"
-#include "Kcd2Camera.h"
-#include "ReprojInputPredictor.h"
-#include "TargetPoseResolver.h"
 
 #include <algorithm>
 #include <chrono>
@@ -113,8 +110,7 @@ void AReproj_Dx12::DestroyAsyncPresenter()
 
 bool AReproj_Dx12::StartAsyncPresenter()
 {
-    if (!Config::Instance()->ReprojAsync.value_or_default() &&
-        State::Instance().activeFgOutput != FGOutput::HybridTimewarp)
+    if (!Config::Instance()->ReprojAsync.value_or_default())
         return false;
     if (_presentThread.joinable())
         return true;
@@ -233,8 +229,6 @@ void AReproj_Dx12::PresenterMain()
 {
     int activePacketIndex = -1;
     UINT64 activeFrame = 0;
-    uint32_t nextContentIndex = 0;
-    bool contentSequencePending = false;
     double nextDeadlineMs = 0.0;
     constexpr double VBLANK_SAFETY_LEAD_MS = 2.0;
     constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 16.0; // 4->16: 8ms drift needs >4ms to recover
@@ -243,7 +237,6 @@ void AReproj_Dx12::PresenterMain()
     LARGE_INTEGER qpcFrequency {};
     QueryPerformanceFrequency(&qpcFrequency);
     const auto* config = Config::Instance();
-    const bool hybridOutput = State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
 
     // Telemetry: ensure clock initialized (already in ReprojTelemetry ctor)
     // Poll calibration once at thread start if enabled.
@@ -259,31 +252,7 @@ void AReproj_Dx12::PresenterMain()
         // already be in the past. Keep adaptive and manual leads inside the
         // current slot while retaining a small safety margin.
         const auto maxUsableLeadMs = std::max(3.0, std::min(20.0, refreshPeriodMs * 0.75));
-        const auto requestedLeadMs = config->ReprojDispatchLeadOverrideMs.value_or_default();
-        const bool fixedDispatchLead = std::isfinite(requestedLeadMs) && requestedLeadMs > 0.0f;
-        if (!fixedDispatchLead && config->ReprojAdaptiveQueueLead.value_or_default() &&
-            config->ReprojTelemetry.value_or_default())
-        {
-            // The dedicated present queue shares the physical GPU with KCD2's render queue.  Under Proton the
-            // worker can be submitted on time but not begin execution for 7-20 ms.  Dispatching only 3-8 ms before
-            // vblank guarantees a late warp in those windows.  Completed timestamp telemetry gives that delay
-            // without adding a wait/readback to this hot path; grow immediately for a spike and decay gradually so
-            // one quiet frame cannot reintroduce a hitch.
-            const auto queueDelayMs = _telemetry.RecentGpuQueueDelayMs();
-            if (std::isfinite(queueDelayMs) && queueDelayMs > 0.0f)
-            {
-                const auto warpDurationMs = _telemetry.RecentGpuDurationMs();
-                const auto desiredLeadMs =
-                    std::clamp(static_cast<double>(queueDelayMs + warpDurationMs) + 0.75, 3.0, maxUsableLeadMs);
-                _dispatchLeadMs =
-                    desiredLeadMs >= _dispatchLeadMs ? desiredLeadMs : std::max(desiredLeadMs, _dispatchLeadMs - 0.10);
-            }
-        }
-        const bool queueAwareLead =
-            config->ReprojAdaptiveQueueLead.value_or_default() && config->ReprojTelemetry.value_or_default();
-        const auto dispatchLeadMs = fixedDispatchLead
-                                        ? std::clamp(static_cast<double>(requestedLeadMs), 3.0, maxUsableLeadMs)
-                                        : std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs);
+        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs);
         const bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
 
         // Handle TargetRefresh change without restart: reset EMA and grid
@@ -426,16 +395,13 @@ void AReproj_Dx12::PresenterMain()
             const double LEAD_GROW_MS = State::Instance().isRunningOnLinux ? 1.0 : 0.5;
             constexpr double LEAD_DECAY_MS = 0.05;
             const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
-            if (!fixedDispatchLead)
-            {
-                const double growCap = queueAwareLead ? maxUsableLeadMs : std::min(8.0, maxUsableLeadMs);
-                // On Proton the timer can overshoot even with 1ms spin window; grow faster so we
-                // recover from a burst of late wakes in fewer slots.
-                if (wakeHeadroomMs < (State::Instance().isRunningOnLinux ? 2.5 : 2.0))
-                    _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, growCap);
-                else if (wakeHeadroomMs > 4.0)
-                    _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
-            }
+            const double growCap = std::min(8.0, maxUsableLeadMs);
+            // On Proton the timer can overshoot even with 1ms spin window; grow faster so we
+            // recover from a burst of late wakes in fewer slots.
+            if (wakeHeadroomMs < (State::Instance().isRunningOnLinux ? 2.5 : 2.0))
+                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, growCap);
+            else if (wakeHeadroomMs > 4.0)
+                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
 
             if (!deadlineOk)
             {
@@ -526,10 +492,9 @@ void AReproj_Dx12::PresenterMain()
             if (_packets[i].state.load() == PacketState::Ready)
             {
                 ++readyCount;
-                // Once a generated/real sequence begins, finish it in order.
                 // New anchors remain queued until the next display slot rather
                 // than replacing the current real content with a burst.
-                if ((!hybridOutput || !contentSequencePending) && _packets[i].frameId > newestFrame)
+                if (_packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
                     newestPacketIndex = i;
@@ -565,8 +530,6 @@ void AReproj_Dx12::PresenterMain()
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
-                nextContentIndex = 0;
-                contentSequencePending = hybridOutput;
                 for (int i = 0; i < BUFFER_COUNT; ++i)
                     if (i != activePacketIndex && _packets[i].state.load() == PacketState::Ready &&
                         _packets[i].frameId < activeFrame)
@@ -606,10 +569,7 @@ void AReproj_Dx12::PresenterMain()
 
         auto& packet = _packets[activePacketIndex];
         ContentFrame* selectedContent = &packet;
-        if (hybridOutput && contentSequencePending && nextContentIndex < packet.generatedCount)
-            selectedContent = &packet.generated[nextContentIndex];
-        const bool newContent = hybridOutput ? contentSequencePending : newAnchor;
-        const bool generatedContent = selectedContent->kind == ContentFrameKind::Generated;
+        const bool newContent = newAnchor;
         if (tSlot)
         {
             tSlot->newAnchor = newContent;
@@ -630,38 +590,11 @@ void AReproj_Dx12::PresenterMain()
             poseOriginValid ? selectedContent->sourcePoseTimestamp : selectedContent->renderTimestamp;
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
         auto maxTimeStep = std::max(0.25f, config->ReprojMaxTimeStep.value_or_default());
-        // KCD2's rendered camera path is accurate, but source stalls can leave an anchor 2-3 frames
-        // old. A hard displacement cap freezes the image mid-turn (every slot re-renders the same
-        // maximum warp) and then snaps forward on anchor arrival. For KCD2 the cap instead bounds the
-        // warp VELOCITY: each slot may advance at most maxTimeStep frame-units per source frame, so
-        // motion continues smoothly during stalls and catches up gradually. The absolute cap keeps the
-        // generic value; only growth is limited, because KCD2's natural per-slot step (age/period with
-        // 16-32ms alternating frames and 27-45ms anchor ages) legitimately exceeds 1.5 in normal play.
-        const bool rateLimitedWarp = Kcd2Camera::IsAvailable();
+        // Bare-bones warp step: anchor age / represented period, clamped only by
+        // the absolute extrapolation cap. No velocity limiting.
         const auto unclampedStep =
             static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default() * 2.0f);
         auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
-        if (rateLimitedWarp)
-        {
-            if (_warpRateFrameId != packet.frameId)
-            {
-                // New anchor: start from its natural age, still within the absolute cap.
-                _warpRateFrameId = packet.frameId;
-                _lastWarpTimeStep = timeStep;
-            }
-            else
-            {
-                // Same anchor: allow the step to grow by at most maxTimeStep frame-units per source
-                // period scaled to the elapsed slot time, so rotation speed stays bounded but nonzero.
-                const double slotDeltaMs =
-                    _lastDisplayPresentMs > 0.0
-                        ? std::clamp(targetDisplayMs - _lastDisplayPresentMs, 1.0, refreshPeriodMs * 4.0)
-                        : refreshPeriodMs;
-                const float growthAllowance = maxTimeStep * static_cast<float>(slotDeltaMs / realPeriodMs);
-                timeStep = std::min({ unclampedStep, maxTimeStep, _lastWarpTimeStep + growthAllowance });
-                _lastWarpTimeStep = timeStep;
-            }
-        }
 
         if (tSlot)
         {
@@ -738,72 +671,19 @@ void AReproj_Dx12::PresenterMain()
             _currentTelemetrySlot = nullptr;
         }
 
-        float predictedYaw = 0.0f;
-        float predictedPitch = 0.0f;
-        TargetPoseResolver::Result resolvedTarget {};
-        bool targetPoseApplied = false;
-        bool targetPoseResolved = false;
-        if (packet.warpAllowed && !focusLost && config->ReprojTargetPoseResolver.value_or_default())
-        {
-            resolvedTarget = ResolveTargetPose(*selectedContent, targetDisplayMs + refreshPeriodMs * 0.5);
-            targetPoseResolved = true;
-            targetPoseApplied = resolvedTarget.qualified && !config->ReprojTargetPoseShadow.value_or_default();
-        }
-        const bool inputPredicted =
-            packet.warpAllowed && !focusLost && !targetPoseApplied
-                ? TryInputPredictedRotation(selectedContent->sourcePoseTimestamp, &predictedYaw, &predictedPitch)
-                : false;
         if (tSlot)
         {
-            tSlot->inputPredicted = inputPredicted;
-            tSlot->predictedYawRad = predictedYaw;
-            tSlot->predictedPitchRad = predictedPitch;
             tSlot->contentKind = static_cast<uint8_t>(selectedContent->kind);
             tSlot->contentFraction = selectedContent->interpolationFraction;
             tSlot->contentAgeMs =
                 static_cast<float>(std::max(0.0, targetDisplayMs - selectedContent->virtualContentTimestamp));
             tSlot->fgDurationMs = static_cast<float>(selectedContent->fgDurationMs);
             tSlot->targetScanoutTimestampMs = targetDisplayMs + refreshPeriodMs * 0.5;
-            if (targetPoseResolved)
-            {
-                tSlot->posePath = static_cast<uint8_t>(resolvedTarget.source);
-                tSlot->poseSampleTimestampMs = resolvedTarget.poseSampleMs;
-                tSlot->residualPredictionIntervalMs = static_cast<float>(resolvedTarget.residualIntervalMs);
-                tSlot->yawConfidence = resolvedTarget.yawConfidence;
-                tSlot->pitchConfidence = resolvedTarget.pitchConfidence;
-                tSlot->yawErrorDegrees = resolvedTarget.yawErrorDegrees;
-                tSlot->pitchErrorDegrees = resolvedTarget.pitchErrorDegrees;
-            }
-        }
-        _predictorLogSlots++;
-        if (inputPredicted)
-            _inputPredictedSlots++;
-
-        // Rate-limited predictor diagnostics for the async path (the sync path
-        // logs from DispatchWarp). This is the only regular visibility into
-        // whether prediction is calibrating and engaging.
-        static double lastPresenterPredictorLogMs = 0.0;
-        const auto predictorLogMs = Util::MillisecondsNow();
-        if (config->ReprojInputPredictor.value_or_default() && predictorLogMs - lastPresenterPredictorLogMs > 10000.0)
-        {
-            lastPresenterPredictorLogMs = predictorLogMs;
-            char predictorDescription[160];
-            if (ReprojInputPredictor::DescribeStats(predictorDescription, sizeof(predictorDescription)))
-                LOG_INFO("Reproj input predictor: {} applied {}/{} slots in window", predictorDescription,
-                         _inputPredictedSlots, _predictorLogSlots);
-            else
-                LOG_INFO("Reproj input predictor: uncalibrated, applied {}/{} slots in window", _inputPredictedSlots,
-                         _predictorLogSlots);
-            _inputPredictedSlots = 0;
-            _predictorLogSlots = 0;
         }
 
-        const bool dispatched =
-            packet.warpAllowed && !focusLost
-                ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart, inputPredicted,
-                                     predictedYaw, predictedPitch, targetPoseApplied ? &resolvedTarget.target : nullptr,
-                                     selectedContent)
-                : DisplayPacket(activePacketIndex, true, queryStart);
+        const bool dispatched = packet.warpAllowed && !focusLost
+                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
+                                    : DisplayPacket(activePacketIndex, true, queryStart);
 
         if (tSlot)
         {
@@ -835,8 +715,7 @@ void AReproj_Dx12::PresenterMain()
             tSlot->presentBeginQpc = _telemetry.NowQpc();
 
         const auto presentCallStartMs = Util::MillisecondsNow();
-        const auto result = PresentCompositorFrame(1, 0, hybridOutput ? (generatedContent || !newContent) : !newAnchor,
-                                                   false);
+        const auto result = PresentCompositorFrame(1, 0, !newContent, false);
         const auto presentedAt = Util::MillisecondsNow();
         const auto presentDurationMs = presentedAt - presentCallStartMs;
         const auto poseAge = static_cast<float>(std::max(0.0, targetDisplayMs - selectedContent->sourcePoseTimestamp));
@@ -869,13 +748,6 @@ void AReproj_Dx12::PresenterMain()
             LOG_ERROR("Reproj: display-clock present failed: {:X}", (UINT) result);
             _presenterState.store(PresenterState::Failed);
             break;
-        }
-
-        if (hybridOutput && contentSequencePending)
-        {
-            ++nextContentIndex;
-            if (nextContentIndex > packet.generatedCount)
-                contentSequencePending = false;
         }
 
         constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;

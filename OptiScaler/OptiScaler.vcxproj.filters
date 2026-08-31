@@ -407,19 +407,7 @@
     <ClInclude Include="framegen\reproj\ContentFrame.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="framegen\reproj\HybridFsrGenerator.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\reproj\Kcd2Input.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\reproj\ReprojInputPredictor.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="framegen\reproj\ReprojTelemetry.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="framegen\reproj\TargetPoseResolver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="framegen\IFGFeature.h">
@@ -1220,28 +1208,16 @@
     <ClCompile Include="framegen\reproj\AReprojPresenter.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="framegen\reproj\HybridFsrGenerator.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="framegen\reproj\Kcd2Camera.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\reproj\Kcd2HudIsolation.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="framegen\reproj\Kcd2Input.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="framegen\reproj\Kcd2Scaleform.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="framegen\reproj\ReprojInputPredictor.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="framegen\reproj\ReprojTelemetry.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="framegen\reproj\TargetPoseResolver.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\IFGFeature.cpp">

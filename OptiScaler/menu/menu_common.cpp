@@ -3084,14 +3084,12 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         { FGOutput::FSRFG, "FSR FG", "FSR3/4-FG, RDNA4 autoupgrades to FSR4-FG\n\nFSR4-FG sometimes better/worse than XeFG" },
         { FGOutput::DLSSG, "DLSSG", "DLSSG output\ncan be used in conjuction with Nukem's for example" },
         { FGOutput::XeFG, "XeFG", "XeFG - heaviest, but best universal FG\n\nXeFG 3 overall deals best with HUD\n\nEnable UI Composition if HUD ghosting" },
-        { FGOutput::Reproj, "Async Timewarp", "Depth-reprojects the completed FSR/FFX-upscaled anchor at display cadence.\n\n"
+        { FGOutput::Reproj, "Async Timewarp", "Rotation-reprojects the completed FSR/FFX-upscaled anchor at display cadence.\n\n"
                                                 "No frame-interpolation dispatch is issued. Requires DX12, FG Input = Upscaler, "
                                                 "and an active FSR/FFX upscaler.\n"
-                                                "Rotation-only mouse late latch is used until a predicted camera source is available.\n"
+                                                "Camera motion is separated from rendering: the last rendered pose is extrapolated and "
+                                                "fresh raw-mouse motion is late-latched at scanout for a 120Hz steering signal.\n"
                                                 "Set Target refresh to the display rate; Source FPS cap controls only game anchors." },
-        { FGOutput::HybridTimewarp, "Hybrid Timewarp", "Generates private HUD-less FSR content, then applies a fresh full-pose timewarp at display cadence.\n\n"
-                                                        "KCD2-first, DX12 FSR/FFX only, explicitly opt-in. The generated frame never presents unwarped; "
-                                                        "Scaleform UI is composited after the final warp." },
     };
 
     // clang-format on
@@ -3133,8 +3131,6 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     const auto reprojBackend = GetBackendCode(state.api);
     const bool reprojOutputSupported = state.swapchainApi == API::DX12 && IsFsr(reprojBackend);
     outputOptions[reprojOutputIndex].set_disabled(!reprojOutputSupported, "Requires DX12 FSR/FFX upscaler input");
-    auto constexpr hybridOutputIndex = (uint32_t) FGOutput::HybridTimewarp;
-    outputOptions[hybridOutputIndex].set_disabled(!reprojOutputSupported, "Requires DX12 FSR/FFX upscaler input");
     if (IsReprojectionOutput(config->FGOutput.value_or_default()))
     {
         // The Vulkan overlay can report its own presentation API while the DX12
@@ -3946,20 +3942,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Only used by Non-blocking anchor sampling. 0 uses Source FPS cap, then half Target refresh. "
                        "Use 60 on a 120 Hz display.");
 
-        float dispatchLeadOverride = config->ReprojDispatchLeadOverrideMs.value_or_default();
-        if (ImGui::InputFloat("GPU preparation lead##reproj", &dispatchLeadOverride, 0.5f, 1.0f, "%.1f ms"))
-            config->ReprojDispatchLeadOverrideMs =
-                dispatchLeadOverride <= 0.0f ? 0.0f : std::clamp(dispatchLeadOverride, 3.0f, 16.0f);
-        ShowHelpMarker("Experimental. 0 keeps the adaptive 3-8 ms lead. Higher values submit the warp earlier before "
-                       "the next display slot, leaving the worker-owned real backbuffer ready for Present.");
-
-        bool adaptiveQueueLead = config->ReprojAdaptiveQueueLead.value_or_default();
-        if (ImGui::Checkbox("Queue-aware GPU lead##reproj", &adaptiveQueueLead))
-            config->ReprojAdaptiveQueueLead = adaptiveQueueLead;
-        ShowHelpMarker("Recommended with telemetry enabled. Learns how long KCD2's GPU queue holds the worker warp "
-                       "and expands the preparation lead before it can miss a display slot. Manual GPU preparation "
-                       "lead overrides it.");
-
         bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
         if (ImGui::Checkbox("Present-completion clock##reproj", &completionClock))
             config->ReprojPresentCompletionClock = completionClock;
@@ -3996,24 +3978,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("Late latch mouse motion##reproj", &reprojLateLatch))
             config->ReprojLateLatch = reprojLateLatch;
         ShowHelpMarker("Sample raw mouse motion at presenter scanout to timewarp the image with zero input lag.");
-
-        bool reprojInputPredictor = config->ReprojInputPredictor.value_or_default();
-        if (ImGui::Checkbox("Input-predicted timewarp##reproj", &reprojInputPredictor))
-            config->ReprojInputPredictor = reprojInputPredictor;
-        ShowHelpMarker("True timewarp: predict the camera pose at display time from fresh raw mouse input\n"
-                       "with an auto-calibrated camera-response model. Replaces Late latch when enabled\n"
-                       "and falls back to velocity extrapolation when motion is not mouse-driven.");
-
-        if (reprojInputPredictor)
-        {
-            ImGui::PushItemWidth(135.0f * menuResScale);
-            float predictorResponse = config->ReprojInputPredictorResponse.value_or_default();
-            if (ImGui::InputFloat("Predictor response##reproj", &predictorResponse, 0.05f, 0.1f, "%.2f"))
-                config->ReprojInputPredictorResponse = std::clamp(predictorResponse, 0.05f, 1.0f);
-            ShowHelpMarker("Scale on the predicted rotation: 1 = match raw input exactly,\n"
-                           "<1 under-rotates to follow games with smoothed aim");
-            ImGui::PopItemWidth();
-        }
 
         if (reprojLateLatch)
         {

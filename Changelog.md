@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.6 (2026-08-31)
+* Bare-basics timewarp: remove HybridFsrGenerator/Kcd2Input/ReprojInputPredictor/TargetPoseResolver, rate-limited velocity, adaptive dispatch lead; keep raw-mouse late latch + HUD isolation
+
 ## v10.0.1.5 (2026-08-31)
 * Grid-anchored warp input sampling: presenter warps default to the deferred late latch (constants written ~0.75ms before the present deadline) instead of jittering dispatch-time sampling; incomplete KCD2 mouse intervals hold instead of resuming velocity
 

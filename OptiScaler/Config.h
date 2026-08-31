@@ -630,9 +630,7 @@ class Config
     // a game can be tested with one timing change at a time.
     CustomOptional<bool> ReprojNonBlockingAnchorSampling { false }; // sample anchors, never sleep the game thread
     CustomOptional<float> ReprojAnchorSampleHz { 0.0f };            // 0 = SourceFramerateLimit, then TargetRefresh / 2
-    CustomOptional<float> ReprojDispatchLeadOverrideMs { 0.0f };    // 0 = adaptive; bounded to 75% of one refresh slot
     CustomOptional<bool> ReprojHighPriorityQueue { false };         // Windows only: use HIGH priority presenter queue
-    CustomOptional<bool> ReprojAdaptiveQueueLead { true }; // account for measured present-queue delay (async only)
     CustomOptional<bool> ReprojPresentCompletionClock { true }; // use completed Present timestamps, not DXGI stats
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { true };     // safer default: no generic late camera translation exists
@@ -642,17 +640,6 @@ class Config
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
     CustomOptional<float> ReprojSmoothing { 0.0f };       // 0=off, 0..0.95 EMA on camera angular velocity
     CustomOptional<bool> ReprojLateLatch { true }; // sample mouse motion at scanout to timewarp with zero input lag
-    CustomOptional<bool> ReprojInputPredictor {
-        false
-    }; // true-timewarp: warp from fresh raw input via calibrated camera-response model; replaces LateLatch when on
-    CustomOptional<float> ReprojInputPredictorResponse {
-        1.0f
-    }; // 0.05..1 predicted-rotation scale; <1 under-rotates to follow games with smoothed aim
-    // The scanout target-pose resolver remains experimental. The established
-    // async path must not switch to a second estimator unless a validated
-    // profile explicitly requests it.
-    CustomOptional<bool> ReprojTargetPoseResolver { false };
-    CustomOptional<bool> ReprojTargetPoseShadow { true };
     // Presenter warps queue behind a CPU-signaled fence and write their constant
     // slice ~0.75 ms before the present deadline. That keeps warp input sampling
     // anchored to the display-clock grid: sampling at dispatch time instead
@@ -667,7 +654,6 @@ class Config
     // Experimental, version-sensitive KCD2 late-UI interception.  It remains
     // opt-in until a retail build has been live-validated.
     CustomOptional<bool> ReprojKcd2HudIsolation { false };
-    CustomOptional<int> HybridGeneratedFrames { 1 };
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

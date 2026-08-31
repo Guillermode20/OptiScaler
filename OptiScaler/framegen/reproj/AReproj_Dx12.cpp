@@ -2,10 +2,7 @@
 #include "AReproj_Dx12.h"
 #include "Kcd2Camera.h"
 #include "Kcd2HudIsolation.h"
-#include "Kcd2Input.h"
 #include "Kcd2Scaleform.h"
-#include "ReprojInputPredictor.h"
-#include "TargetPoseResolver.h"
 
 #include <algorithm>
 #include <bit>
@@ -552,32 +549,6 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
     constants.cameraVFov = std::tan(constants.cameraVFov * 0.5f);
 }
 
-void PrepareTargetPoseConstants(RP_Constants& constants, const TargetPoseResolver::Pose& target)
-{
-    const auto right = NormalizeReprojVec3(LoadReprojVec3(constants.cameraRight));
-    const auto up = NormalizeReprojVec3(LoadReprojVec3(constants.cameraUp));
-    const auto forward = NormalizeReprojVec3(LoadReprojVec3(constants.cameraForward));
-    const auto targetRight = NormalizeReprojVec3(LoadReprojVec3(target.right));
-    const auto targetUp = NormalizeReprojVec3(LoadReprojVec3(target.up));
-    const auto targetForward = NormalizeReprojVec3(LoadReprojVec3(target.forward));
-
-    if (constants.mode == 1)
-    {
-        std::memcpy(constants.targetPosition, target.position, 3 * sizeof(float));
-        StoreReprojVec3(constants.targetRight, targetRight);
-        StoreReprojVec3(constants.targetUp, targetUp);
-        StoreReprojVec3(constants.targetForward, targetForward);
-        constants.targetPosition[3] = 1.0f;
-        return;
-    }
-    if (constants.mode != 2)
-        return;
-
-    StoreReprojVec3(constants.prevCameraRight, ReprojTransformRow(right, targetRight, targetUp, targetForward));
-    StoreReprojVec3(constants.prevCameraUp, ReprojTransformRow(up, targetRight, targetUp, targetForward));
-    StoreReprojVec3(constants.prevCameraForward, ReprojTransformRow(forward, targetRight, targetUp, targetForward));
-    constants.cameraVFov = std::tan(constants.cameraVFov * 0.5f);
-}
 } // namespace
 
 bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet)
@@ -672,259 +643,6 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
     _lastCapturedMouseX = currentMouse.TotalX;
     _lastCapturedMouseY = currentMouse.TotalY;
     _lastCapturedMouseTimestamp = sourcePoseTimestamp;
-}
-
-// Feed the input-predictor estimator from the per-slot camera arrays (sync
-// path, FfxApi/Streamline supplied poses). One sample per rendered frame.
-void AReproj_Dx12::FeedInputPredictor(int fIndex)
-{
-    if (!Config::Instance()->ReprojInputPredictor.value_or_default())
-        return;
-
-    const auto poseTimestamp = _cameraTimestamp[fIndex];
-    if (poseTimestamp <= 0.0 || poseTimestamp <= _lastPredictorFeedPoseMs)
-        return;
-
-    const auto prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
-    if (_reset[fIndex] || _reset[prevIndex] || IsCameraAllZero(fIndex) || IsCameraAllZero(prevIndex))
-        return;
-
-    const auto prevPoseTimestamp = _cameraTimestamp[prevIndex];
-    const double intervalMs =
-        prevPoseTimestamp > 0.0 && poseTimestamp > prevPoseTimestamp ? poseTimestamp - prevPoseTimestamp : 16.6;
-
-    OptiInput::RefreshMouseMotion();
-    // The camera pair spans [prevPose, pose]; correlate input over the same
-    // window so the gain estimate stays a closed-loop calibration.
-    const auto mouseAtPose = OptiInput::GetRawMouseMotionAt(poseTimestamp);
-    const auto mouseAtPrevPose = OptiInput::GetRawMouseMotionAt(prevPoseTimestamp);
-
-    float deltaYaw = 0.0f;
-    float deltaPitch = 0.0f;
-    DecomposeCameraPairRotation(_cameraForward[fIndex], _cameraForward[prevIndex], _cameraRight[prevIndex],
-                                _cameraUp[prevIndex], &deltaYaw, &deltaPitch);
-
-    ReprojInputPredictor::OnPoseSample(poseTimestamp, intervalMs, deltaYaw, deltaPitch,
-                                       static_cast<float>(mouseAtPose.TotalX - mouseAtPrevPose.TotalX),
-                                       static_cast<float>(mouseAtPose.TotalY - mouseAtPrevPose.TotalY));
-    _lastPredictorFeedPoseMs = poseTimestamp;
-}
-
-// Feed the input-predictor estimator from an async packet pose. The KCD2 hook
-// pose pair is authoritative when available; otherwise fall back to the
-// per-slot camera arrays.
-void AReproj_Dx12::FeedInputPredictorFromPacket(int sourceIndex, const RP_Constants& constants, double poseTimestampMs,
-                                                double poseIntervalMs, bool hookPose)
-{
-    if (!Config::Instance()->ReprojInputPredictor.value_or_default())
-        return;
-    if (poseTimestampMs <= 0.0 || poseTimestampMs <= _lastPredictorFeedPoseMs)
-        return;
-
-    const double intervalMs = poseIntervalMs > 1.0 ? poseIntervalMs : 16.6;
-    float deltaYaw = 0.0f;
-    float deltaPitch = 0.0f;
-    if (hookPose)
-    {
-        DecomposeCameraPairRotation(constants.cameraForward, constants.prevCameraForward, constants.prevCameraRight,
-                                    constants.prevCameraUp, &deltaYaw, &deltaPitch);
-        ReprojInputPredictor::OnKcd2PoseSample(poseTimestampMs, intervalMs, deltaYaw, deltaPitch);
-        _lastPredictorFeedPoseMs = poseTimestampMs;
-        return;
-    }
-
-    float inputX = 0.0f;
-    float inputY = 0.0f;
-    OptiInput::RefreshMouseMotion();
-    const auto mouseAtPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
-    const auto mouseAtPrevPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs - intervalMs);
-    inputX = static_cast<float>(mouseAtPose.TotalX - mouseAtPrevPose.TotalX);
-    inputY = static_cast<float>(mouseAtPose.TotalY - mouseAtPrevPose.TotalY);
-
-    const auto prevIndex = (sourceIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
-    if (_reset[sourceIndex] || _reset[prevIndex] || IsCameraAllZero(sourceIndex) || IsCameraAllZero(prevIndex))
-        return;
-    DecomposeCameraPairRotation(_cameraForward[sourceIndex], _cameraForward[prevIndex], _cameraRight[prevIndex],
-                                _cameraUp[prevIndex], &deltaYaw, &deltaPitch);
-
-    ReprojInputPredictor::OnPoseSample(poseTimestampMs, intervalMs, deltaYaw, deltaPitch, inputX, inputY);
-    _lastPredictorFeedPoseMs = poseTimestampMs;
-}
-
-// True-timewarp prediction: compose the rotation the camera will have at the
-// display deadline from the raw input stream (fresh mouse deltas since the
-// rendered pose), calibrated against rendered pose history. Replaces the
-// velocity-extrapolation term - it must never be added on top of it.
-bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawRadians, float* pitchRadians)
-{
-    if (yawRadians == nullptr || pitchRadians == nullptr || poseTimestampMs <= 0.0)
-        return false;
-
-    if (Kcd2Camera::IsAvailable())
-    {
-        ReprojInputPredictor::Kcd2PhaseModel model {};
-        if (!Kcd2Input::IsAvailable() || !ReprojInputPredictor::GetKcd2PhaseModel(&model))
-        {
-            _inputPredictorActive = false;
-            return false;
-        }
-
-        const auto nowMs = Util::MillisecondsNow();
-        const auto inputCutoffMs = poseTimestampMs - static_cast<double>(model.phaseOffsetMs);
-        if (inputCutoffMs <= 0.0 || nowMs <= inputCutoffMs ||
-            nowMs - inputCutoffMs > Config::Instance()->ReprojMaxPoseAgeMs.value_or_default())
-            return false;
-
-        Kcd2Input::MouseInterval interval {};
-        if (!Kcd2Input::QueryMouseInterval(inputCutoffMs, nowMs, interval) || !interval.complete)
-        {
-            // An incomplete window (history gap right after an anchor switch)
-            // must not fall back to rendered velocity: that resumes a stale
-            // trajectory and snaps against the next predicted slot, which reads
-            // as source-rate judder during pans. Hold while the mouse is recent;
-            // defer to the generic fallback only for gamepad/scripted motion.
-            Kcd2Input::Snapshot snapshot {};
-            if (Kcd2Input::ReadSnapshot(snapshot) && snapshot.mouseTimestampMs > 0.0 &&
-                nowMs - snapshot.mouseTimestampMs <= 100.0)
-            {
-                *yawRadians = 0.0f;
-                *pitchRadians = 0.0f;
-                _inputPredictorActive = true;
-                return true;
-            }
-            return false;
-        }
-
-        const bool yawActive = model.yawCalibrated && std::abs(interval.yaw) >= 1.0e-5;
-        const bool pitchActive = model.pitchCalibrated && std::abs(interval.pitch) >= 1.0e-5;
-        if (!yawActive && !pitchActive)
-        {
-            // A locked mouse model with no fresh delta should hold the rendered
-            // pose, not resume old rendered velocity and overshoot after the
-            // player stops. Once input is no longer recent, allow the generic
-            // fallback for gamepad or scripted camera motion.
-            Kcd2Input::Snapshot snapshot {};
-            if (Kcd2Input::ReadSnapshot(snapshot) && snapshot.mouseTimestampMs > 0.0 &&
-                nowMs - snapshot.mouseTimestampMs <= 100.0)
-            {
-                *yawRadians = 0.0f;
-                *pitchRadians = 0.0f;
-                _inputPredictorActive = true;
-                return true;
-            }
-            _inputPredictorActive = false;
-            return false;
-        }
-
-        const float response =
-            std::clamp(Config::Instance()->ReprojInputPredictorResponse.value_or_default(), 0.05f, 1.0f);
-        float yaw = yawActive ? model.gainX * static_cast<float>(interval.yaw) * response : 0.0f;
-        float pitch = pitchActive ? -model.gainY * static_cast<float>(interval.pitch) * response : 0.0f;
-        constexpr float maxRotationRad = 0.35f;
-        const float magnitude = std::hypot(yaw, pitch);
-        if (magnitude > maxRotationRad)
-        {
-            const float scale = maxRotationRad / magnitude;
-            yaw *= scale;
-            pitch *= scale;
-        }
-        *yawRadians = yaw;
-        *pitchRadians = pitch;
-        _inputPredictorActive = true;
-        return true;
-    }
-
-    const auto nowMs = Util::MillisecondsNow();
-    const auto windowMs = nowMs - poseTimestampMs;
-    if (windowMs <= 0.0 || windowMs > Config::Instance()->ReprojMaxPoseAgeMs.value_or_default())
-        return false;
-
-    float inputX = 0.0f;
-    float inputY = 0.0f;
-    const bool kcd2Available = Kcd2Camera::IsAvailable() && Kcd2Input::IsAvailable();
-    if (kcd2Available)
-    {
-        Kcd2Input::MouseInterval interval {};
-        if (Kcd2Input::QueryMouseInterval(poseTimestampMs, nowMs, interval) && interval.complete)
-        {
-            inputX = static_cast<float>(interval.yaw);
-            inputY = static_cast<float>(interval.pitch);
-        }
-        else
-        {
-            return false;
-        }
-        if (!std::isfinite(inputX) || !std::isfinite(inputY))
-            return false;
-    }
-    else
-    {
-        OptiInput::RefreshMouseMotion();
-        const auto now = OptiInput::GetRawMouseMotion();
-        const auto atPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
-        inputX = static_cast<float>(now.TotalX - atPose.TotalX);
-        inputY = static_cast<float>(now.TotalY - atPose.TotalY);
-        if (!std::isfinite(inputX) || !std::isfinite(inputY))
-            return false;
-    }
-
-    float gainX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
-    float gainY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();
-    const bool manualGain = gainX > 0.0f && gainY > 0.0f;
-    if (!manualGain && !ReprojInputPredictor::GetEstimatedGain(&gainX, &gainY))
-    {
-        _inputPredictorActive = false;
-        return false;
-    }
-
-    // Hysteresis keeps the warp path from flapping between prediction and
-    // velocity extrapolation while confidence hovers at the threshold.
-    constexpr float enterThreshold = 0.45f;
-    constexpr float exitThreshold = 0.30f;
-    const bool confident =
-        manualGain || ReprojInputPredictor::GetConfidence() >= (_inputPredictorActive ? exitThreshold : enterThreshold);
-    if (!confident || !ReprojInputPredictor::IsInputDriven(inputX, inputY))
-    {
-        _inputPredictorActive = false;
-        return false;
-    }
-
-    ReprojInputPredictor::RotationEstimate estimate {};
-    constexpr float maxRotationRad = 0.35f;
-    if (!ReprojInputPredictor::PredictRotation(gainX, gainY, inputX, inputY,
-                                               Config::Instance()->ReprojInputPredictorResponse.value_or_default(),
-                                               maxRotationRad, &estimate))
-    {
-        _inputPredictorActive = false;
-        return false;
-    }
-
-    *yawRadians = estimate.yawRadians;
-    *pitchRadians = estimate.pitchRadians;
-    _inputPredictorActive = true;
-    return true;
-}
-
-TargetPoseResolver::Result AReproj_Dx12::ResolveTargetPose(const ContentFrame& packet, double targetScanoutMs)
-{
-    TargetPoseResolver::Request request {};
-    std::memcpy(request.content.position, packet.constants.cameraPosition, 3 * sizeof(float));
-    std::memcpy(request.content.right, packet.constants.cameraRight, 3 * sizeof(float));
-    std::memcpy(request.content.up, packet.constants.cameraUp, 3 * sizeof(float));
-    std::memcpy(request.content.forward, packet.constants.cameraForward, 3 * sizeof(float));
-    request.content.verticalFov = packet.constants.cameraVFov;
-    request.content.timestampMs = packet.sourcePoseTimestamp;
-    request.content.cutGeneration = packet.sourceCutGeneration;
-    std::memcpy(request.previous.position, packet.constants.prevCameraPosition, 3 * sizeof(float));
-    std::memcpy(request.previous.right, packet.constants.prevCameraRight, 3 * sizeof(float));
-    std::memcpy(request.previous.up, packet.constants.prevCameraUp, 3 * sizeof(float));
-    std::memcpy(request.previous.forward, packet.constants.prevCameraForward, 3 * sizeof(float));
-    request.previous.verticalFov = packet.constants.cameraVFov;
-    request.previous.timestampMs = packet.sourcePoseTimestamp - packet.sourcePoseInterval;
-    request.previous.cutGeneration = packet.sourceCutGeneration;
-    request.targetScanoutMs = targetScanoutMs;
-    request.responseScale = Config::Instance()->ReprojInputPredictorResponse.value_or_default();
-    return TargetPoseResolver::Resolve(request);
 }
 
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
@@ -1112,8 +830,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         ok = CopyPacketResource(cmdList, velocity->GetResource(), velocity->state, &packet.velocity,
                                 packet.velocityState, L"Reproj_PacketVelocity");
 
-    const bool hybrid = State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
-    packet.hasDepth = ok && warpAllowed && depth && (hybrid || Config::Instance()->ReprojUseDepth.value_or_default());
+    packet.hasDepth = ok && warpAllowed && depth && Config::Instance()->ReprojUseDepth.value_or_default();
     if (packet.hasDepth)
         packet.hasDepth = CopyPacketResource(cmdList, depth->GetResource(), depth->state, &packet.depth,
                                              packet.depthState, L"Reproj_PacketDepth");
@@ -1157,7 +874,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // Keep the HUD trace lazy: WHGame.dll is loaded after OptiScaler in KCD2. This is read-only
     // and fails closed on an unknown game build.
     Kcd2Scaleform::Initialize();
-    Kcd2Input::Initialize();
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     if (kcd2CameraTimestamp > 0.0)
@@ -1186,16 +902,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             if (Kcd2Camera::DescribeProjection(projectionDescription, sizeof(projectionDescription)))
                 LOG_INFO("KCD2 camera projection: {}", projectionDescription);
         }
-
-        static double lastInputLogMs = 0.0;
-        const auto inputLogMs = Util::MillisecondsNow();
-        if (inputLogMs - lastInputLogMs > 10000.0)
-        {
-            lastInputLogMs = inputLogMs;
-            char inputDescription[256];
-            if (Kcd2Input::DescribeStats(inputDescription, sizeof(inputDescription)))
-                LOG_INFO("KCD2 late input: {}", inputDescription);
-        }
     }
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
@@ -1212,10 +918,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourceMouseTimestamp = sourceTimestamp > 0.0 ? sourceTimestamp : mouse.TimestampMs;
     packet.inputLatchReady = true;
     UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
-    // Estimator feed for input-predicted timewarp: prefer the authoritative
-    // KCD2 hook pose pair; otherwise the per-slot camera arrays.
-    FeedInputPredictorFromPacket(sourceIndex, packet.constants, sourceTimestamp, kcd2PoseIntervalMs,
-                                 kcd2CameraTimestamp > 0.0);
     packet.warpAllowed = warpAllowed && velocity;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
@@ -1224,124 +926,10 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.syncInterval = FGHooks::LastPresentSyncInterval();
     packet.presentFlags = FGHooks::LastPresentFlags();
 
-    packet.generatedCount = 0;
-    if (hybrid && packet.warpAllowed && packet.hasDepth && packet.hasCamera && packet.hasUi)
-    {
-        // FSR supplies distinct content motion while the final pass remains
-        // rotation-only for both real and generated content. Alternating depth
-        // behavior between frame kinds would create a visible cadence artifact.
-        packet.constants.mode = 2;
-        if (_hybridGenerator == nullptr)
-            _hybridGenerator = std::make_unique<HybridFsrGenerator>();
-
-        auto& generated = packet.generated[0];
-        generated.kind = ContentFrameKind::Generated;
-        generated.interpolationFraction = 0.5f;
-        generated.renderTimestamp = now;
-        const auto contentInterval = packet.sourcePoseInterval > 1.0 ? packet.sourcePoseInterval : packet.frameDelta;
-        generated.sourcePoseInterval = contentInterval;
-        generated.sourcePoseTimestamp = sourceTimestamp - contentInterval * 0.5;
-        generated.virtualContentTimestamp = generated.sourcePoseTimestamp;
-        generated.sourceCutGeneration = packet.sourceCutGeneration;
-        generated.resetGeneration = packet.resetGeneration;
-        generated.constants = packet.constants;
-        generated.constants.mode = 2;
-        generated.constants.hudlessSource = packet.constants.hudlessSource;
-
-        for (int axis = 0; axis < 3; ++axis)
-            generated.constants.cameraPosition[axis] =
-                packet.constants.prevCameraPosition[axis] +
-                (packet.constants.cameraPosition[axis] - packet.constants.prevCameraPosition[axis]) * 0.5f;
-
-        // Linearly average forward, right, and up, then orthonormalize via Gram-Schmidt
-        // to prevent shear or non-orthogonal rows in the explicit target pose.
-        float fwd[3] = {};
-        float rgt[3] = {};
-        float upVec[3] = {};
-        for (int axis = 0; axis < 3; ++axis)
-        {
-            fwd[axis] = packet.constants.prevCameraForward[axis] +
-                        (packet.constants.cameraForward[axis] - packet.constants.prevCameraForward[axis]) * 0.5f;
-            rgt[axis] = packet.constants.prevCameraRight[axis] +
-                        (packet.constants.cameraRight[axis] - packet.constants.prevCameraRight[axis]) * 0.5f;
-            upVec[axis] = packet.constants.prevCameraUp[axis] +
-                          (packet.constants.cameraUp[axis] - packet.constants.prevCameraUp[axis]) * 0.5f;
-        }
-
-        const auto normalize3 = [](float* v)
-        {
-            const float len2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-            if (len2 > 1e-12f && std::isfinite(len2))
-            {
-                const float invLen = 1.0f / std::sqrt(len2);
-                v[0] *= invLen;
-                v[1] *= invLen;
-                v[2] *= invLen;
-            }
-        };
-        const auto dot3 = [](const float* a, const float* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
-
-        normalize3(fwd);
-        const float rgtDotFwd = dot3(rgt, fwd);
-        for (int axis = 0; axis < 3; ++axis)
-            rgt[axis] -= fwd[axis] * rgtDotFwd;
-        normalize3(rgt);
-
-        // Orthonormal up from cross(forward, right), preserving sign with interpolated upVec
-        float orthoUp[3] = {
-            fwd[1] * rgt[2] - fwd[2] * rgt[1],
-            fwd[2] * rgt[0] - fwd[0] * rgt[2],
-            fwd[0] * rgt[1] - fwd[1] * rgt[0],
-        };
-        normalize3(orthoUp);
-        if (dot3(orthoUp, upVec) < 0.0f)
-        {
-            orthoUp[0] = -orthoUp[0];
-            orthoUp[1] = -orthoUp[1];
-            orthoUp[2] = -orthoUp[2];
-        }
-
-        std::memcpy(generated.constants.cameraForward, fwd, sizeof(fwd));
-        std::memcpy(generated.constants.cameraRight, rgt, sizeof(rgt));
-        std::memcpy(generated.constants.cameraUp, orthoUp, sizeof(orthoUp));
-        std::memcpy(generated.constants.prevCameraPosition, generated.constants.cameraPosition,
-                    sizeof(generated.constants.cameraPosition));
-        std::memcpy(generated.constants.prevCameraRight, generated.constants.cameraRight,
-                    sizeof(generated.constants.cameraRight));
-        std::memcpy(generated.constants.prevCameraUp, generated.constants.cameraUp,
-                    sizeof(generated.constants.cameraUp));
-        std::memcpy(generated.constants.prevCameraForward, generated.constants.cameraForward,
-                    sizeof(generated.constants.cameraForward));
-
-        const auto requestedFrames = std::clamp(Config::Instance()->HybridGeneratedFrames.value_or_default(), 1, 3);
-        if (requestedFrames != 1)
-        {
-            static bool warnedThreeFrameRequest = false;
-            if (!warnedThreeFrameRequest)
-            {
-                LOG_WARN("HybridTimewarp: {} generated frames requested; using the validated one-midpoint path",
-                         requestedFrames);
-                warnedThreeFrameRequest = true;
-            }
-        }
-
-        const auto fgBeginMs = Util::MillisecondsNow();
-        if (_hybridGenerator->Generate(_device, cmdList, packet, generated, packet.frameId, _reset[sourceIndex] != 0))
-        {
-            packet.generatedCount = 1;
-            generated.fgDurationMs = Util::MillisecondsNow() - fgBeginMs;
-        }
-    }
-
     const bool submitted = SubmitUICommandList((UINT) packetIndex);
     packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
     packet.completionFence = _uiFence;
     packet.completionFenceValue = packet.captureFenceValue;
-    for (uint32_t generatedIndex = 0; generatedIndex < packet.generatedCount; ++generatedIndex)
-    {
-        packet.generated[generatedIndex].completionFence = _uiFence;
-        packet.generated[generatedIndex].completionFenceValue = packet.captureFenceValue;
-    }
     if (!submitted)
         return false;
     return true;
@@ -1423,12 +1011,10 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
 }
 
 bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs,
-                                      uint32_t telemetryQueryStart, bool inputPredicted, float predictedYaw,
-                                      float predictedPitch, const TargetPoseResolver::Pose* targetPose,
-                                      ContentFrame* contentFrame)
+                                      uint32_t telemetryQueryStart)
 {
     auto& packet = _packets[packetIndex];
-    auto& content = contentFrame != nullptr ? *contentFrame : static_cast<ContentFrame&>(packet);
+    auto& content = static_cast<ContentFrame&>(packet);
     if (_swapChain == nullptr || _warp == nullptr || !_warp->IsInit() || content.color == nullptr ||
         packet.velocity == nullptr || !packet.warpAllowed)
         return false;
@@ -1476,11 +1062,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
                                    scanoutDeadlineMs > Util::MillisecondsNow();
     if (!deferredLateLatch)
     {
-        if (targetPose != nullptr)
-            PrepareTargetPoseConstants(constants, *targetPose);
-        else if (inputPredicted)
-            PrepareRotationConstants(constants, true, predictedYaw, predictedPitch);
-        else if (content.kind == ContentFrameKind::Generated || !ApplyLateInput(constants, packet))
+        if (!ApplyLateInput(constants, packet))
             PrepareRotationConstants(constants);
     }
     const bool useDepth = packet.hasDepth;
@@ -1544,26 +1126,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
-        const auto scanoutMidpointMs = scanoutDeadlineMs + 500.0 / std::max(1.0, TargetRefreshHz());
-        bool prepared = false;
-        if (Config::Instance()->ReprojTargetPoseResolver.value_or_default())
-        {
-            const auto lateTarget = ResolveTargetPose(content, scanoutMidpointMs);
-            if (lateTarget.qualified && !Config::Instance()->ReprojTargetPoseShadow.value_or_default())
-            {
-                PrepareTargetPoseConstants(lateConstants, lateTarget.target);
-                prepared = true;
-            }
-        }
-        if (!prepared)
-        {
-            float latePredictedYaw = 0.0f;
-            float latePredictedPitch = 0.0f;
-            if (TryInputPredictedRotation(content.sourcePoseTimestamp, &latePredictedYaw, &latePredictedPitch))
-                PrepareRotationConstants(lateConstants, true, latePredictedYaw, latePredictedPitch);
-            else if (content.kind == ContentFrameKind::Generated || !ApplyLateInput(lateConstants, packet))
-                PrepareRotationConstants(lateConstants);
-        }
+        if (!ApplyLateInput(lateConstants, packet))
+            PrepareRotationConstants(lateConstants);
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -1631,30 +1195,10 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     if (!hasDepth)
         cb.mode = 0;
 
-    // True-timewarp prediction: rotate the warp by what the camera will have
-    // done by this display deadline (fresh raw input since the rendered pose),
-    // not by the last rendered velocity. Falls back to velocity extrapolation
-    // when the estimator is not confident or the motion is not mouse-driven.
-    // Input-predicted and extrapolated warps REPLACE each other; they are
-    // never combined.
-    FeedInputPredictor(fIndex);
-    float predictedYaw = 0.0f;
-    float predictedPitch = 0.0f;
-    if (TryInputPredictedRotation(_cameraTimestamp[fIndex], &predictedYaw, &predictedPitch))
-        PrepareRotationConstants(cb, true, predictedYaw, predictedPitch);
-    else
-        PrepareRotationConstants(cb);
-
-    // Rate-limited predictor diagnostics (async stats land in the slot dumps).
-    static double lastPredictorLogMs = 0.0;
-    const auto predictorLogMs = Util::MillisecondsNow();
-    if (Config::Instance()->ReprojInputPredictor.value_or_default() && predictorLogMs - lastPredictorLogMs > 10000.0)
-    {
-        lastPredictorLogMs = predictorLogMs;
-        char predictorDescription[160];
-        if (ReprojInputPredictor::DescribeStats(predictorDescription, sizeof(predictorDescription)))
-            LOG_INFO("Reproj input predictor: {}", predictorDescription);
-    }
+    // Rotation-only reprojection: extrapolate the last rendered camera pair to
+    // the display slot. No prediction machinery; the async path additionally
+    // composes fresh raw-mouse motion via ApplyLateInput.
+    PrepareRotationConstants(cb);
 
     bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], velocity->GetResource(),
                               velocity->state, hasDepth ? depth->GetResource() : nullptr,
@@ -2282,11 +1826,6 @@ void AReproj_Dx12::Activate()
 
     _isActive = true;
     _lastDispatchedFrame = 0;
-    // Fresh calibration per FG session; stale gains across mode/context
-    // switches would poison the prediction.
-    ReprojInputPredictor::Reset();
-    _lastPredictorFeedPoseMs = 0.0;
-    _inputPredictorActive = false;
     {
         std::scoped_lock lock(_metricsMutex);
         _metricsTimestamp = 0.0;
@@ -3040,12 +2579,7 @@ void AReproj_Dx12::ReleaseObjects()
 
     DestroyAsyncPresenter();
     Kcd2HudIsolation::Reset();
-    TargetPoseResolver::Reset();
-    ReprojInputPredictor::Reset();
     _warp.reset();
-    if (_hybridGenerator != nullptr)
-        _hybridGenerator->Shutdown();
-    _hybridGenerator.reset();
 
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
@@ -3061,13 +2595,6 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_packets[i].depth);
         SAFE_RELEASE(_packets[i].velocity);
         SAFE_RELEASE(_packets[i].ui);
-        for (auto& generated : _packets[i].generated)
-        {
-            SAFE_RELEASE(generated.color);
-            generated.colorState = D3D12_RESOURCE_STATE_COMMON;
-            generated.completionFence = nullptr;
-            generated.completionFenceValue = 0;
-        }
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
@@ -3081,7 +2608,6 @@ void AReproj_Dx12::ReleaseObjects()
         _packets[i].syncInterval = 0;
         _packets[i].presentFlags = 0;
         _packets[i].warpAllowed = false;
-        _packets[i].generatedCount = 0;
         _packets[i].state.store(PacketState::Free);
 
         // Reset command list state

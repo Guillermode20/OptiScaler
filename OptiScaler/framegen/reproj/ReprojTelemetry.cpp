@@ -10,7 +10,6 @@
 #include <Logger.h>
 #include <misc/FrameLimit.h>
 #include <Util.h>
-#include "TargetPoseResolver.h"
 
 ReprojTelemetry::ReprojTelemetry()
 {
@@ -671,12 +670,6 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.finalMax = Percentile(finalSteps, nFinal, 1.0);
     snap.clampCount = clampCount;
     snap.lateLatchToGpuStartP95 = Percentile(latchToGpu, nLatchToGpu, 0.95);
-    const auto targetStats = TargetPoseResolver::GetShadowStats();
-    snap.targetCoverage = targetStats.activeCoverage;
-    snap.targetErrorP95Degrees = targetStats.errorSamples > 0 ? targetStats.errorP95Degrees
-                                                               : std::numeric_limits<float>::quiet_NaN();
-    snap.targetResolverEnabled = Config::Instance()->ReprojTargetPoseResolver.value_or_default();
-    snap.targetActiveSamples = targetStats.activeSamples;
     snap.contentReal = contentReal;
     snap.contentGenerated = contentGenerated;
     snap.cameraBasisAvailable = camAvail;

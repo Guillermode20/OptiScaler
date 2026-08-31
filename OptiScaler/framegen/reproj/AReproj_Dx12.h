@@ -3,9 +3,7 @@
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
 #include "ReprojTelemetry.h"
-#include "TargetPoseResolver.h"
 #include "ContentFrame.h"
-#include "HybridFsrGenerator.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -70,8 +68,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
 
     struct ReprojFramePacket : ContentFrame
     {
-        ContentFrame generated[3] {};
-        uint32_t generatedCount = 0;
         UINT64 frameId = 0;
         UINT64 captureFenceValue = 0;
         UINT64 retirementFenceValue = 0;
@@ -91,7 +87,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     };
 
     std::unique_ptr<RP_Dx12> _warp; // the reprojection pass (v1/v2 PSOs)
-    std::unique_ptr<HybridFsrGenerator> _hybridGenerator;
     ID3D12Resource* _lastColor[BUFFER_COUNT] = {}; // copy of the last presented real frame
     D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
     ID3D12Resource* _uiColor[BUFFER_COUNT] = {}; // sync-path UI capture composited after warping
@@ -135,9 +130,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
     bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
-                            uint32_t telemetryQueryStart = UINT32_MAX, bool inputPredicted = false,
-                            float predictedYaw = 0.0f, float predictedPitch = 0.0f,
-                            const TargetPoseResolver::Pose* targetPose = nullptr, ContentFrame* contentFrame = nullptr);
+                            uint32_t telemetryQueryStart = UINT32_MAX);
     bool DisplayPacket(int packetIndex, bool composeUi, uint32_t telemetryQueryStart = UINT32_MAX);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
@@ -145,14 +138,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void FillConstants(int fIndex, RP_Constants& constants);
     bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet);
     void UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp);
-    // Input-predicted timewarp (true ATW): calibrate the game's mouse->camera
-    // response and warp to the pose the camera will have at the display
-    // deadline. Prediction replaces the velocity-extrapolation term.
-    void FeedInputPredictor(int fIndex);
-    void FeedInputPredictorFromPacket(int sourceIndex, const RP_Constants& constants, double poseTimestampMs,
-                                      double poseIntervalMs, bool hookPose);
-    bool TryInputPredictedRotation(double poseTimestampMs, float* yawRadians, float* pitchRadians);
-    TargetPoseResolver::Result ResolveTargetPose(const ContentFrame& content, double targetScanoutMs);
     bool ShouldCaptureAnchor(double nowMs);
     int AcquirePacket();
     void RetirePackets();
@@ -208,8 +193,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsSkippedAnchorSamples = 0;
     double _realPeriodEmaMs = 0.0;         // smoothed source-frame period used for warp scaling
     double _measuredRefreshPeriodMs = 0.0; // scanout period measured from DXGI_FRAME_STATISTICS
-    uint64_t _warpRateFrameId = 0;         // frame the rate-limited warp step belongs to
-    float _lastWarpTimeStep = 0.0f;        // last dispatched warp step (rate limiting)
     double _displayClockAnchorMs = 0.0;    // MillisecondsNow()-domain estimate of the last reported vblank
     double _lastStatsQueryMs = 0.0;
     UINT64 _lastStatsSyncRefreshCount = 0;
@@ -220,10 +203,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::atomic<float> _trackedMouseSensitivityX { 0.001f };
     std::atomic<float> _trackedMouseSensitivityY { 0.001f };
     std::atomic<bool> _hasTrackedMouseSensitivity { false };
-    bool _inputPredictorActive = false;    // hysteresis state of the input-predicted warp path
-    double _lastPredictorFeedPoseMs = 0.0; // estimator dedup guard (newest fed pose)
-    uint32_t _inputPredictedSlots = 0;     // async presenter diagnostics window
-    uint32_t _predictorLogSlots = 0;
 
   protected:
     void ReleaseObjects() override final;

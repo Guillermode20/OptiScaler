@@ -200,9 +200,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojSourceFramerateLimit.set_from_config(readFloat("Reproj", "SourceFramerateLimit"));
             ReprojNonBlockingAnchorSampling.set_from_config(readBool("Reproj", "NonBlockingAnchorSampling"));
             ReprojAnchorSampleHz.set_from_config(readFloat("Reproj", "AnchorSampleHz"));
-            ReprojDispatchLeadOverrideMs.set_from_config(readFloat("Reproj", "DispatchLeadOverrideMs"));
             ReprojHighPriorityQueue.set_from_config(readBool("Reproj", "HighPriorityQueue"));
-            ReprojAdaptiveQueueLead.set_from_config(readBool("Reproj", "AdaptiveQueueLead"));
             ReprojPresentCompletionClock.set_from_config(readBool("Reproj", "PresentCompletionClock"));
             ReprojUseDepth.set_from_config(readBool("Reproj", "UseDepth"));
             ReprojRotationOnly.set_from_config(readBool("Reproj", "RotationOnly"));
@@ -211,17 +209,12 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
             ReprojSmoothing.set_from_config(readFloat("Reproj", "Smoothing"));
             ReprojLateLatch.set_from_config(readBool("Reproj", "LateLatch"));
-            ReprojInputPredictor.set_from_config(readBool("Reproj", "InputPredictor"));
-            ReprojInputPredictorResponse.set_from_config(readFloat("Reproj", "InputPredictorResponse"));
-            ReprojTargetPoseResolver.set_from_config(readBool("Reproj", "TargetPoseResolver"));
-            ReprojTargetPoseShadow.set_from_config(readBool("Reproj", "TargetPoseShadow"));
             ReprojLateLatchFence.set_from_config(readBool("Reproj", "LateLatchFence"));
             ReprojMouseSensitivityX.set_from_config(readFloat("Reproj", "MouseSensitivityX"));
             ReprojMouseSensitivityY.set_from_config(readFloat("Reproj", "MouseSensitivityY"));
             ReprojTelemetry.set_from_config(readBool("Reproj", "Telemetry"));
             ReprojTelemetryMissDump.set_from_config(readBool("Reproj", "TelemetryMissDump"));
             ReprojKcd2HudIsolation.set_from_config(readBool("Reproj", "Kcd2HudIsolation"));
-            HybridGeneratedFrames.set_from_config(readInt("HybridTimewarp", "GeneratedFrames"));
         }
 
         // OptiFG
@@ -1066,12 +1059,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojNonBlockingAnchorSampling.value_for_config()).c_str());
         ini.SetValue("Reproj", "AnchorSampleHz",
                      GetFloatValue(Instance()->ReprojAnchorSampleHz.value_for_config()).c_str());
-        ini.SetValue("Reproj", "DispatchLeadOverrideMs",
-                     GetFloatValue(Instance()->ReprojDispatchLeadOverrideMs.value_for_config()).c_str());
         ini.SetValue("Reproj", "HighPriorityQueue",
                      GetBoolValue(Instance()->ReprojHighPriorityQueue.value_for_config()).c_str());
-        ini.SetValue("Reproj", "AdaptiveQueueLead",
-                     GetBoolValue(Instance()->ReprojAdaptiveQueueLead.value_for_config()).c_str());
         ini.SetValue("Reproj", "PresentCompletionClock",
                      GetBoolValue(Instance()->ReprojPresentCompletionClock.value_for_config()).c_str());
         ini.SetValue("Reproj", "UseDepth", GetBoolValue(Instance()->ReprojUseDepth.value_for_config()).c_str());
@@ -1083,14 +1072,6 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());
         ini.SetValue("Reproj", "Smoothing", GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
         ini.SetValue("Reproj", "LateLatch", GetBoolValue(Instance()->ReprojLateLatch.value_for_config()).c_str());
-        ini.SetValue("Reproj", "InputPredictor",
-                     GetBoolValue(Instance()->ReprojInputPredictor.value_for_config()).c_str());
-        ini.SetValue("Reproj", "InputPredictorResponse",
-                     GetFloatValue(Instance()->ReprojInputPredictorResponse.value_for_config()).c_str());
-        ini.SetValue("Reproj", "TargetPoseResolver",
-                     GetBoolValue(Instance()->ReprojTargetPoseResolver.value_for_config()).c_str());
-        ini.SetValue("Reproj", "TargetPoseShadow",
-                     GetBoolValue(Instance()->ReprojTargetPoseShadow.value_for_config()).c_str());
         ini.SetValue("Reproj", "LateLatchFence",
                      GetBoolValue(Instance()->ReprojLateLatchFence.value_for_config()).c_str());
         ini.SetValue("Reproj", "MouseSensitivityX",
@@ -1102,8 +1083,6 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojTelemetryMissDump.value_for_config()).c_str());
         ini.SetValue("Reproj", "Kcd2HudIsolation",
                      GetBoolValue(Instance()->ReprojKcd2HudIsolation.value_for_config()).c_str());
-        ini.SetValue("HybridTimewarp", "GeneratedFrames",
-                     GetIntValue(Instance()->HybridGeneratedFrames.value_for_config()).c_str());
     }
 
     // XeFG output

@@ -82,8 +82,7 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
         self.assertEqual(presenter.count("PresentCompositorFrame("), 1)
-        self.assertIn("PresentCompositorFrame(1, 0, hybridOutput ?", presenter)
-        self.assertIn(": !newAnchor,", presenter)
+        self.assertIn("PresentCompositorFrame(1, 0, !newContent, false)", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
     def test_async_hot_path_has_no_per_output_debug_logging(self):
@@ -229,8 +228,8 @@ class ReprojectionTests(unittest.TestCase):
         camera = (root / "OptiScaler/framegen/reproj/Kcd2Camera.cpp").read_text(encoding="utf-8")
         self.assertIn("ExtrapolateCameraRotation", reproj)
         self.assertIn("angle * constants.timeStep", reproj)
-        self.assertIn("if (Kcd2Camera::IsAvailable())", reproj)
-        self.assertIn("unclampedStep, maxTimeStep, _lastWarpTimeStep + growthAllowance", presenter)
+        self.assertIn("Kcd2Camera::IsAvailable() ?", reproj)
+        self.assertIn("std::clamp(unclampedStep, 0.0f, maxTimeStep)", presenter)
         self.assertIn("directionReversed ? dR", camera)
 
     def test_completion_clock_is_the_safe_default_and_lead_is_slot_bounded(self):
@@ -238,21 +237,10 @@ class ReprojectionTests(unittest.TestCase):
         config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         self.assertIn("ReprojPresentCompletionClock { true }", config)
-        self.assertIn("ReprojDispatchLeadOverrideMs { 0.0f }", config)
         self.assertIn("if (!completionClock && SampleDisplayClock", presenter)
         self.assertIn("if (completionClock || nextDeadlineMs <= 0.0)", presenter)
         self.assertIn("maxUsableLeadMs", presenter)
         self.assertIn("std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs)", presenter)
-
-    def test_queue_aware_lead_uses_completed_gpu_queue_telemetry(self):
-        root = Path(__file__).resolve().parents[2]
-        config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
-        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        telemetry = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.cpp").read_text(encoding="utf-8")
-        self.assertIn("ReprojAdaptiveQueueLead { true }", config)
-        self.assertIn("RecentGpuQueueDelayMs", presenter)
-        self.assertIn("queueAwareLead ? maxUsableLeadMs", presenter)
-        self.assertIn("_recentGpuQueueDelayMs.store(slot->gpuQueueDelayMs", telemetry)
 
     def test_telemetry_separates_slips_from_absent_slots(self):
         root = Path(__file__).resolve().parents[2]
@@ -281,21 +269,6 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("SOURCE_SPIN_NS = 200'000", source_sleep)
         self.assertNotIn("isRunningOnLinux", source_sleep)
         self.assertNotIn("combined_sleep(static_cast<int64_t>(deadlineNs - nowNs))", pacer)
-
-    def test_kcd2_prediction_requires_a_locked_phase_model(self):
-        root = Path(__file__).resolve().parents[2]
-        predictor = (root / "OptiScaler/framegen/reproj/ReprojInputPredictor.cpp").read_text(encoding="utf-8")
-        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        camera = (root / "OptiScaler/framegen/reproj/Kcd2Camera.cpp").read_text(encoding="utf-8")
-        self.assertIn("KCD2_PHASE_CANDIDATE_COUNT", predictor)
-        self.assertIn("KCD2_PHASE_LOCK_STREAK", predictor)
-        self.assertIn("state.kcd2PhaseLocked", predictor)
-        self.assertIn("OnKcd2PoseSample", reproj)
-        kcd2_predict = reproj.split("if (Kcd2Camera::IsAvailable())", 1)[1].split(
-            "const auto nowMs = Util::MillisecondsNow();", 1)[0]
-        self.assertIn("GetKcd2PhaseModel", kcd2_predict)
-        self.assertIn("phaseAlignedMousePrediction", camera)
-        self.assertIn("Kcd2Input::IsAvailable", camera)
 
     def test_kcd2_input_yaw_uses_world_up_before_pitch(self):
         root = Path(__file__).resolve().parents[2]

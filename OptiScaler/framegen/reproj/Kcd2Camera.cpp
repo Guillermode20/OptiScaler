@@ -1,6 +1,5 @@
 #include "pch.h"
 #include "Kcd2Camera.h"
-#include "Kcd2Input.h"
 
 #include "Logger.h"
 #include "Util.h"
@@ -333,13 +332,7 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     }
     else
     {
-        // Phase calibration must see the same raw camera delta that will be
-        // used after the model locks. Calibrating against the EMA and then
-        // removing it changes both phase and gain at engagement time.
-        const bool phaseAlignedMousePrediction = Config::Instance()->ReprojInputPredictor.value_or_default() &&
-                                                 Kcd2Input::IsAvailable();
-        const float rawSmoothing =
-            phaseAlignedMousePrediction ? 0.0f : Config::Instance()->ReprojSmoothing.value_or_default();
+        const float rawSmoothing = Config::Instance()->ReprojSmoothing.value_or_default();
         const float smoothing = std::clamp(rawSmoothing, 0.0f, 0.95f);
         if (smoothing > 0.001f)
         {
