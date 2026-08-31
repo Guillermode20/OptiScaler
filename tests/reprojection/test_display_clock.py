@@ -128,13 +128,16 @@ class ReprojectionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         timing = (root / "OptiScaler/framegen/reproj/AReprojTiming.cpp").read_text(encoding="utf-8")
         wait = timing.split("bool AReproj_Dx12::WaitForPresenterDeadline", 1)[1]
-        self.assertIn("if (chunk > 0.2)", wait)
         self.assertIn("FrameLimit::sleepForPrecisePacingMs(chunk)", wait)
+        self.assertIn("YieldProcessor", wait)
         self.assertNotIn("_presentCv.wait_for", wait)
+        # Final spin window is 1.0ms on Proton for timer granularity, 0.2ms on Windows
+        self.assertIn("spinWindowMs", wait)
         frame_limit = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
         presenter_sleep = frame_limit.split("void FrameLimit::sleepForPrecisePacingMs", 1)[1].split(
             "void FrameLimit::paceReprojectionSource", 1)[0]
         self.assertIn("200'000", presenter_sleep)
+        self.assertIn("spinNs", presenter_sleep)
 
     def test_vblank_lock_cannot_run_away_earlier(self):
         # Per-slot bounds do not stop a sustained backwards walk when the grid

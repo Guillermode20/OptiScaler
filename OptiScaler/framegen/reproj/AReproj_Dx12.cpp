@@ -703,24 +703,39 @@ bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawR
     if (yawRadians == nullptr || pitchRadians == nullptr || poseTimestampMs <= 0.0)
         return false;
 
-    // Kcd2Input remains passive until its timing and camera response are
-    // validated live. Do not alternate KCD2 between this estimator and the
-    // rendered-pose fallback in the middle of a turn.
-    if (Kcd2Camera::IsAvailable())
-        return false;
-
     const auto nowMs = Util::MillisecondsNow();
     const auto windowMs = nowMs - poseTimestampMs;
     if (windowMs <= 0.0 || windowMs > Config::Instance()->ReprojMaxPoseAgeMs.value_or_default())
         return false;
 
-    OptiInput::RefreshMouseMotion();
-    const auto now = OptiInput::GetRawMouseMotion();
-    const auto atPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
-    const float inputX = static_cast<float>(now.TotalX - atPose.TotalX);
-    const float inputY = static_cast<float>(now.TotalY - atPose.TotalY);
-    if (!std::isfinite(inputX) || !std::isfinite(inputY))
-        return false;
+    float inputX = 0.0f;
+    float inputY = 0.0f;
+    const bool kcd2Available = Kcd2Camera::IsAvailable() && Kcd2Input::IsAvailable();
+    if (kcd2Available)
+    {
+        Kcd2Input::MouseInterval interval {};
+        if (Kcd2Input::QueryMouseInterval(poseTimestampMs, nowMs, interval) && interval.complete)
+        {
+            inputX = static_cast<float>(interval.yaw);
+            inputY = static_cast<float>(interval.pitch);
+        }
+        else
+        {
+            return false;
+        }
+        if (!std::isfinite(inputX) || !std::isfinite(inputY))
+            return false;
+    }
+    else
+    {
+        OptiInput::RefreshMouseMotion();
+        const auto now = OptiInput::GetRawMouseMotion();
+        const auto atPose = OptiInput::GetRawMouseMotionAt(poseTimestampMs);
+        inputX = static_cast<float>(now.TotalX - atPose.TotalX);
+        inputY = static_cast<float>(now.TotalY - atPose.TotalY);
+        if (!std::isfinite(inputX) || !std::isfinite(inputY))
+            return false;
+    }
 
     float gainX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
     float gainY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();

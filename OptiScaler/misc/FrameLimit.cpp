@@ -2,6 +2,7 @@
 #include "FrameLimit.h"
 
 #include "Config.h"
+#include <State.h>
 // #include "hooks/D3D11Hooks.h"
 
 #include <algorithm>
@@ -146,10 +147,12 @@ void FrameLimit::sleepForPrecisePacingMs(double ms)
     if (ms <= 0.0)
         return;
 
-    // Keep the accuracy benefit of the QPC wait, but reserve just 0.2 ms for
-    // spinning so neither the presenter nor the capped game thread monopolizes
-    // a CPU core while KCD2 renders.
-    if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), 200'000); res)
+    // Keep the accuracy benefit of the QPC wait, but reserve spin window so
+    // neither the presenter nor the capped game thread monopolizes a CPU core.
+    // On Proton the waitable timer granularity can overshoot 0.2ms by 3-10ms,
+    // so keep a larger 1.0ms spin window for the time-critical presenter.
+    const int64_t spinNs = State::Instance().isRunningOnLinux ? 1'000'000 : 200'000;
+    if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), spinNs); res)
         LOG_ERROR("Precise pacing sleep failed: {}", res);
 }
 

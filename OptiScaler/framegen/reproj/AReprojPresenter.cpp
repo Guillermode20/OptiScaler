@@ -407,13 +407,15 @@ void AReproj_Dx12::PresenterMain()
             // normally blocks for most of a refresh, so loop-top is early even when Wine's timer then
             // overshoots the requested wake by 3-10 ms. An older GPU-duration path reset this to 3 ms
             // every slot, making the old adaptation ineffective (telemetry always reported lead=3.00).
-            constexpr double LEAD_GROW_MS = 0.5;
+            const double LEAD_GROW_MS = State::Instance().isRunningOnLinux ? 1.0 : 0.5;
             constexpr double LEAD_DECAY_MS = 0.05;
             const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
             if (!fixedDispatchLead)
             {
                 const double growCap = queueAwareLead ? 20.0 : 8.0;
-                if (wakeHeadroomMs < 2.0)
+                // On Proton the timer can overshoot even with 1ms spin window; grow faster so we
+                // recover from a burst of late wakes in fewer slots.
+                if (wakeHeadroomMs < (State::Instance().isRunningOnLinux ? 2.5 : 2.0))
                     _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, growCap);
                 else if (wakeHeadroomMs > 4.0)
                     _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);

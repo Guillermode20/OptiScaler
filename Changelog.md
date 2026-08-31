@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.0.38 (2026-08-31)
+* Reproj: wire KCD2 input-predicted warps + 1ms Linux deadline spin to fix hitch
+
 ## v10.0.0.37 (2026-08-31)
 * Reproj: split presenter lifecycle and PresenterMain into AReprojPresenter.cpp
 

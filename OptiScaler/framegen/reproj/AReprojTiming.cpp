@@ -71,17 +71,24 @@ void AReproj_Dx12::WaitUntil(double deadlineMs) const
 
 bool AReproj_Dx12::WaitForPresenterDeadline(double deadlineMs)
 {
+    const double spinWindowMs = State::Instance().isRunningOnLinux ? 1.0 : 0.2;
     while (!_stopPresenter.load())
     {
         const auto remaining = deadlineMs - Util::MillisecondsNow();
-        if (remaining <= 0.2)
+        if (remaining <= spinWindowMs)
             break;
-        const double chunk = std::min(remaining - 0.2, 5.0);
-        if (chunk > 0.2)
+        const double chunk = std::min(remaining - spinWindowMs, 5.0);
+        if (chunk > spinWindowMs)
         {
             FrameLimit::sleepForPrecisePacingMs(chunk);
             if (_stopPresenter.load())
                 return false;
+        }
+        else
+        {
+            // Remaining is small but still above spin window - yield briefly to avoid busy spin
+            // This path handles Wine timer granularity where sleepForPrecisePacingMs would overshoot
+            YieldProcessor();
         }
     }
 
