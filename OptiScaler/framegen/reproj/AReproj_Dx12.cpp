@@ -399,17 +399,78 @@ ReprojVec3 ReprojTransformRow(ReprojVec3 sourceAxis, ReprojVec3 predictedRight, 
              DotReprojVec3(sourceAxis, predictedForward) };
 }
 
-ReprojVec3 ExtrapolateReprojVec3(ReprojVec3 previous, ReprojVec3 current, float scale)
-{
-    return NormalizeReprojVec3({ previous.x + (current.x - previous.x) * scale,
-                                 previous.y + (current.y - previous.y) * scale,
-                                 previous.z + (current.z - previous.z) * scale });
-}
-
 ReprojVec3 CombineReprojVec3(ReprojVec3 first, float firstScale, ReprojVec3 second, float secondScale)
 {
     return { first.x * firstScale + second.x * secondScale, first.y * firstScale + second.y * secondScale,
              first.z * firstScale + second.z * secondScale };
+}
+
+ReprojVec3 CrossReprojVec3(ReprojVec3 a, ReprojVec3 b)
+{
+    return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+}
+
+ReprojVec3 RotateReprojVec3(ReprojVec3 value, ReprojVec3 axis, float angle)
+{
+    const float sine = std::sin(angle);
+    const float cosine = std::cos(angle);
+    return CombineReprojVec3(CombineReprojVec3(value, cosine, CrossReprojVec3(axis, value), sine), 1.0f, axis,
+                             DotReprojVec3(axis, value) * (1.0f - cosine));
+}
+
+// Extrapolate the rigid previous->current camera rotation with an axis-angle
+// increment. Extrapolating and independently normalizing the three basis
+// vectors makes them non-orthogonal, which becomes visible as shear/roll when
+// KCD2 reverses a combined yaw/pitch motion or an old anchor needs a large
+// timestep.
+bool ExtrapolateCameraRotation(const RP_Constants& constants, ReprojVec3 right, ReprojVec3 up, ReprojVec3 forward,
+                               ReprojVec3* predictedRight, ReprojVec3* predictedUp, ReprojVec3* predictedForward)
+{
+    const ReprojVec3 previous[3] = { NormalizeReprojVec3(LoadReprojVec3(constants.prevCameraRight)),
+                                     NormalizeReprojVec3(LoadReprojVec3(constants.prevCameraUp)),
+                                     NormalizeReprojVec3(LoadReprojVec3(constants.prevCameraForward)) };
+    const float previousComponents[3][3] = { { previous[0].x, previous[0].y, previous[0].z },
+                                             { previous[1].x, previous[1].y, previous[1].z },
+                                             { previous[2].x, previous[2].y, previous[2].z } };
+    const float currentComponents[3][3] = { { right.x, right.y, right.z },
+                                            { up.x, up.y, up.z },
+                                            { forward.x, forward.y, forward.z } };
+
+    // Relative world-space rotation R = C * P^T. This stays a proper rotation
+    // even when the camera basis itself uses a reflected coordinate convention.
+    float rotation[3][3] {};
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int column = 0; column < 3; ++column)
+        {
+            for (int axis = 0; axis < 3; ++axis)
+                rotation[row][column] += currentComponents[axis][row] * previousComponents[axis][column];
+        }
+    }
+
+    const float cosine = std::clamp((rotation[0][0] + rotation[1][1] + rotation[2][2] - 1.0f) * 0.5f, -1.0f, 1.0f);
+    const float angle = std::acos(cosine);
+    if (!std::isfinite(angle))
+        return false;
+    if (angle < 1.0e-5f)
+    {
+        *predictedRight = right;
+        *predictedUp = up;
+        *predictedForward = forward;
+        return true;
+    }
+
+    const float denominator = 2.0f * std::sin(angle);
+    if (std::abs(denominator) < 1.0e-5f)
+        return false;
+    const auto axis = NormalizeReprojVec3({ (rotation[2][1] - rotation[1][2]) / denominator,
+                                            (rotation[0][2] - rotation[2][0]) / denominator,
+                                            (rotation[1][0] - rotation[0][1]) / denominator });
+    const float extrapolationAngle = angle * constants.timeStep;
+    *predictedRight = NormalizeReprojVec3(RotateReprojVec3(right, axis, extrapolationAngle));
+    *predictedUp = NormalizeReprojVec3(RotateReprojVec3(up, axis, extrapolationAngle));
+    *predictedForward = NormalizeReprojVec3(RotateReprojVec3(forward, axis, extrapolationAngle));
+    return true;
 }
 
 void StoreReprojVec3(float* target, ReprojVec3 value)
@@ -459,10 +520,12 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
     }
     else if (constants.mode == 2)
     {
-        const float scale = 1.0f + constants.timeStep;
-        predictedRight = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraRight), right, scale);
-        predictedUp = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraUp), up, scale);
-        predictedForward = ExtrapolateReprojVec3(LoadReprojVec3(constants.prevCameraForward), forward, scale);
+        if (!ExtrapolateCameraRotation(constants, right, up, forward, &predictedRight, &predictedUp, &predictedForward))
+        {
+            predictedRight = right;
+            predictedUp = up;
+            predictedForward = forward;
+        }
     }
 
     if (inputLatched && constants.mode == 1)
@@ -702,6 +765,17 @@ bool AReproj_Dx12::TryInputPredictedRotation(double poseTimestampMs, float* yawR
 {
     if (yawRadians == nullptr || pitchRadians == nullptr || poseTimestampMs <= 0.0)
         return false;
+
+    // KCD2's post-map input and hooked render pose are sampled on different
+    // engine phases. Live telemetry showed the fitted gain moving by ~36% and
+    // prediction flapping on/off within a turn, producing a discontinuous warp
+    // direction. Keep collecting calibration data, but use the stable hooked
+    // camera-pair rotation until a phase-aligned KCD2 target pose is qualified.
+    if (Kcd2Camera::IsAvailable())
+    {
+        _inputPredictorActive = false;
+        return false;
+    }
 
     const auto nowMs = Util::MillisecondsNow();
     const auto windowMs = nowMs - poseTimestampMs;
@@ -1926,7 +2000,6 @@ bool AReproj_Dx12::Present()
             // The virtual game buffer still needs its ownership handoff and ring advance, but no packet is copied.
             // This is deliberately non-blocking: the presenter keeps reprojecting its active anchor while KCD2
             // continues rendering at its natural rate.
-            FrameLimit::paceReprojectionSource(false);
             const auto fenceValue = ++_uiFenceValue;
             _uiAllocatorFenceValues[fIndex] = fenceValue;
             const bool advanced =
@@ -1941,6 +2014,9 @@ bool AReproj_Dx12::Present()
                 std::scoped_lock metricsLock(_metricsMutex);
                 ++_metricsSkippedAnchorSamples;
             }
+            // Pace only after handing this virtual buffer back so the sleep
+            // never delays its GPU ownership transition.
+            FrameLimit::paceReprojectionSource(true);
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
             _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
@@ -1994,9 +2070,11 @@ bool AReproj_Dx12::Present()
             packet.state.store(PacketState::Ready);
             _readyFrameId.store(packet.frameId);
             _presentCv.notify_one();
-            // Fixed source pacing remains available for A/B comparison, but non-blocking sampling
-            // intentionally never sleeps the KCD2 game thread.
-            FrameLimit::paceReprojectionSource(!nonBlockingAnchorSampling);
+            // SourceFramerateLimit is an explicit GPU-budget contract. Honor it
+            // even when anchor sampling is non-blocking; otherwise an uncapped
+            // KCD2 render queue starves the 120 Hz presenter behind 15-27 ms of
+            // work. NonBlockingAnchorSampling controls capture frequency only.
+            FrameLimit::paceReprojectionSource(true);
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
             _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);

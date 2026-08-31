@@ -352,15 +352,35 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
             {
                 const float a = smoothing;
                 const float b = 1.0f - smoothing;
+                float directionDot = 0.0f;
+                float rawMagnitude2 = 0.0f;
+                float smoothedMagnitude2 = 0.0f;
+                for (int i = 0; i < 3; ++i)
+                {
+                    const float dR = current.right[i] - previous.right[i];
+                    const float dU = current.up[i] - previous.up[i];
+                    const float dF = current.forward[i] - previous.forward[i];
+                    directionDot +=
+                        dR * g_smoothedDeltaRight[i] + dU * g_smoothedDeltaUp[i] + dF * g_smoothedDeltaForward[i];
+                    rawMagnitude2 += dR * dR + dU * dU + dF * dF;
+                    smoothedMagnitude2 += g_smoothedDeltaRight[i] * g_smoothedDeltaRight[i] +
+                                          g_smoothedDeltaUp[i] * g_smoothedDeltaUp[i] +
+                                          g_smoothedDeltaForward[i] * g_smoothedDeltaForward[i];
+                }
+                // An EMA must not carry the old angular velocity through a
+                // direction reversal. That briefly predicts the opposite of
+                // the player's input and reads as a camera wobble.
+                const bool directionReversed =
+                    rawMagnitude2 > 1.0e-10f && smoothedMagnitude2 > 1.0e-10f && directionDot <= 0.0f;
                 for (int i = 0; i < 3; ++i)
                 {
                     const float dR = current.right[i] - previous.right[i];
                     const float dU = current.up[i] - previous.up[i];
                     const float dF = current.forward[i] - previous.forward[i];
                     const float dP = current.position[i] - previous.position[i];
-                    g_smoothedDeltaRight[i] = g_smoothedDeltaRight[i] * a + dR * b;
-                    g_smoothedDeltaUp[i] = g_smoothedDeltaUp[i] * a + dU * b;
-                    g_smoothedDeltaForward[i] = g_smoothedDeltaForward[i] * a + dF * b;
+                    g_smoothedDeltaRight[i] = directionReversed ? dR : g_smoothedDeltaRight[i] * a + dR * b;
+                    g_smoothedDeltaUp[i] = directionReversed ? dU : g_smoothedDeltaUp[i] * a + dU * b;
+                    g_smoothedDeltaForward[i] = directionReversed ? dF : g_smoothedDeltaForward[i] * a + dF * b;
                     g_smoothedDeltaPos[i] = g_smoothedDeltaPos[i] * a + dP * b;
                 }
             }

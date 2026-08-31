@@ -658,7 +658,7 @@ void AReproj_Dx12::PresenterMain()
                         ? std::clamp(targetDisplayMs - _lastDisplayPresentMs, 1.0, refreshPeriodMs * 4.0)
                         : refreshPeriodMs;
                 const float growthAllowance = maxTimeStep * static_cast<float>(slotDeltaMs / realPeriodMs);
-                timeStep = std::min(unclampedStep, _lastWarpTimeStep + growthAllowance);
+                timeStep = std::min({ unclampedStep, maxTimeStep, _lastWarpTimeStep + growthAllowance });
                 _lastWarpTimeStep = timeStep;
             }
         }

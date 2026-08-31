@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.2 (2026-08-31)
+* Stabilize KCD2 timewarp cadence and camera rotation
+
 ## v10.0.1.1 (2026-08-31)
 * Fix async reprojection telemetry accounting and Proton presenter pacing
 

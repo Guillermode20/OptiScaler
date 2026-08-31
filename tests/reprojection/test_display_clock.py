@@ -198,18 +198,30 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         publish = source.split("if (captured && submitted && advanced)", 1)[1].split(
             "// Hard publication failures", 1)[0]
-        self.assertIn("FrameLimit::paceReprojectionSource(!nonBlockingAnchorSampling)", publish)
-        self.assertLess(publish.index("FrameLimit::paceReprojectionSource(!nonBlockingAnchorSampling)"), publish.index("return true"))
+        self.assertIn("FrameLimit::paceReprojectionSource(true)", publish)
+        self.assertLess(publish.index("FrameLimit::paceReprojectionSource(true)"), publish.index("return true"))
         self.assertIn("FrameLimit::paceReprojectionSource(false)", source)
 
-    def test_nonblocking_anchor_sampling_advances_virtual_ring_without_sleeping_game(self):
+    def test_nonblocking_anchor_sampling_advances_virtual_ring_before_source_pacing(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         skip_path = source.split("if (!captureThisPresent)", 1)[1].split("RecordRealFrame();", 1)[0]
         self.assertIn("SubmitReprojectionBuffer", skip_path)
         self.assertIn("AdvanceReprojectionBuffer", skip_path)
-        self.assertIn("FrameLimit::paceReprojectionSource(false)", skip_path)
+        self.assertIn("FrameLimit::paceReprojectionSource(true)", skip_path)
+        self.assertLess(skip_path.index("AdvanceReprojectionBuffer"), skip_path.index("FrameLimit::paceReprojectionSource(true)"))
         self.assertIn("ShouldCaptureAnchor", source)
+
+    def test_kcd2_rotation_path_is_rigid_and_bounded(self):
+        root = Path(__file__).resolve().parents[2]
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        camera = (root / "OptiScaler/framegen/reproj/Kcd2Camera.cpp").read_text(encoding="utf-8")
+        self.assertIn("ExtrapolateCameraRotation", reproj)
+        self.assertIn("angle * constants.timeStep", reproj)
+        self.assertIn("if (Kcd2Camera::IsAvailable())", reproj)
+        self.assertIn("unclampedStep, maxTimeStep, _lastWarpTimeStep + growthAllowance", presenter)
+        self.assertIn("directionReversed ? dR", camera)
 
     def test_completion_clock_is_the_safe_default_and_lead_is_slot_bounded(self):
         root = Path(__file__).resolve().parents[2]
