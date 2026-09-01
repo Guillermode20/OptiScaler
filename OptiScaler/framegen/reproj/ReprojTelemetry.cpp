@@ -421,6 +421,7 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     std::array<float, TRACE_SLOT_COUNT> unclampedSteps {};
     std::array<float, TRACE_SLOT_COUNT> finalSteps {};
     std::array<float, TRACE_SLOT_COUNT> latchToGpu {};
+    std::array<float, TRACE_SLOT_COUNT> lateLatchArrivalWaits {};
     std::array<float, TRACE_SLOT_COUNT> lateInputDeltas {};
     std::array<float, TRACE_SLOT_COUNT> lateInputRotations {};
     std::array<float, TRACE_SLOT_COUNT> shadowRaw {};
@@ -428,10 +429,11 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
 
     size_t nPresent = 0, nWake = 0, nWait = 0, nCmd = 0, nQueue = 0, nGpu = 0, nMargin = 0, nBlock = 0;
     size_t nRaw = 0, nSelected = 0, nRatio = 0, nPoseInterval = 0, nAge = 0, nUnclamped = 0, nFinal = 0, nShadowRaw = 0,
-           nShadowSource = 0, nLatchToGpu = 0, nLateInputDelta = 0, nLateInputRotation = 0;
+           nShadowSource = 0, nLatchToGpu = 0, nLateLatchArrivalWait = 0, nLateInputDelta = 0,
+           nLateInputRotation = 0;
 
     uint32_t scheduled = 0, presented = 0, missed = 0, skippedRep = 0, newAnchor = 0, repeated = 0, slipped = 0;
-    uint32_t lateInputApplied = 0, lateInputNonzero = 0;
+    uint32_t lateLatchGameQueue = 0, lateInputApplied = 0, lateInputNonzero = 0;
     uint32_t lateWakes = 0, clampCount = 0;
     uint32_t modeMv = 0, modeDepth = 0, modeRotation = 0, modeUnwarped = 0;
     uint32_t camAvail = 0, depthAvail = 0, depthConst = 0, hudless = 0;
@@ -521,6 +523,10 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
                 gpuDurations[nGpu++] = slot->gpuDurationMs;
             if (std::isfinite(slot->lateLatchToGpuStartMs) && nLatchToGpu < TRACE_SLOT_COUNT)
                 latchToGpu[nLatchToGpu++] = slot->lateLatchToGpuStartMs;
+            if (slot->lateLatchGameQueue)
+                ++lateLatchGameQueue;
+            if (std::isfinite(slot->lateLatchArrivalWaitMs) && nLateLatchArrivalWait < TRACE_SLOT_COUNT)
+                lateLatchArrivalWaits[nLateLatchArrivalWait++] = slot->lateLatchArrivalWaitMs;
             if (slot->lateInputApplied)
             {
                 ++lateInputApplied;
@@ -692,6 +698,8 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.finalMax = Percentile(finalSteps, nFinal, 1.0);
     snap.clampCount = clampCount;
     snap.lateLatchToGpuStartP95 = Percentile(latchToGpu, nLatchToGpu, 0.95);
+    snap.lateLatchGameQueue = lateLatchGameQueue;
+    snap.lateLatchArrivalWaitP95 = Percentile(lateLatchArrivalWaits, nLateLatchArrivalWait, 0.95);
     snap.lateInputApplied = lateInputApplied;
     snap.lateInputNonzero = lateInputNonzero;
     snap.lateInputDeltaP95 = Percentile(lateInputDeltas, nLateInputDelta, 0.95);
@@ -762,6 +770,7 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              "camera={}/{} depth={}/{} depthConstants={}/{} hudless={}/{} "
              "fps={:.1f} poseInterval.p50={:.2f} poseInterval.p95={:.2f} content.real={} content.generated={} "
              "target.coverage={:.3f} target.errorP95={:.3f} latchGpu.p95={:.2f} "
+             "lateQueue.game={} lateQueue.arrivalWaitP95={:.2f} "
              "lateInput.applied={} lateInput.nonzero={} lateInput.deltaP95={:.2f} lateInput.rotationDegP95={:.3f} "
              "slipped={} source.capRequestedHz={:.2f} source.capActive={} target.enabled={} target.samples={}",
              snap.scheduledSlots, snap.presented, snap.classifiedMisses, snap.legacyMisses, snap.newAnchorOutputs,
@@ -781,7 +790,8 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              snap.scheduledSlots, snap.depthConstantsValid, snap.scheduledSlots, snap.hudlessSource,
              snap.scheduledSlots, snap.displayFps, snap.poseIntervalP50, snap.poseIntervalP95, snap.contentReal,
              snap.contentGenerated, snap.targetCoverage, snap.targetErrorP95Degrees, snap.lateLatchToGpuStartP95,
-             snap.lateInputApplied, snap.lateInputNonzero, snap.lateInputDeltaP95,
+             snap.lateLatchGameQueue, snap.lateLatchArrivalWaitP95, snap.lateInputApplied, snap.lateInputNonzero,
+             snap.lateInputDeltaP95,
              snap.lateInputRotationDegreesP95, snap.slippedPresents, snap.sourceCapRequestedHz,
              snap.sourceCapActive ? 1 : 0,
              snap.targetResolverEnabled ? 1 : 0, snap.targetActiveSamples);

@@ -70,12 +70,13 @@ HRESULT AReproj_Dx12::PresentFrame(UINT SyncInterval, UINT Flags, bool interpola
     return result;
 }
 
-bool AReproj_Dx12::SubmitSCCommandList(int fIndex)
+bool AReproj_Dx12::SubmitSCCommandList(int fIndex, ID3D12CommandQueue* queueOverride)
 {
     if (fIndex < 0 || fIndex >= BUFFER_COUNT || !_scCommandListResetted[fIndex])
         return true;
 
-    auto queue = _presentQueue != nullptr ? _presentQueue : _gameCommandQueue;
+    auto queue =
+        queueOverride != nullptr ? queueOverride : (_presentQueue != nullptr ? _presentQueue : _gameCommandQueue);
     if (queue == nullptr)
     {
         LOG_ERROR("Can't submit SC command list, queue is nullptr");
@@ -1100,6 +1101,14 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
                                     State::Instance().activeFgOutput == FGOutput::HybridTimewarp) &&
                                    _lateLatchFence != nullptr && _presentQueue != nullptr &&
                                    scanoutDeadlineMs > Util::MillisecondsNow();
+    // KCD2 on VKD3D incurs a 10-18 ms cross-queue scheduling delay after a
+    // normal-priority presenter-queue latch is released. Put only its late-
+    // latched warp on the game's DIRECT queue, where an arrival marker + GPU
+    // wait can make the input sample immediately precede warp execution.
+    const bool gameQueueLateLatch = deferredLateLatch && Kcd2Camera::IsAvailable() &&
+                                    _gameCommandQueue != nullptr && _lateLatchArrivalFence != nullptr &&
+                                    _lateLatchArrivalEvent != nullptr;
+    auto* warpQueue = gameQueueLateLatch ? _gameCommandQueue : _presentQueue;
     if (!deferredLateLatch)
     {
         if (!ApplyLateInput(constants, packet))
@@ -1137,17 +1146,24 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
 
     UINT64 lateLatchValue = 0;
+    UINT64 lateLatchArrivalValue = 0;
     if (deferredLateLatch)
     {
         lateLatchValue = ++_lateLatchFenceValue;
-        if (FAILED(_presentQueue->Wait(_lateLatchFence, lateLatchValue)))
+        if (gameQueueLateLatch)
+        {
+            lateLatchArrivalValue = ++_lateLatchArrivalFenceValue;
+            if (FAILED(warpQueue->Signal(_lateLatchArrivalFence, lateLatchArrivalValue)))
+                return false;
+        }
+        if (FAILED(warpQueue->Wait(_lateLatchFence, lateLatchValue)))
         {
             _lateLatchFence->Signal(lateLatchValue);
             return false;
         }
     }
 
-    if (!SubmitSCCommandList(outputIndex))
+    if (!SubmitSCCommandList(outputIndex, warpQueue))
     {
         if (lateLatchValue != 0)
             _lateLatchFence->Signal(lateLatchValue);
@@ -1159,11 +1175,37 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
     if (lateLatchValue != 0)
     {
-        // Submit early enough to sit behind Proton's game-queue backlog, then
-        // release it with a target sampled immediately before the present
-        // deadline. The target itself is predicted to scanout midpoint.
+        if (_currentTelemetrySlot)
+        {
+            _currentTelemetrySlot->lateLatchGameQueue = gameQueueLateLatch;
+            if (gameQueueLateLatch)
+                _currentTelemetrySlot->lateLatchArrivalWaitMs = 0.0f;
+        }
+
+        if (gameQueueLateLatch && _lateLatchArrivalFence->GetCompletedValue() < lateLatchArrivalValue)
+        {
+            const auto waitBeginQpc = _telemetry.NowQpc();
+            const auto eventResult =
+                _lateLatchArrivalFence->SetEventOnCompletion(lateLatchArrivalValue, _lateLatchArrivalEvent);
+            const auto waitResult =
+                FAILED(eventResult) ? WAIT_FAILED : WaitForSingleObject(_lateLatchArrivalEvent, 1000);
+            if (_currentTelemetrySlot)
+                _currentTelemetrySlot->lateLatchArrivalWaitMs =
+                    static_cast<float>(_telemetry.DeltaMs(waitBeginQpc, _telemetry.NowQpc()));
+            if (waitResult != WAIT_OBJECT_0)
+            {
+                LOG_ERROR("Reproj: KCD2 game-queue arrival wait failed value {} result {}", lateLatchArrivalValue,
+                          waitResult);
+                _lateLatchFence->Signal(lateLatchValue);
+                return false;
+            }
+        }
+
+        // On the KCD2 game queue the GPU is now waiting for this sample. The
+        // generic presenter path retains its grid-anchored 0.75 ms latch.
         constexpr double LATE_SAMPLE_LEAD_MS = 0.75;
-        WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
+        if (!gameQueueLateLatch)
+            WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, packet))
@@ -2661,6 +2703,12 @@ void AReproj_Dx12::ReleaseObjects()
     SAFE_RELEASE(_uiFence);
     SAFE_RELEASE(_scFence);
     SAFE_RELEASE(_lateLatchFence);
+    SAFE_RELEASE(_lateLatchArrivalFence);
+    if (_lateLatchArrivalEvent != nullptr)
+    {
+        CloseHandle(_lateLatchArrivalEvent);
+        _lateLatchArrivalEvent = nullptr;
+    }
     if (_uiFenceEvent != nullptr)
     {
         CloseHandle(_uiFenceEvent);
@@ -2675,6 +2723,7 @@ void AReproj_Dx12::ReleaseObjects()
     _uiFenceValue = 0;
     _scFenceValue = 0;
     _lateLatchFenceValue = 0;
+    _lateLatchArrivalFenceValue = 0;
     _publishedFrameId.store(0);
     _readyFrameId.store(0);
     _presenterState.store(PresenterState::Stopped);
@@ -2803,6 +2852,27 @@ void AReproj_Dx12::CreateObjects(ID3D12Device* InDevice)
                     break;
                 }
                 _lateLatchFence->SetName(L"Reproj_LateLatchFence");
+            }
+
+            if (_lateLatchArrivalFence == nullptr)
+            {
+                result = InDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_lateLatchArrivalFence));
+                if (FAILED(result))
+                {
+                    LOG_ERROR("Create late-latch arrival fence failed: {:X}", (UINT) result);
+                    break;
+                }
+                _lateLatchArrivalFence->SetName(L"Reproj_Kcd2GameQueueArrivalFence");
+            }
+
+            if (_lateLatchArrivalEvent == nullptr)
+            {
+                _lateLatchArrivalEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                if (_lateLatchArrivalEvent == nullptr)
+                {
+                    LOG_ERROR("CreateEvent for late-latch arrival fence failed");
+                    break;
+                }
             }
 
             if (_scFenceEvent == nullptr)

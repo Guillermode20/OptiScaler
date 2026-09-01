@@ -214,6 +214,8 @@ struct ReprojSlotRecord
     float commandRecordingMs = std::numeric_limits<float>::quiet_NaN();
     float gpuQueueDelayMs = std::numeric_limits<float>::quiet_NaN();
     float lateLatchToGpuStartMs = std::numeric_limits<float>::quiet_NaN();
+    bool lateLatchGameQueue = false;
+    float lateLatchArrivalWaitMs = std::numeric_limits<float>::quiet_NaN();
     bool lateInputApplied = false;
     int64_t lateInputDeltaX = 0;
     int64_t lateInputDeltaY = 0;
@@ -316,6 +318,8 @@ struct ReprojTelemetrySnapshot
     float finalMax = std::numeric_limits<float>::quiet_NaN();
     uint32_t clampCount = 0;
     float lateLatchToGpuStartP95 = std::numeric_limits<float>::quiet_NaN();
+    uint32_t lateLatchGameQueue = 0;
+    float lateLatchArrivalWaitP95 = std::numeric_limits<float>::quiet_NaN();
     uint32_t lateInputApplied = 0;
     uint32_t lateInputNonzero = 0;
     float lateInputDeltaP95 = std::numeric_limits<float>::quiet_NaN();
