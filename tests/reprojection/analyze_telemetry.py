@@ -42,8 +42,6 @@ TELEMETRY_EXT_RE = re.compile(
 
 LATE_INPUT_EXT_RE = re.compile(
     r"latchGpu\.p95=(?P<latchGpuP95>[-\d\.NaN]+) "
-    r"(?:lateQueue\.game=(?P<lateQueueGame>\d+) "
-    r"lateQueue\.arrivalWaitP95=(?P<lateQueueArrivalWaitP95>[-\d\.NaN]+) )?"
     r"lateInput\.applied=(?P<lateInputApplied>\d+) lateInput\.nonzero=(?P<lateInputNonzero>\d+) "
     r"lateInput\.deltaP95=(?P<lateInputDeltaP95>[-\d\.NaN]+) "
     r"lateInput\.rotationDegP95=(?P<lateInputRotationDegP95>[-\d\.NaN]+)"
@@ -199,14 +197,6 @@ def analyze(path):
             print(f"Late input rotation p95: {percentile(rotation_p95, 0.95):.3f} deg")
         if latch_gpu:
             print(f"Late-latch signal-to-GPU-start p95: {percentile(latch_gpu, 0.95):.2f} ms")
-        game_queue_slots = sum(t.get("lateQueueGame", 0) or 0 for t in late_input_windows)
-        arrival_wait = [t.get("lateQueueArrivalWaitP95") for t in late_input_windows
-                        if t.get("lateQueueArrivalWaitP95") is not None]
-        if game_queue_slots or arrival_wait:
-            queue_summary = f"KCD2 game-queue latch: {game_queue_slots} slots"
-            if arrival_wait:
-                queue_summary += f" | arrival wait p95 {percentile(arrival_wait, 0.95):.2f} ms"
-            print(queue_summary)
 
     # Timestep
     stepF95 = [t["stepF95"] for t in telemetry if t.get("stepF95") is not None]

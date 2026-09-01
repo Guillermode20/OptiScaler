@@ -111,9 +111,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT64 _presentTimestampFrequency = 0;
     ID3D12Fence* _lateLatchFence = nullptr;
     UINT64 _lateLatchFenceValue = 0;
-    ID3D12Fence* _lateLatchArrivalFence = nullptr;
-    UINT64 _lateLatchArrivalFenceValue = 0;
-    HANDLE _lateLatchArrivalEvent = nullptr;
     ReprojTelemetry _telemetry;
     ReprojSlotRecord* _currentTelemetrySlot = nullptr;
     class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use
@@ -160,7 +157,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool WaitForPresenterDeadline(double deadlineMs);
     bool DrainGpuWork();
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated = false); // skip-flag wrapped present
-    bool SubmitSCCommandList(int fIndex, ID3D12CommandQueue* queueOverride = nullptr); // close + execute SC list
+    bool SubmitSCCommandList(int fIndex);                      // close + execute the SC command list
     bool WaitForSCAllocator(int fIndex);                       // wait for the previous warp on this slot to finish
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
     bool IsCameraAllZero(int fIndex) const;

@@ -179,12 +179,6 @@ Known issues / limitations:
   ~98 FPS). Do not retry CPU-blocking queue-arrival latching. The next architecture experiment should avoid normal
   cross-queue scheduling latency—likely submit KCD2 warp work on the game queue with explicit ordering, or revisit a
   carefully bounded priority strategy; the previous high-priority presenter starved source rendering to ~35 FPS.
-  The KCD2-only same-game-queue experiment now selects `_gameCommandQueue` only for deferred packet warps after
-  `Kcd2Camera::IsAvailable()`: enqueue arrival signal -> GPU wait -> warp command list -> SC completion signal, wait
-  for arrival on CPU, write fresh constants, then release the GPU. Generic/DRG output remains on `_presentQueue`.
-  Telemetry keys `lateQueue.game` and `lateQueue.arrivalWaitP95` identify this path. On every post-Wait error, signal
-  `_lateLatchFence` before returning; otherwise the game's own DIRECT queue deadlocks. Acceptance gate: latchGpu p95
-  <1–2 ms, output >=116 FPS, interval p95 ~8–10 ms, and effective drops <2%; revert immediately if these fail.
 - Late-latch yaw composes around CryEngine world Z, then pitch around the yawed camera-right axis (KCD2 only; generic
   cameras keep their local-up convention). Never yaw around the camera's local up vector: it tilts with pitch and
   produces roll/diagonal movement when panning horizontally while looking steeply up or down.
