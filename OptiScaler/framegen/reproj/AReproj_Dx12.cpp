@@ -1098,8 +1098,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     constants.timeStep = timeStep;
     const bool deferredLateLatch = (Config::Instance()->ReprojLateLatchFence.value_or_default() ||
                                     State::Instance().activeFgOutput == FGOutput::HybridTimewarp) &&
-                                   _lateLatchFence != nullptr && _lateLatchArrivalFence != nullptr &&
-                                   _lateLatchArrivalEvent != nullptr && _presentQueue != nullptr &&
+                                   _lateLatchFence != nullptr && _presentQueue != nullptr &&
                                    scanoutDeadlineMs > Util::MillisecondsNow();
     if (!deferredLateLatch)
     {
@@ -1138,17 +1137,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
 
     UINT64 lateLatchValue = 0;
-    UINT64 lateLatchArrivalValue = 0;
     if (deferredLateLatch)
     {
         lateLatchValue = ++_lateLatchFenceValue;
-        lateLatchArrivalValue = ++_lateLatchArrivalFenceValue;
-        // Mark the exact point where older game/presenter work has drained,
-        // then hold this warp behind the CPU-released late-latch fence. Sampling
-        // only by the software deadline was still 10-17 ms before GPU execution
-        // on KCD2 because the shared direct queue was backlogged.
-        if (FAILED(_presentQueue->Signal(_lateLatchArrivalFence, lateLatchArrivalValue)) ||
-            FAILED(_presentQueue->Wait(_lateLatchFence, lateLatchValue)))
+        if (FAILED(_presentQueue->Wait(_lateLatchFence, lateLatchValue)))
         {
             _lateLatchFence->Signal(lateLatchValue);
             return false;
@@ -1163,35 +1155,13 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
 
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
-    if (_currentTelemetrySlot)
-    {
-        if (useTelemetryQuery)
-            _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
-        // Record actual submission before an arrival-latch CPU wait. The outer
-        // presenter must not replace these with the later return timestamp.
-        const auto submittedQpc = _telemetry.NowQpc();
-        _currentTelemetrySlot->commandRecordingEndQpc = submittedQpc;
-        _currentTelemetrySlot->queueSubmitQpc = submittedQpc;
-    }
+    if (_currentTelemetrySlot && useTelemetryQuery)
+        _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
     if (lateLatchValue != 0)
     {
-        if (_lateLatchArrivalFence->GetCompletedValue() < lateLatchArrivalValue)
-        {
-            const auto eventResult =
-                _lateLatchArrivalFence->SetEventOnCompletion(lateLatchArrivalValue, _lateLatchArrivalEvent);
-            const auto waitResult =
-                FAILED(eventResult) ? WAIT_FAILED : WaitForSingleObject(_lateLatchArrivalEvent, 1000);
-            if (waitResult != WAIT_OBJECT_0)
-            {
-                LOG_ERROR("Reproj: late-latch queue-arrival wait failed value {} result {}", lateLatchArrivalValue,
-                          waitResult);
-                _lateLatchFence->Signal(lateLatchValue); // never leave the GPU queue blocked
-                return false;
-            }
-        }
-
-        // If the queue drained early, retain the scanout-grid sampling target;
-        // otherwise sample immediately now that the GPU is waiting for us.
+        // Submit early enough to sit behind Proton's game-queue backlog, then
+        // release it with a target sampled immediately before the present
+        // deadline. The target itself is predicted to scanout midpoint.
         constexpr double LATE_SAMPLE_LEAD_MS = 0.75;
         WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
         auto lateConstants = content.constants;
@@ -2691,12 +2661,6 @@ void AReproj_Dx12::ReleaseObjects()
     SAFE_RELEASE(_uiFence);
     SAFE_RELEASE(_scFence);
     SAFE_RELEASE(_lateLatchFence);
-    SAFE_RELEASE(_lateLatchArrivalFence);
-    if (_lateLatchArrivalEvent != nullptr)
-    {
-        CloseHandle(_lateLatchArrivalEvent);
-        _lateLatchArrivalEvent = nullptr;
-    }
     if (_uiFenceEvent != nullptr)
     {
         CloseHandle(_uiFenceEvent);
@@ -2711,7 +2675,6 @@ void AReproj_Dx12::ReleaseObjects()
     _uiFenceValue = 0;
     _scFenceValue = 0;
     _lateLatchFenceValue = 0;
-    _lateLatchArrivalFenceValue = 0;
     _publishedFrameId.store(0);
     _readyFrameId.store(0);
     _presenterState.store(PresenterState::Stopped);
@@ -2840,27 +2803,6 @@ void AReproj_Dx12::CreateObjects(ID3D12Device* InDevice)
                     break;
                 }
                 _lateLatchFence->SetName(L"Reproj_LateLatchFence");
-            }
-
-            if (_lateLatchArrivalFence == nullptr)
-            {
-                result = InDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_lateLatchArrivalFence));
-                if (FAILED(result))
-                {
-                    LOG_ERROR("Create late-latch arrival fence failed: {:X}", (UINT) result);
-                    break;
-                }
-                _lateLatchArrivalFence->SetName(L"Reproj_LateLatchArrivalFence");
-            }
-
-            if (_lateLatchArrivalEvent == nullptr)
-            {
-                _lateLatchArrivalEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                if (_lateLatchArrivalEvent == nullptr)
-                {
-                    LOG_ERROR("CreateEvent for late-latch arrival fence failed");
-                    break;
-                }
             }
 
             if (_scFenceEvent == nullptr)

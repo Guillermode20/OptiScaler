@@ -171,13 +171,14 @@ Known issues / limitations:
   pan proved constants were nonzero but exposed two latency sources: (1) packet `sourceMouseX/Y` must come from
   `GetRawMouseMotionAt(sourcePoseTimestamp)`, never publication-time totals, or input arriving between camera update
   and Present is discarded and each new 60 Hz anchor resets one output slot to zero steering; sensitivity calibration
-  must use the same timestamp-aligned history; (2) the first deferred-fence implementation reached warp GPU start
-  10–17 ms after its CPU signal because the present queue was backlogged. Queue-arrival late latching now enqueues an
-  arrival-fence signal immediately before the GPU wait, submits the warp, waits on CPU until older queue work drains,
-  then samples input and releases the waiting GPU (while retaining the 0.75 ms deadline target if the queue arrives
-  early). Always release `_lateLatchFence` on every failure path or the shared direct queue deadlocks. This deliberately
-  makes queue backlog visible as presenter lateness/skipped slots instead of silently turning fresh input stale; a
-  separate low-latency queue remains the next architecture step if shared-queue stalls are too frequent.
+  must use the same timestamp-aligned history; (2) the deferred fence currently reaches warp GPU start 10–17 ms after
+  its CPU signal because VKD3D serializes/schedules the normal-priority presenter DIRECT queue behind KCD2's game
+  queue. A queue-arrival-fence experiment (`deef3cde`, reverted) waited until older presenter work drained before
+  releasing the warp. It only reduced `latchGpu.p95` to ~6–12 ms because VKD3D yielded to the game queue again after
+  release, while cadence regressed from ~1.9% to 7.1% effective drops (interval p95 10.7 -> 19.6 ms, output sometimes
+  ~98 FPS). Do not retry CPU-blocking queue-arrival latching. The next architecture experiment should avoid normal
+  cross-queue scheduling latency—likely submit KCD2 warp work on the game queue with explicit ordering, or revisit a
+  carefully bounded priority strategy; the previous high-priority presenter starved source rendering to ~35 FPS.
 - Late-latch yaw composes around CryEngine world Z, then pitch around the yawed camera-right axis (KCD2 only; generic
   cameras keep their local-up convention). Never yaw around the camera's local up vector: it tilts with pitch and
   produces roll/diagonal movement when panning horizontally while looking steeply up or down.
