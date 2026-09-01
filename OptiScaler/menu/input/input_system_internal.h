@@ -382,6 +382,7 @@ struct InputState
     DWORD RawInputPumpThreadId = 0;
     bool RawInputPumpActive = false;
     std::uint64_t RawInputPumpMessageCount = 0;
+    std::uint64_t RawInputPumpDeltaCount = 0; // hook events that fed real motion deltas
 
     float MouseWheel = 0.0f;
     RawMouseMotion RawMouseMotionState {};

@@ -258,7 +258,8 @@ void LogInputHealthSnapshotLocked(const char* origin)
 #else
         LOG_DEBUG("{} health frame:{} mode:{} target:{} input:{} focused:{} menu:{} subclassed:{} hooks:{} "
                   "recvWnd:{} recvQueue:{} recvRaw:{} polled:{} rawMouse:{} rawKeyboard:{} trackedHooks:{} "
-                  "pump:{} pumpHook:{} xinput:{} dinput:{} hidMouse:{} hidKeyboard:{} hidGamepad:{}",
+                  "pump:{} pumpHook:{} pumpMsg:{} pumpDeltas:{} xinput:{} dinput:{} hidMouse:{} hidKeyboard:{} "
+                  "hidGamepad:{}",
                   origin != nullptr ? origin : "?", frameIndex, AcquisitionModeName(_state.AcquisitionMode),
                   static_cast<void*>(_state.TargetHwnd), static_cast<void*>(_state.InputHwnd), YesNo(_state.Focused),
                   YesNo(_state.MenuVisible), YesNo(_state.WndProcSubclassed), YesNo(_state.HooksInstalled),
@@ -266,7 +267,8 @@ void LogInputHealthSnapshotLocked(const char* origin)
                   YesNo(_state.ReceivedRawInputThisFrame), YesNo(_state.PolledInputActive),
                   YesNo(_state.RawMouseRegistered), YesNo(_state.RawKeyboardRegistered),
                   CountTrackedWindowsHooksLocked(), YesNo(_state.RawInputPumpActive),
-                  YesNo(_state.RawInputPumpHook != nullptr), YesNo(_state.XInputModuleLoaded),
+                  YesNo(_state.RawInputPumpHook != nullptr), _state.RawInputPumpMessageCount,
+                  _state.RawInputPumpDeltaCount, YesNo(_state.XInputModuleLoaded),
                   YesNo(_state.DirectInputModuleLoaded), YesNo(_state.HidMouseHandleSeen),
                   YesNo(_state.HidKeyboardHandleSeen), YesNo(_state.HidGamepadHandleSeen));
 #endif
@@ -916,6 +918,7 @@ void ResetStateAfterShutdown()
     _state.RawInputPumpThreadId = 0;
     _state.RawInputPumpActive = false;
     _state.RawInputPumpMessageCount = 0;
+    _state.RawInputPumpDeltaCount = 0;
     _state.RawInputPumpHook = nullptr;
     _state.RawInputPumpLastScreenValid = false;
     _state.RawInputPumpLastMotionMs = 0.0;

@@ -839,6 +839,7 @@ LRESULT CALLBACK RawInputPumpLowLevelMouseProc(int code, WPARAM wParam, LPARAM l
         // while the pump is the active accumulator, so no double counting).
         AccumulateRelativeMouseMotionLocked(deltaX, deltaY);
         _state.RawInputPumpMessageCount++;
+        _state.RawInputPumpDeltaCount++;
         _state.RawInputPumpLastMotionMs = RawInputPumpNowMs();
     }
 
@@ -884,13 +885,18 @@ DWORD WINAPI RawInputPumpThreadMain(LPVOID)
 
     LOG_INFO("raw input pump started (WH_MOUSE_LL hook:{})", static_cast<void*>(hook));
 
+    double lastHeartbeatMs = RawInputPumpNowMs();
+
     // The low-level hook is dispatched through this thread's message queue, so
     // the pump must run a message loop. It paces at the OS cursor event rate
     // (mouse report rate) instead of the game's render cadence.
     while (stopEvent != nullptr && hook != nullptr)
     {
+        // 5 s heartbeat wake: MsgWaitForMultipleObjectsEx may never return if
+        // the OS cursor is fully pinned (no WM_MOUSEMOVE delivered at all), and
+        // we need periodic proof of whether the hook receives motion.
         const DWORD waitResult =
-            MsgWaitForMultipleObjectsEx(1, &stopEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            MsgWaitForMultipleObjectsEx(1, &stopEvent, 5000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (waitResult == WAIT_OBJECT_0)
             break; // stop event
 
@@ -910,6 +916,23 @@ DWORD WINAPI RawInputPumpThreadMain(LPVOID)
             pumped++;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+        }
+
+        const double nowMs = RawInputPumpNowMs();
+        if (nowMs - lastHeartbeatMs >= 5000.0)
+        {
+            lastHeartbeatMs = nowMs;
+            std::uint64_t msgs = 0;
+            std::uint64_t deltas = 0;
+            double lastMotionMs = 0.0;
+            {
+                std::unique_lock lock(_state.Mutex);
+                msgs = _state.RawInputPumpMessageCount;
+                deltas = _state.RawInputPumpDeltaCount;
+                lastMotionMs = _state.RawInputPumpLastMotionMs;
+            }
+            LOG_INFO("raw input pump heartbeat msgs:{} deltas:{} lastMotionMs:{:.0f} ageMs:{:.0f}", msgs, deltas,
+                     lastMotionMs, lastMotionMs > 0.0 ? nowMs - lastMotionMs : 0.0);
         }
     }
 
