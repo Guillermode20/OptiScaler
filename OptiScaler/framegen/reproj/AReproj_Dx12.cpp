@@ -612,7 +612,11 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
                                 _cameraUp[prevIndex], &yaw, &pitch);
 
     OptiInput::RefreshMouseMotion();
-    const auto currentMouse = OptiInput::GetRawMouseMotion();
+    // Compare camera pairs against the input totals at their pose timestamps.
+    // Sampling "now" here includes motion that happened after the camera was
+    // rendered and biases the auto sensitivity low or makes its sign test fail.
+    const auto currentMouse = sourcePoseTimestamp > 0.0 ? OptiInput::GetRawMouseMotionAt(sourcePoseTimestamp)
+                                                        : OptiInput::GetRawMouseMotion();
     if (_lastCapturedMouseTimestamp > 0.0 && sourcePoseTimestamp > _lastCapturedMouseTimestamp)
     {
         const double dX = static_cast<double>(currentMouse.TotalX - _lastCapturedMouseX);
@@ -942,10 +946,16 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     if (!packet.hasDepth && !packet.hasCamera)
         packet.constants.mode = 0;
     OptiInput::RefreshMouseMotion();
-    const auto mouse = OptiInput::GetRawMouseMotion();
+    // The late-latch baseline must match the input that produced the captured
+    // camera pose, not the newer input totals at packet publication. Using the
+    // publication-time totals discarded all motion between camera update and
+    // Present on every source frame, making the first output after each 60 Hz
+    // anchor unsteered and preserving a visible 60 Hz input cadence.
+    const auto mouse = sourceTimestamp > 0.0 ? OptiInput::GetRawMouseMotionAt(sourceTimestamp)
+                                             : OptiInput::GetRawMouseMotion();
     packet.sourceMouseX = mouse.TotalX;
     packet.sourceMouseY = mouse.TotalY;
-    packet.sourceMouseTimestamp = sourceTimestamp > 0.0 ? sourceTimestamp : mouse.TimestampMs;
+    packet.sourceMouseTimestamp = mouse.TimestampMs;
     packet.inputLatchReady = true;
     UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
     packet.warpAllowed = warpAllowed && velocity;

@@ -167,7 +167,13 @@ Known issues / limitations:
   `lateInput.applied/nonzero/deltaP95/rotationDegP95`; these fields, not `step.final` or `anchorAge`, prove input
   steering because late input changes the submitted rotation constants without changing anchor-age timestep math.
   `latchGpu.p95` is signal-to-GPU-start timing; it is derived when asynchronous GPU query results arrive (not in the
-  earlier CPU slot finalization), and by itself does not prove a nonzero mouse rotation.
+  earlier CPU slot finalization), and by itself does not prove a nonzero mouse rotation. The first instrumented KCD2
+  pan proved constants were nonzero but exposed two latency sources: (1) packet `sourceMouseX/Y` must come from
+  `GetRawMouseMotionAt(sourcePoseTimestamp)`, never publication-time totals, or input arriving between camera update
+  and Present is discarded and each new 60 Hz anchor resets one output slot to zero steering; sensitivity calibration
+  must use the same timestamp-aligned history; (2) the deferred fence currently reaches warp GPU start 10–17 ms after
+  its CPU signal because the present queue is backlogged. Fix/validate the timestamp baseline first; queue-arrival late
+  latching (or a separate queue) is the next architecture step if input remains delayed.
 - Late-latch yaw composes around CryEngine world Z, then pitch around the yawed camera-right axis (KCD2 only; generic
   cameras keep their local-up convention). Never yaw around the camera's local up vector: it tilts with pitch and
   produces roll/diagonal movement when panning horizontally while looking steeply up or down.
