@@ -117,6 +117,16 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     HANDLE _presentWaitableObject = nullptr;
     bool _asyncDowngraded = false;
 
+    // COMPUTE queue for async warp — not serialized with the game's DIRECT queue
+    // on VKD3D, eliminating the 10-17ms scheduling delay that breaks per-slot steering.
+    ID3D12CommandQueue* _computeQueue = nullptr;
+    ID3D12CommandAllocator* _computeAllocator[BUFFER_COUNT] = {};
+    ID3D12GraphicsCommandList* _computeCommandList[BUFFER_COUNT] = {};
+    bool _computeCommandListResetted[BUFFER_COUNT] = {};
+    ID3D12Fence* _computeFence = nullptr;
+    UINT64 _computeFenceValue = 0;
+    UINT64 _computeAllocatorFenceValues[BUFFER_COUNT] = {};
+
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
     UINT64 _scFenceValue = 0;  // monotonic SC fence value (fence outlives context recreate)
@@ -159,6 +169,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated = false); // skip-flag wrapped present
     bool SubmitSCCommandList(int fIndex);                      // close + execute the SC command list
     bool WaitForSCAllocator(int fIndex);                       // wait for the previous warp on this slot to finish
+    ID3D12GraphicsCommandList* GetComputeCommandList(int fIndex);
+    bool SubmitComputeCommandList(int fIndex);
+    bool WaitForComputeAllocator(int fIndex);
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
     bool IsCameraAllZero(int fIndex) const;
     bool IsPoseFresh(double timestamp, float* ageMs = nullptr) const;

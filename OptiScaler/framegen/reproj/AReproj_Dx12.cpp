@@ -138,6 +138,108 @@ bool AReproj_Dx12::WaitForSCAllocator(int fIndex)
     return true;
 }
 
+ID3D12GraphicsCommandList* AReproj_Dx12::GetComputeCommandList(int fIndex)
+{
+    if (fIndex < 0 || fIndex >= BUFFER_COUNT || _computeCommandList[fIndex] == nullptr)
+        return nullptr;
+    if (!_computeCommandListResetted[fIndex])
+    {
+        if (FAILED(_computeAllocator[fIndex]->Reset()))
+        {
+            LOG_ERROR("Reproj: compute allocator Reset failed slot {}", fIndex);
+            return nullptr;
+        }
+        if (FAILED(_computeCommandList[fIndex]->Reset(_computeAllocator[fIndex], nullptr)))
+        {
+            LOG_ERROR("Reproj: compute command list Reset failed slot {}", fIndex);
+            return nullptr;
+        }
+        _computeCommandListResetted[fIndex] = true;
+    }
+    return _computeCommandList[fIndex];
+}
+
+bool AReproj_Dx12::SubmitComputeCommandList(int fIndex)
+{
+    if (fIndex < 0 || fIndex >= BUFFER_COUNT || !_computeCommandListResetted[fIndex])
+        return true;
+
+    if (_computeQueue == nullptr)
+    {
+        LOG_ERROR("Reproj: compute queue is nullptr");
+        return false;
+    }
+
+    auto closeResult = _computeCommandList[fIndex]->Close();
+    if (closeResult != S_OK)
+    {
+        LOG_ERROR("Reproj: compute command list Close error slot {}: {:X}", fIndex, (UINT) closeResult);
+        return false;
+    }
+
+    _computeQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_computeCommandList[fIndex]);
+    _computeCommandListResetted[fIndex] = false;
+
+    if (_computeFence != nullptr)
+    {
+        ++_computeFenceValue;
+        _computeAllocatorFenceValues[fIndex] = _computeFenceValue;
+        const auto result = _computeQueue->Signal(_computeFence, _computeFenceValue);
+        if (FAILED(result))
+        {
+            LOG_ERROR("Reproj: compute queue Signal failed slot {}: {:X}", fIndex, (UINT) result);
+            return false;
+        }
+        // Also signal the SC (packet-retirement) fence so RetirePackets can
+        // safely recycle the packet once the compute warp that consumed its
+        // resources completes. _scFence is a device-wide fence, so signaling it
+        // from the compute queue is valid.
+        if (_scFence != nullptr)
+        {
+            const auto scValue = ++_scFenceValue;
+            _scAllocatorFenceValues[fIndex] = scValue;
+            const auto scResult = _computeQueue->Signal(_scFence, scValue);
+            if (FAILED(scResult))
+            {
+                LOG_ERROR("Reproj: compute queue SC fence Signal failed slot {}: {:X}", fIndex, (UINT) scResult);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool AReproj_Dx12::WaitForComputeAllocator(int fIndex)
+{
+    if (_computeFence == nullptr || fIndex < 0 || fIndex >= BUFFER_COUNT)
+        return true;
+
+    const auto fenceValue = _computeAllocatorFenceValues[fIndex];
+    if (fenceValue == 0)
+        return true;
+
+    if (_computeFence->GetCompletedValue() >= fenceValue)
+        return true;
+
+    // Reuse the SC fence event for waiting (both are just HANDLE events)
+    if (_scFenceEvent == nullptr)
+        return false;
+
+    if (FAILED(_computeFence->SetEventOnCompletion(fenceValue, _scFenceEvent)))
+    {
+        LOG_ERROR("Reproj: compute allocator fence SetEventOnCompletion failed slot {}", fIndex);
+        return false;
+    }
+
+    if (WaitForSingleObject(_scFenceEvent, 5000) != WAIT_OBJECT_0)
+    {
+        LOG_ERROR("Reproj: compute allocator fence wait failed slot {}, completed {}", fIndex,
+                  _computeFence->GetCompletedValue());
+        return false;
+    }
+    return true;
+}
+
 DXGI_FORMAT AReproj_Dx12::NormalizeReprojFormat(DXGI_FORMAT format)
 {
     format = WrappedIDXGISwapChain4::ReprojectionResourceFormat(format);
@@ -983,14 +1085,20 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
 
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
-    if (!WaitForSCAllocator(outputIndex))
+
+    const bool useCompute = _computeQueue != nullptr;
+
+    if (useCompute ? !WaitForComputeAllocator(outputIndex) : !WaitForSCAllocator(outputIndex))
         return false;
 
-    auto cmdList = GetSCCommandList(outputIndex);
+    auto cmdList = useCompute ? GetComputeCommandList(outputIndex) : GetSCCommandList(outputIndex);
     if (cmdList == nullptr)
         return false;
 
-    _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
+    // Reserve the SC retirement fence value for the NON-compute path; the compute
+    // path reserves inside SubmitComputeCommandList.
+    if (!useCompute)
+        _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
     // Telemetry: use sequence-indexed query if provided, otherwise fallback to outputIndex
     uint32_t queryStart = telemetryQueryStart;
@@ -1016,7 +1124,10 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
             cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, queryStart, 2,
                                       _warpTimestampReadback, queryStart * sizeof(UINT64));
         }
-        SubmitSCCommandList(outputIndex);
+        if (useCompute)
+            SubmitComputeCommandList(outputIndex);
+        else
+            SubmitSCCommandList(outputIndex);
         packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
         if (_currentTelemetrySlot && useTelemetryQuery)
             _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
@@ -1030,8 +1141,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
     ResourceBarrier(cmdList, packet.color, D3D12_RESOURCE_STATE_COPY_SOURCE, packet.colorState);
     backBuffer->Release();
 
-    if (composeUi && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
-        _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
+    const bool composeUiNow = composeUi && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit();
 
     if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
         queryStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
@@ -1041,9 +1151,36 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
                                   queryStart * sizeof(UINT64));
     }
 
-    if (!SubmitSCCommandList(outputIndex))
-        return false;
+    if (useCompute)
+    {
+        if (!SubmitComputeCommandList(outputIndex))
+            return false;
+    }
+    else
+    {
+        if (composeUiNow)
+            _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
+        if (!SubmitSCCommandList(outputIndex))
+            return false;
+    }
 
+    // UI composition uses a rasterizing pipeline, invalid on COMPUTE; run it on
+    // the DIRECT SC queue after the compute copy completes.
+    if (useCompute && composeUiNow && _computeFence != nullptr)
+    {
+        _presentQueue->Wait(_computeFence, _computeAllocatorFenceValues[outputIndex]);
+        auto scCmdList = GetSCCommandList(outputIndex);
+        if (scCmdList != nullptr)
+        {
+            _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
+            _renderUI->Dispatch(realSwapChain, scCmdList, packet.ui, packet.uiState);
+            SubmitSCCommandList(outputIndex);
+        }
+    }
+
+    // Retirement is tracked on _scFence. When the copy ran on COMPUTE,
+    // SubmitComputeCommandList signaled _scFence; the SC UI pass (if any) set a
+    // later _scFence value that also covers the copy.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
@@ -1065,20 +1202,30 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (FAILED(realSwapChain->GetBuffer(outputIndex, IID_PPV_ARGS(&backBuffer))))
         return false;
 
-    if (!CreateWarpOutput(outputIndex, backBuffer) || !WaitForSCAllocator(outputIndex))
+    // Use COMPUTE queue when available (avoids VKD3D serialization with game queue).
+    // Fall back to SC (DIRECT) queue when compute is unavailable.
+    const bool useCompute = _computeQueue != nullptr;
+    auto* warpQueue = useCompute ? _computeQueue : _presentQueue;
+
+    if (!CreateWarpOutput(outputIndex, backBuffer) ||
+        (useCompute ? !WaitForComputeAllocator(outputIndex) : !WaitForSCAllocator(outputIndex)))
     {
         backBuffer->Release();
         return false;
     }
 
-    auto cmdList = GetSCCommandList(outputIndex);
+    auto cmdList = useCompute ? GetComputeCommandList(outputIndex) : GetSCCommandList(outputIndex);
     if (cmdList == nullptr)
     {
         backBuffer->Release();
         return false;
     }
 
-    _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
+    // For the SC (DIRECT) fallback, reserve the retirement fence value here;
+    // SubmitSCCommandList uses it. The COMPUTE path reserves its own values
+    // inside SubmitComputeCommandList.
+    if (!useCompute)
+        _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
     uint32_t queryStart = telemetryQueryStart;
     bool useTelemetryQuery = false;
@@ -1098,7 +1245,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     constants.timeStep = timeStep;
     const bool deferredLateLatch = (Config::Instance()->ReprojLateLatchFence.value_or_default() ||
                                     State::Instance().activeFgOutput == FGOutput::HybridTimewarp) &&
-                                   _lateLatchFence != nullptr && _presentQueue != nullptr &&
+                                   _lateLatchFence != nullptr && warpQueue != nullptr &&
                                    scanoutDeadlineMs > Util::MillisecondsNow();
     if (!deferredLateLatch)
     {
@@ -1112,7 +1259,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (!ok)
     {
         backBuffer->Release();
-        SubmitSCCommandList(outputIndex);
+        if (useCompute)
+            SubmitComputeCommandList(outputIndex);
+        else
+            SubmitSCCommandList(outputIndex);
         packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
         return false;
     }
@@ -1125,8 +1275,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     backBuffer->Release();
 
-    if (constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit())
-        _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
+    // RUI (UI composition) uses a rasterizing pixel-shader pipeline, which is NOT
+    // valid on a COMPUTE command list. When warp runs on the COMPUTE queue and UI
+    // composition is needed, split it: compute does warp+copy, then the DIRECT SC
+    // queue waits on the compute fence and composites UI over the finished warp.
+    const bool composeUi =
+        constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit();
 
     if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
         timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
@@ -1140,20 +1294,52 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (deferredLateLatch)
     {
         lateLatchValue = ++_lateLatchFenceValue;
-        if (FAILED(_presentQueue->Wait(_lateLatchFence, lateLatchValue)))
+        if (FAILED(warpQueue->Wait(_lateLatchFence, lateLatchValue)))
         {
             _lateLatchFence->Signal(lateLatchValue);
             return false;
         }
     }
 
-    if (!SubmitSCCommandList(outputIndex))
+    // Submit the warp (compute) or the whole warp+UI (DIRECT fallback).
+    if (useCompute)
     {
-        if (lateLatchValue != 0)
-            _lateLatchFence->Signal(lateLatchValue);
-        return false;
+        if (!SubmitComputeCommandList(outputIndex))
+        {
+            if (lateLatchValue != 0)
+                _lateLatchFence->Signal(lateLatchValue);
+            return false;
+        }
+    }
+    else
+    {
+        if (composeUi)
+            _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
+        if (!SubmitSCCommandList(outputIndex))
+        {
+            if (lateLatchValue != 0)
+                _lateLatchFence->Signal(lateLatchValue);
+            return false;
+        }
     }
 
+    // When the warp ran on COMPUTE and UI must be composited, run the RUI pass on
+    // the DIRECT SC queue after the compute warp completes.
+    if (useCompute && composeUi && _computeFence != nullptr)
+    {
+        _presentQueue->Wait(_computeFence, _computeAllocatorFenceValues[outputIndex]);
+        auto scCmdList = GetSCCommandList(outputIndex);
+        if (scCmdList != nullptr)
+        {
+            _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
+            _renderUI->Dispatch(realSwapChain, scCmdList, packet.ui, packet.uiState);
+            SubmitSCCommandList(outputIndex);
+        }
+    }
+
+    // Retirement is tracked on _scFence (RetirePackets reads _scFence). When the
+    // warp ran on COMPUTE, SubmitComputeCommandList already signaled _scFence;
+    // if UI composition also ran on the SC queue, that later signal covers both.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
@@ -1283,6 +1469,8 @@ bool AReproj_Dx12::DrainGpuWork()
             return false;
         if (_scCommandListResetted[i] && !SubmitSCCommandList(i))
             return false;
+        if (_computeCommandListResetted[i] && !SubmitComputeCommandList(i))
+            return false;
     }
 
     const auto waitForFence = [](ID3D12Fence* fence, HANDLE event, UINT64 value, const char* name, int slot)
@@ -1302,7 +1490,8 @@ bool AReproj_Dx12::DrainGpuWork()
     for (int i = 0; i < BUFFER_COUNT; ++i)
     {
         if (!waitForFence(_uiFence, _uiFenceEvent, _uiAllocatorFenceValues[i], "UI", i) ||
-            !waitForFence(_scFence, _scFenceEvent, _scAllocatorFenceValues[i], "SC", i))
+            !waitForFence(_scFence, _scFenceEvent, _scAllocatorFenceValues[i], "SC", i) ||
+            !waitForFence(_computeFence, _scFenceEvent, _computeAllocatorFenceValues[i], "COMPUTE", i))
             return false;
     }
 
@@ -1448,6 +1637,10 @@ bool AReproj_Dx12::VirtualAnchorReady() const
     {
         if (_uiCommandAllocator[i] == nullptr || _uiCommandList[i] == nullptr || _scCommandAllocator[i] == nullptr ||
             _scCommandList[i] == nullptr)
+            return false;
+        // If the compute queue is present, the warp command lists must be too.
+        if (_computeQueue != nullptr &&
+            (_computeAllocator[i] == nullptr || _computeCommandList[i] == nullptr))
             return false;
     }
     return true;
@@ -2654,6 +2847,9 @@ void AReproj_Dx12::ReleaseObjects()
         _scCommandListResetted[i] = false;
         _scAllocatorFenceValues[i] = 0;
 
+        _computeCommandListResetted[i] = false;
+        _computeAllocatorFenceValues[i] = 0;
+
         _uiCommandListResetted[i] = false;
         _uiAllocatorFenceValues[i] = 0;
     }
@@ -2661,6 +2857,7 @@ void AReproj_Dx12::ReleaseObjects()
     SAFE_RELEASE(_uiFence);
     SAFE_RELEASE(_scFence);
     SAFE_RELEASE(_lateLatchFence);
+    SAFE_RELEASE(_computeFence);
     if (_uiFenceEvent != nullptr)
     {
         CloseHandle(_uiFenceEvent);

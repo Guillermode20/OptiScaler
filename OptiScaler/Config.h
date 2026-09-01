@@ -631,6 +631,7 @@ class Config
     CustomOptional<bool> ReprojNonBlockingAnchorSampling { false }; // sample anchors, never sleep the game thread
     CustomOptional<float> ReprojAnchorSampleHz { 0.0f };            // 0 = SourceFramerateLimit, then TargetRefresh / 2
     CustomOptional<bool> ReprojHighPriorityQueue { false };         // Windows only: use HIGH priority presenter queue
+    CustomOptional<bool> ReprojUseComputeQueue { true }; // submit async warp on a COMPUTE queue to avoid VKD3D DIRECT serialization
     CustomOptional<bool> ReprojPresentCompletionClock { true }; // use completed Present timestamps, not DXGI stats
     CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
     CustomOptional<bool> ReprojRotationOnly { true };     // safer default: no generic late camera translation exists

@@ -201,6 +201,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojNonBlockingAnchorSampling.set_from_config(readBool("Reproj", "NonBlockingAnchorSampling"));
             ReprojAnchorSampleHz.set_from_config(readFloat("Reproj", "AnchorSampleHz"));
             ReprojHighPriorityQueue.set_from_config(readBool("Reproj", "HighPriorityQueue"));
+            ReprojUseComputeQueue.set_from_config(readBool("Reproj", "UseComputeQueue"));
             ReprojPresentCompletionClock.set_from_config(readBool("Reproj", "PresentCompletionClock"));
             ReprojUseDepth.set_from_config(readBool("Reproj", "UseDepth"));
             ReprojRotationOnly.set_from_config(readBool("Reproj", "RotationOnly"));
@@ -1062,6 +1063,8 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojAnchorSampleHz.value_for_config()).c_str());
         ini.SetValue("Reproj", "HighPriorityQueue",
                      GetBoolValue(Instance()->ReprojHighPriorityQueue.value_for_config()).c_str());
+        ini.SetValue("Reproj", "UseComputeQueue",
+                     GetBoolValue(Instance()->ReprojUseComputeQueue.value_for_config()).c_str());
         ini.SetValue("Reproj", "PresentCompletionClock",
                      GetBoolValue(Instance()->ReprojPresentCompletionClock.value_for_config()).c_str());
         ini.SetValue("Reproj", "UseDepth", GetBoolValue(Instance()->ReprojUseDepth.value_for_config()).c_str());
