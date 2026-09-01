@@ -878,10 +878,32 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     if (kcd2CameraTimestamp > 0.0)
     {
-        // KCD2's depth/projection conventions are not validated for reprojection.
-        // Its hook supplies an authoritative orientation, so do not let a stale
-        // generic depth-warp setting override the safe title-specific path.
-        packet.constants.mode = 2;
+        // KCD2's pose comes from the WHGame hook, not the legacy upscaler camera
+        // fields, so FillConstants may have zeroed the mode above. The hooked pose
+        // is authoritative here. Rotation-only (mode 2) is the safe default and
+        // only needs the orientation basis. Depth (mode 1) additionally needs the
+        // live-validated projection block (near-edge y @+0x54, far-edge y @+0x6C;
+        // see the projection dump and telemetry depthConstants): ApplyToConstants
+        // populates cameraNear/Far only when they pass those range checks, so an
+        // unknown build leaves them at zero and must fail closed to the rotation
+        // homography rather than feed garbage near/far to the depth reconstruction.
+        uint32_t kcd2Mode = packet.constants.mode;
+        if (Config::Instance()->ReprojRotationOnly.value_or_default())
+            kcd2Mode = 2; // safe default: rotation homography needs only the orientation basis
+        else if (kcd2Mode == 0)
+        {
+            // RotationOnly=false: if FillConstants zeroed the mode because the
+            // legacy camera fields are empty for KCD2, restore the configured
+            // mode so Mode=1 (depth) is actually honored.
+            const auto configuredMode = static_cast<uint32_t>(Config::Instance()->ReprojMode.value_or_default());
+            kcd2Mode = configuredMode > 2u ? 2u : configuredMode;
+        }
+        const bool kcd2ProjectionValid = packet.constants.cameraNear > 0.0f &&
+                                         packet.constants.cameraFar > packet.constants.cameraNear &&
+                                         packet.constants.cameraVFov > 0.01f;
+        if (kcd2Mode == 1 && !kcd2ProjectionValid)
+            kcd2Mode = 2; // unknown build: fail closed to rotation instead of garbage near/far
+        packet.constants.mode = kcd2Mode;
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     Kcd2Camera::Snapshot currentCamera {};
