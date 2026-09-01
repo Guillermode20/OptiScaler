@@ -40,6 +40,13 @@ TELEMETRY_EXT_RE = re.compile(
     r"target\.samples=(?P<targetSamples>\d+)"
 )
 
+LATE_INPUT_EXT_RE = re.compile(
+    r"latchGpu\.p95=(?P<latchGpuP95>[-\d\.NaN]+) "
+    r"lateInput\.applied=(?P<lateInputApplied>\d+) lateInput\.nonzero=(?P<lateInputNonzero>\d+) "
+    r"lateInput\.deltaP95=(?P<lateInputDeltaP95>[-\d\.NaN]+) "
+    r"lateInput\.rotationDegP95=(?P<lateInputRotationDegP95>[-\d\.NaN]+)"
+)
+
 SLOT_RE = re.compile(
     r"ReprojSlot v=1 seq=(?P<seq>\d+) outcome=(?P<outcome>\d+) cause=(?P<cause>\d+) secondary=(?P<sec>[0-9a-fA-FxX]+) anchor=(?P<anchor>\d+) new=(?P<new>\d+) repeat=(?P<repeat>\d+) effMode=(?P<mode>\d+) wake=(?P<wake>[-\d\.A-Za-z]+) wait=(?P<wait>[-\d\.A-Za-z]+) queue=(?P<queue>[-\d\.A-Za-z]+) gpu=(?P<gpu>[-\d\.A-Za-z]+) present=(?P<present>[-\d\.A-Za-z]+) interval=(?P<interval>[-\d\.A-Za-z]+) age=(?P<age>[-\d\.A-Za-z]+) step=(?P<stepUnc>[-\d\.A-Za-z]+)/(?P<stepFinal>[-\d\.A-Za-z]+) vel=(?P<vel>\d+) depth=(?P<depth>\d+) cam=(?P<cam>\d+)"
 )
@@ -64,6 +71,9 @@ def load_log(path):
                 extension = TELEMETRY_EXT_RE.search(line)
                 if extension:
                     d.update(extension.groupdict())
+                late_input_extension = LATE_INPUT_EXT_RE.search(line)
+                if late_input_extension:
+                    d.update(late_input_extension.groupdict())
                 # convert numeric
                 for k in d:
                     if d[k] is None:
@@ -169,6 +179,24 @@ def analyze(path):
     if target_flags:
         target_samples = sum(t.get("targetSamples", 0) or 0 for t in telemetry)
         print(f"Target-pose resolver: {'enabled' if any(target_flags) else 'disabled'} | active samples {target_samples}")
+
+    late_input_windows = [t for t in telemetry if t.get("lateInputApplied") is not None]
+    if late_input_windows:
+        applied = sum(t.get("lateInputApplied", 0) or 0 for t in late_input_windows)
+        nonzero = sum(t.get("lateInputNonzero", 0) or 0 for t in late_input_windows)
+        delta_p95 = [t.get("lateInputDeltaP95") for t in late_input_windows
+                     if t.get("lateInputDeltaP95") is not None]
+        rotation_p95 = [t.get("lateInputRotationDegP95") for t in late_input_windows
+                        if t.get("lateInputRotationDegP95") is not None]
+        latch_gpu = [t.get("latchGpuP95") for t in late_input_windows if t.get("latchGpuP95") is not None]
+        summary = f"Late input: applied {applied}, nonzero {nonzero}"
+        if delta_p95:
+            summary += f" | delta p95 {percentile(delta_p95, 0.95):.2f} counts"
+        print(summary)
+        if rotation_p95:
+            print(f"Late input rotation p95: {percentile(rotation_p95, 0.95):.3f} deg")
+        if latch_gpu:
+            print(f"Late-latch signal-to-GPU-start p95: {percentile(latch_gpu, 0.95):.2f} ms")
 
     # Timestep
     stepF95 = [t["stepF95"] for t in telemetry if t.get("stepF95") is not None]

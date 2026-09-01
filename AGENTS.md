@@ -162,6 +162,12 @@ Known issues / limitations:
   (2026-08-31): presenter warps default to the deferred late latch (`ReprojLateLatchFence` default on) — the warp
   command list queues behind a CPU-signaled fence and the constant slice is written ~0.75 ms before the present
   deadline, giving exactly one refresh of input per slot instead of sampling at the jittering dispatch-lead wake.
+  Live diagnosis on 2026-09-01 confirmed the passive pump receives KCD2 motion at high cadence (`pumpMsg` and
+  `pumpDeltas` both reached 10k+), so remaining steering diagnosis is downstream. Telemetry now reports
+  `lateInput.applied/nonzero/deltaP95/rotationDegP95`; these fields, not `step.final` or `anchorAge`, prove input
+  steering because late input changes the submitted rotation constants without changing anchor-age timestep math.
+  `latchGpu.p95` is signal-to-GPU-start timing; it is derived when asynchronous GPU query results arrive (not in the
+  earlier CPU slot finalization), and by itself does not prove a nonzero mouse rotation.
 - Late-latch yaw composes around CryEngine world Z, then pitch around the yawed camera-right axis (KCD2 only; generic
   cameras keep their local-up convention). Never yaw around the camera's local up vector: it tilts with pitch and
   produces roll/diagonal movement when panning horizontally while looking steeply up or down.

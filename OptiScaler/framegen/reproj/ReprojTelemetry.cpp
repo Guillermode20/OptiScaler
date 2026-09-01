@@ -259,6 +259,11 @@ void ReprojTelemetry::PollCompletedGpuWork()
                             slot->gpuQueueDelayMs < 100.0f)
                             _recentGpuQueueDelayMs.store(slot->gpuQueueDelayMs, std::memory_order_relaxed);
                     }
+                    // FinalizeSlot runs before the asynchronous GPU timestamps are
+                    // available, so derive the late-latch delay here as well.
+                    if (slot->lateLatchSignalQpc != 0)
+                        slot->lateLatchToGpuStartMs =
+                            static_cast<float>(_clock.DeltaMs(slot->lateLatchSignalQpc, startQpc));
                     const double gpuMs =
                         static_cast<double>(end - start) * 1000.0 / static_cast<double>(_timestampFrequency);
                     if (gpuMs >= 0.0 && gpuMs < 500.0)
@@ -416,14 +421,17 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     std::array<float, TRACE_SLOT_COUNT> unclampedSteps {};
     std::array<float, TRACE_SLOT_COUNT> finalSteps {};
     std::array<float, TRACE_SLOT_COUNT> latchToGpu {};
+    std::array<float, TRACE_SLOT_COUNT> lateInputDeltas {};
+    std::array<float, TRACE_SLOT_COUNT> lateInputRotations {};
     std::array<float, TRACE_SLOT_COUNT> shadowRaw {};
     std::array<float, TRACE_SLOT_COUNT> shadowSource {};
 
     size_t nPresent = 0, nWake = 0, nWait = 0, nCmd = 0, nQueue = 0, nGpu = 0, nMargin = 0, nBlock = 0;
     size_t nRaw = 0, nSelected = 0, nRatio = 0, nPoseInterval = 0, nAge = 0, nUnclamped = 0, nFinal = 0, nShadowRaw = 0,
-           nShadowSource = 0, nLatchToGpu = 0;
+           nShadowSource = 0, nLatchToGpu = 0, nLateInputDelta = 0, nLateInputRotation = 0;
 
     uint32_t scheduled = 0, presented = 0, missed = 0, skippedRep = 0, newAnchor = 0, repeated = 0, slipped = 0;
+    uint32_t lateInputApplied = 0, lateInputNonzero = 0;
     uint32_t lateWakes = 0, clampCount = 0;
     uint32_t modeMv = 0, modeDepth = 0, modeRotation = 0, modeUnwarped = 0;
     uint32_t camAvail = 0, depthAvail = 0, depthConst = 0, hudless = 0;
@@ -513,6 +521,20 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
                 gpuDurations[nGpu++] = slot->gpuDurationMs;
             if (std::isfinite(slot->lateLatchToGpuStartMs) && nLatchToGpu < TRACE_SLOT_COUNT)
                 latchToGpu[nLatchToGpu++] = slot->lateLatchToGpuStartMs;
+            if (slot->lateInputApplied)
+            {
+                ++lateInputApplied;
+                const auto delta = static_cast<float>(
+                    std::hypot(static_cast<double>(slot->lateInputDeltaX), static_cast<double>(slot->lateInputDeltaY)));
+                const auto rotationDegrees =
+                    std::hypot(slot->lateInputYawRad, slot->lateInputPitchRad) * (180.0f / 3.14159265358979323846f);
+                if (delta > 0.0f)
+                    ++lateInputNonzero;
+                if (nLateInputDelta < TRACE_SLOT_COUNT)
+                    lateInputDeltas[nLateInputDelta++] = delta;
+                if (nLateInputRotation < TRACE_SLOT_COUNT)
+                    lateInputRotations[nLateInputRotation++] = rotationDegrees;
+            }
             if (std::isfinite(slot->gpuEndLatenessMs) && nMargin < TRACE_SLOT_COUNT)
                 gpuMargins[nMargin++] = slot->gpuEndLatenessMs;
             if (std::isfinite(slot->presentBlockMs) && nBlock < TRACE_SLOT_COUNT)
@@ -670,6 +692,10 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.finalMax = Percentile(finalSteps, nFinal, 1.0);
     snap.clampCount = clampCount;
     snap.lateLatchToGpuStartP95 = Percentile(latchToGpu, nLatchToGpu, 0.95);
+    snap.lateInputApplied = lateInputApplied;
+    snap.lateInputNonzero = lateInputNonzero;
+    snap.lateInputDeltaP95 = Percentile(lateInputDeltas, nLateInputDelta, 0.95);
+    snap.lateInputRotationDegreesP95 = Percentile(lateInputRotations, nLateInputRotation, 0.95);
     snap.contentReal = contentReal;
     snap.contentGenerated = contentGenerated;
     snap.cameraBasisAvailable = camAvail;
@@ -735,8 +761,9 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              "step.final.max={:.2f} step.clamped={} "
              "camera={}/{} depth={}/{} depthConstants={}/{} hudless={}/{} "
              "fps={:.1f} poseInterval.p50={:.2f} poseInterval.p95={:.2f} content.real={} content.generated={} "
-             "target.coverage={:.3f} target.errorP95={:.3f} latchGpu.p95={:.2f} slipped={} "
-             "source.capRequestedHz={:.2f} source.capActive={} target.enabled={} target.samples={}",
+             "target.coverage={:.3f} target.errorP95={:.3f} latchGpu.p95={:.2f} "
+             "lateInput.applied={} lateInput.nonzero={} lateInput.deltaP95={:.2f} lateInput.rotationDegP95={:.3f} "
+             "slipped={} source.capRequestedHz={:.2f} source.capActive={} target.enabled={} target.samples={}",
              snap.scheduledSlots, snap.presented, snap.classifiedMisses, snap.legacyMisses, snap.newAnchorOutputs,
              snap.repeatedAnchorOutputs, snap.skippedRepresentedSlots, snap.causeCpu, snap.causeWaitable,
              snap.causeCapture, snap.causeQueue, snap.causeGpu, snap.causePresent, snap.causeClock, snap.causeSchedule,
@@ -754,7 +781,9 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              snap.scheduledSlots, snap.depthConstantsValid, snap.scheduledSlots, snap.hudlessSource,
              snap.scheduledSlots, snap.displayFps, snap.poseIntervalP50, snap.poseIntervalP95, snap.contentReal,
              snap.contentGenerated, snap.targetCoverage, snap.targetErrorP95Degrees, snap.lateLatchToGpuStartP95,
-             snap.slippedPresents, snap.sourceCapRequestedHz, snap.sourceCapActive ? 1 : 0,
+             snap.lateInputApplied, snap.lateInputNonzero, snap.lateInputDeltaP95,
+             snap.lateInputRotationDegreesP95, snap.slippedPresents, snap.sourceCapRequestedHz,
+             snap.sourceCapActive ? 1 : 0,
              snap.targetResolverEnabled ? 1 : 0, snap.targetActiveSamples);
 }
 

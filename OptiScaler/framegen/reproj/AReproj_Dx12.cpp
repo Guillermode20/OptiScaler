@@ -589,6 +589,14 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     }
 
     PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch));
+    if (_currentTelemetrySlot != nullptr)
+    {
+        _currentTelemetrySlot->lateInputApplied = true;
+        _currentTelemetrySlot->lateInputDeltaX = current.TotalX - packet.sourceMouseX;
+        _currentTelemetrySlot->lateInputDeltaY = current.TotalY - packet.sourceMouseY;
+        _currentTelemetrySlot->lateInputYawRad = static_cast<float>(yaw);
+        _currentTelemetrySlot->lateInputPitchRad = static_cast<float>(pitch);
+    }
     return true;
 }
 
