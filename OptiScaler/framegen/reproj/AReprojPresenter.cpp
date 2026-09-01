@@ -144,11 +144,25 @@ bool AReproj_Dx12::StartAsyncPresenter()
 #if defined(_WIN32)
     SetThreadPriority(_presentThread.native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
 #endif
+
+    // Cursor-locked games (KCD2) consume raw input inside their own frame loop,
+    // so the game-facing input paths never see WM_INPUT and the late latch would
+    // read frozen motion totals. The dedicated pump (hidden RIDEV_INPUTSINK
+    // window on its own thread) keeps the timestamped totals fresh at the mouse
+    // report rate while the async presenter is live, independent of game cadence.
+    if (Config::Instance()->ReprojLateLatch.value_or_default() &&
+        Config::Instance()->ReprojRawInputPump.value_or_default())
+    {
+        if (!OptiInput::StartRawInputPump())
+            LOG_WARN("Reproj: raw input pump unavailable; late latch may read stale motion");
+    }
     return true;
 }
 
 void AReproj_Dx12::StopAsyncPresenter()
 {
+    OptiInput::StopRawInputPump();
+
     if (!_presentThread.joinable())
         return;
 

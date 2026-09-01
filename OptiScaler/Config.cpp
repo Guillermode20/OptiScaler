@@ -209,6 +209,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojForceBorderless.set_from_config(readBool("Reproj", "ForceBorderless"));
             ReprojSmoothing.set_from_config(readFloat("Reproj", "Smoothing"));
             ReprojLateLatch.set_from_config(readBool("Reproj", "LateLatch"));
+            ReprojRawInputPump.set_from_config(readBool("Reproj", "RawInputPump"));
             ReprojLateLatchFence.set_from_config(readBool("Reproj", "LateLatchFence"));
             ReprojMouseSensitivityX.set_from_config(readFloat("Reproj", "MouseSensitivityX"));
             ReprojMouseSensitivityY.set_from_config(readFloat("Reproj", "MouseSensitivityY"));
@@ -1072,6 +1073,7 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojForceBorderless.value_for_config()).c_str());
         ini.SetValue("Reproj", "Smoothing", GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
         ini.SetValue("Reproj", "LateLatch", GetBoolValue(Instance()->ReprojLateLatch.value_for_config()).c_str());
+        ini.SetValue("Reproj", "RawInputPump", GetBoolValue(Instance()->ReprojRawInputPump.value_for_config()).c_str());
         ini.SetValue("Reproj", "LateLatchFence",
                      GetBoolValue(Instance()->ReprojLateLatchFence.value_for_config()).c_str());
         ini.SetValue("Reproj", "MouseSensitivityX",

@@ -5,10 +5,12 @@
 #include <Windows.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <winerror.h>
 #include <Xinput.h>
 
@@ -356,6 +358,22 @@ struct InputState
     HHOOK ExternalLowLevelMouseHook = nullptr;
     HWND ExternalRawInputSinkHwnd = nullptr;
     DWORD ExternalRawInputSinkThreadId = 0;
+
+    // Dedicated high-frequency raw-input pump for the async reprojection
+    // late latch. Cursor-locked games (KCD2) consume raw input inside their
+    // own per-frame loop, so OptiInput's hooked paths never see WM_INPUT and
+    // the presenter's 120 Hz latch would read frozen motion totals. This
+    // thread owns a hidden RIDEV_INPUTSINK window (thread-affine queue),
+    // drains WM_INPUT at ~1 kHz and feeds the same timestamped totals the
+    // presenter reads via GetRawMouseMotion(). While active it is the SOLE
+    // accumulator of relative motion (game-facing paths are gated off) so one
+    // physical movement is never counted twice.
+    std::thread RawInputPumpThread;
+    HANDLE RawInputPumpStopEvent = nullptr;
+    HWND RawInputPumpHwnd = nullptr;
+    DWORD RawInputPumpThreadId = 0;
+    bool RawInputPumpActive = false;
+    std::uint64_t RawInputPumpMessageCount = 0;
 
     float MouseWheel = 0.0f;
     RawMouseMotion RawMouseMotionState {};

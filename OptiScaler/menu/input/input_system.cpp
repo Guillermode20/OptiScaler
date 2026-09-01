@@ -902,6 +902,18 @@ void ResetStateAfterShutdown()
     _state.ExternalRawInputSinkHwnd = nullptr;
     _state.ExternalRawInputSinkThreadId = 0;
 
+    // Raw input pump fields are cleared by StopRawInputPump()/the pump thread
+    // epilogue; the handle must be null and the thread non-joinable here.
+    if (_state.RawInputPumpStopEvent != nullptr)
+    {
+        CloseHandle(_state.RawInputPumpStopEvent);
+        _state.RawInputPumpStopEvent = nullptr;
+    }
+    _state.RawInputPumpHwnd = nullptr;
+    _state.RawInputPumpThreadId = 0;
+    _state.RawInputPumpActive = false;
+    _state.RawInputPumpMessageCount = 0;
+
     ResetRawInputBlockStateLocked();
     ResetRawInputSanitizeCacheLocked();
 
@@ -1049,6 +1061,10 @@ void ResetStateAfterShutdown()
 
 void Shutdown()
 {
+    // Join the raw input pump thread before taking the mutex: its teardown
+    // epilogue takes _state.Mutex, and joining under the lock would deadlock.
+    StopRawInputPump();
+
     std::unique_lock lock(_state.Mutex);
 
     RemoveWindowSubclass();

@@ -560,6 +560,15 @@ void AccumulateRelativeMouseMotionLocked(LONG x, LONG y)
     if (x == 0 && y == 0)
         return;
 
+    // While the dedicated raw-input pump is active it is the SOLE accumulator
+    // of relative motion: the pump drains WM_INPUT at ~1 kHz from a hidden
+    // sink window that receives a copy of every packet (RIDEV_INPUTSINK), and
+    // the game-facing paths below sample at the game's own cadence. If those
+    // kept writing too, one physical movement would be counted twice and the
+    // late-latch sensitivity would double.
+    if (_state.RawInputPumpActive && GetCurrentThreadId() != _state.RawInputPumpThreadId)
+        return;
+
     _state.ReceivedAnyInputThisFrame = true;
 
     // Raw-input games keep the cursor centered/hidden, so the polled
@@ -701,6 +710,170 @@ void UpdateStateFromRawInputLocked(const RAWINPUT& input, HRAWINPUT handle)
         break;
     }
     }
+}
+
+namespace
+{
+constexpr UINT RawInputPumpMessageLimit = 256;
+
+DWORD WINAPI RawInputPumpThreadMain(LPVOID)
+{
+    if (!RegisterExternalRawInputSinkClass())
+    {
+        LOG_WARN("raw input pump class registration failed");
+        return 1;
+    }
+
+    const HINSTANCE module = GetCurrentModuleHandle();
+    HWND hwnd = CreateWindowExW(0, ExternalRawInputSinkClassName, L"OptiInput RawInput Pump", WS_POPUP, 0, 0, 1, 1,
+                                nullptr, nullptr, module, nullptr);
+    if (hwnd == nullptr)
+    {
+        LOG_WARN("raw input pump CreateWindowExW failed error:{}", GetLastError());
+        return 1;
+    }
+
+    // RIDEV_INPUTSINK delivers a copy of every raw packet to this window (even
+    // in the background) without disturbing the game's own registration. This
+    // is the same mechanism the external-target sink uses for Remix and is
+    // Proton-validated.
+    RAWINPUTDEVICE device {};
+    device.usUsagePage = HID_USAGE_PAGE_GENERIC;
+    device.usUsage = HID_USAGE_GENERIC_MOUSE;
+    device.dwFlags = RIDEV_INPUTSINK;
+    device.hwndTarget = hwnd;
+
+    BOOL registered = FALSE;
+    {
+        ScopedHookBypass bypass;
+        registered = o_RegisterRawInputDevices != nullptr
+                         ? o_RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE))
+                         : RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE));
+    }
+
+    if (!registered)
+    {
+        const DWORD error = GetLastError();
+        LOG_WARN("raw input pump RegisterRawInputDevices failed hwnd:{} error:{}", static_cast<void*>(hwnd), error);
+        DestroyWindow(hwnd);
+        return 1;
+    }
+
+    HANDLE stopEvent = nullptr;
+    {
+        std::unique_lock lock(_state.Mutex);
+        _state.RawInputPumpHwnd = hwnd;
+        _state.RawInputPumpThreadId = GetCurrentThreadId();
+        stopEvent = _state.RawInputPumpStopEvent;
+        _state.RawInputPumpActive = true;
+    }
+
+    LOG_INFO("raw input pump started hwnd:{}", static_cast<void*>(hwnd));
+
+    while (stopEvent != nullptr)
+    {
+        // Block until the stop event fires or a message arrives. WM_INPUT for
+        // the sink window is posted at the device report rate (up to 1000 Hz),
+        // so this paces naturally with the mouse and costs ~no CPU when idle.
+        const DWORD waitResult =
+            MsgWaitForMultipleObjectsEx(1, &stopEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (waitResult == WAIT_OBJECT_0)
+            break; // stop event
+
+        if (waitResult == WAIT_FAILED)
+        {
+            LOG_WARN("raw input pump MsgWaitForMultipleObjectsEx failed error:{}", GetLastError());
+            Sleep(10);
+            continue;
+        }
+
+        MSG msg {};
+        UINT pumped = 0;
+        while (PeekMessageW(&msg, hwnd, 0, 0, PM_REMOVE) && pumped < RawInputPumpMessageLimit)
+        {
+            pumped++;
+            if (msg.message == WM_INPUT)
+            {
+                {
+                    std::unique_lock lock(_state.Mutex);
+                    HandleRawInputLocked(reinterpret_cast<HRAWINPUT>(msg.lParam));
+                    _state.RawInputPumpMessageCount++;
+                }
+                DefWindowProcW(msg.hwnd, msg.message, msg.wParam, msg.lParam);
+            }
+            else
+            {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    // Unregister and tear down on this owning thread (window handles are
+    // thread-affine; DestroyWindow must run on the creating thread).
+    RAWINPUTDEVICE removeDevice {};
+    removeDevice.usUsagePage = HID_USAGE_PAGE_GENERIC;
+    removeDevice.usUsage = HID_USAGE_GENERIC_MOUSE;
+    removeDevice.dwFlags = RIDEV_REMOVE;
+    removeDevice.hwndTarget = hwnd;
+    {
+        ScopedHookBypass bypass;
+        if (o_RegisterRawInputDevices != nullptr)
+            o_RegisterRawInputDevices(&removeDevice, 1, sizeof(RAWINPUTDEVICE));
+    }
+    DestroyWindow(hwnd);
+
+    {
+        std::unique_lock lock(_state.Mutex);
+        _state.RawInputPumpHwnd = nullptr;
+        _state.RawInputPumpThreadId = 0;
+        _state.RawInputPumpActive = false;
+    }
+    LOG_INFO("raw input pump stopped");
+    return 0;
+}
+} // namespace
+
+bool StartRawInputPump()
+{
+    std::unique_lock lock(_state.Mutex);
+    if (_state.RawInputPumpThread.joinable())
+        return _state.RawInputPumpActive;
+
+    if (_state.RawInputPumpStopEvent == nullptr)
+    {
+        _state.RawInputPumpStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (_state.RawInputPumpStopEvent == nullptr)
+        {
+            LOG_WARN("raw input pump CreateEventW failed error:{}", GetLastError());
+            return false;
+        }
+    }
+
+    ResetEvent(_state.RawInputPumpStopEvent);
+    _state.RawInputPumpThread = std::thread(RawInputPumpThreadMain, nullptr);
+    return true; // thread spawned; registration failure is logged by the thread itself
+}
+
+void StopRawInputPump()
+{
+    HANDLE stopEvent = nullptr;
+    {
+        std::unique_lock lock(_state.Mutex);
+        stopEvent = _state.RawInputPumpStopEvent;
+        if (stopEvent != nullptr)
+            SetEvent(stopEvent);
+    }
+
+    std::thread pumpThread;
+    {
+        std::unique_lock lock(_state.Mutex);
+        pumpThread = std::move(_state.RawInputPumpThread);
+    }
+    if (pumpThread.joinable())
+        pumpThread.join();
+    // The stop event stays alive for OptiInput's lifetime (recreated on demand
+    // by StartRawInputPump); it is closed in ResetStateAfterShutdown only.
 }
 
 void HandleRawInputLocked(HRAWINPUT rawInputHandle)

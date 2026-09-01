@@ -640,6 +640,13 @@ class Config
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
     CustomOptional<float> ReprojSmoothing { 0.0f };       // 0=off, 0..0.95 EMA on camera angular velocity
     CustomOptional<bool> ReprojLateLatch { true }; // sample mouse motion at scanout to timewarp with zero input lag
+    // Cursor-locked games (KCD2) consume raw input inside their own per-frame
+    // loop, so the hooked paths never see WM_INPUT and the late latch would
+    // read frozen motion totals. This spins a dedicated thread that owns a
+    // hidden RIDEV_INPUTSINK window and feeds the timestamped totals at the
+    // mouse report rate (~1 kHz). While active it is the sole accumulator of
+    // relative motion so one physical movement is never counted twice.
+    CustomOptional<bool> ReprojRawInputPump { true };
     // Presenter warps queue behind a CPU-signaled fence and write their constant
     // slice ~0.75 ms before the present deadline. That keeps warp input sampling
     // anchored to the display-clock grid: sampling at dispatch time instead

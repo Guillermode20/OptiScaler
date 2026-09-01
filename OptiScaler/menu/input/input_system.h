@@ -232,6 +232,16 @@ RawMouseMotion GetRawMouseMotion();
 RawMouseMotion GetRawMouseMotionAt(double timestampMs);
 void RefreshMouseMotion();
 
+// Dedicated high-frequency raw-input pump for the async reprojection late
+// latch. Cursor-locked games that consume raw input inside their own frame
+// loop never surface motion through the hooked paths; this pumps a hidden
+// RIDEV_INPUTSINK window at the mouse report rate instead. While active it is
+// the sole accumulator of relative motion (game-facing paths are gated off),
+// so one physical movement is never counted twice. Idempotent; safe to call
+// repeatedly.
+bool StartRawInputPump();
+void StopRawInputPump();
+
 bool ShouldBlockMouse();
 bool ShouldBlockKeyboard();
 bool ShouldBlockCursor();
