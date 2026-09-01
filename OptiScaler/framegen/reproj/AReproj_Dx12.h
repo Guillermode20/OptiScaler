@@ -111,6 +111,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT64 _presentTimestampFrequency = 0;
     ID3D12Fence* _lateLatchFence = nullptr;
     UINT64 _lateLatchFenceValue = 0;
+    ID3D12Fence* _lateLatchArrivalFence = nullptr;
+    UINT64 _lateLatchArrivalFenceValue = 0;
+    HANDLE _lateLatchArrivalEvent = nullptr;
     ReprojTelemetry _telemetry;
     ReprojSlotRecord* _currentTelemetrySlot = nullptr;
     class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use

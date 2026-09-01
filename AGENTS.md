@@ -171,9 +171,13 @@ Known issues / limitations:
   pan proved constants were nonzero but exposed two latency sources: (1) packet `sourceMouseX/Y` must come from
   `GetRawMouseMotionAt(sourcePoseTimestamp)`, never publication-time totals, or input arriving between camera update
   and Present is discarded and each new 60 Hz anchor resets one output slot to zero steering; sensitivity calibration
-  must use the same timestamp-aligned history; (2) the deferred fence currently reaches warp GPU start 10–17 ms after
-  its CPU signal because the present queue is backlogged. Fix/validate the timestamp baseline first; queue-arrival late
-  latching (or a separate queue) is the next architecture step if input remains delayed.
+  must use the same timestamp-aligned history; (2) the first deferred-fence implementation reached warp GPU start
+  10–17 ms after its CPU signal because the present queue was backlogged. Queue-arrival late latching now enqueues an
+  arrival-fence signal immediately before the GPU wait, submits the warp, waits on CPU until older queue work drains,
+  then samples input and releases the waiting GPU (while retaining the 0.75 ms deadline target if the queue arrives
+  early). Always release `_lateLatchFence` on every failure path or the shared direct queue deadlocks. This deliberately
+  makes queue backlog visible as presenter lateness/skipped slots instead of silently turning fresh input stale; a
+  separate low-latency queue remains the next architecture step if shared-queue stalls are too frequent.
 - Late-latch yaw composes around CryEngine world Z, then pitch around the yawed camera-right axis (KCD2 only; generic
   cameras keep their local-up convention). Never yaw around the camera's local up vector: it tilts with pitch and
   produces roll/diagonal movement when panning horizontally while looking steeply up or down.

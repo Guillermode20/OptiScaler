@@ -703,8 +703,10 @@ void AReproj_Dx12::PresenterMain()
 
         if (tSlot)
         {
-            tSlot->commandRecordingEndQpc = _telemetry.NowQpc();
-            tSlot->queueSubmitQpc = _telemetry.NowQpc();
+            if (tSlot->commandRecordingEndQpc == 0)
+                tSlot->commandRecordingEndQpc = _telemetry.NowQpc();
+            if (tSlot->queueSubmitQpc == 0)
+                tSlot->queueSubmitQpc = _telemetry.NowQpc();
             if (queryStart != UINT32_MAX)
                 _telemetry.OnGpuWorkSubmitted(tSlot->sequence, scFenceBefore, queryStart, tSlot->queueSubmitQpc);
             _currentTelemetrySlot = nullptr;
