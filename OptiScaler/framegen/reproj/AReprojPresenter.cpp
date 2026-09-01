@@ -146,10 +146,12 @@ bool AReproj_Dx12::StartAsyncPresenter()
 #endif
 
     // Cursor-locked games (KCD2) consume raw input inside their own frame loop,
-    // so the game-facing input paths never see WM_INPUT and the late latch would
-    // read frozen motion totals. The dedicated pump (hidden RIDEV_INPUTSINK
-    // window on its own thread) keeps the timestamped totals fresh at the mouse
-    // report rate while the async presenter is live, independent of game cadence.
+    // so the game-facing input paths only see motion at game cadence and the
+    // late latch would read stale totals. The dedicated pump (passive
+    // WH_MOUSE_LL low-level hook on its own thread — an observer, never a
+    // second RegisterRawInputDevices, which on Wine steals the game's raw
+    // delivery) keeps the timestamped totals fresh at the mouse report rate
+    // while the async presenter is live, independent of game cadence.
     if (Config::Instance()->ReprojLateLatch.value_or_default() &&
         Config::Instance()->ReprojRawInputPump.value_or_default())
     {

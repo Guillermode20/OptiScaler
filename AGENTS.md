@@ -142,22 +142,26 @@ Known issues / limitations:
   (fixed 2026-08-27, keep intact): raw-input relative motion (WM_INPUT/GetRawInputData/GetRawInputBuffer via
   `AccumulateRelativeMouseMotionLocked`) records into the timestamped `RawMouseMotionState`/`RawMouseHistory` — the
   polled GetCursorPos stream stays empty for cursor-locked games like KCD2, so without the raw-input path the late latch
-  silently sees zero deltas. **Dedicated raw-input pump (2026-09-01, `[Reproj] RawInputPump`, default on):** when the
-  async presenter is active with `LateLatch` enabled, `OptiInput::StartRawInputPump` spins a thread that owns a hidden
-  `RIDEV_INPUTSINK` window and drains `WM_INPUT` at the mouse report rate (~1 kHz), feeding the same timestamped
-  `RawMouseMotionState`/`RawMouseHistory` totals the presenter reads. This fixes cursor-locked games (KCD2) whose raw
-  input is consumed inside the engine's per-frame loop (`hooks:no recvRaw:no`), so the hooked paths never see WM_INPUT
-  and the late latch would otherwise read frozen totals that only advance at the 60 Hz game cadence — the displayed
-  heading then tracks the render rate and "feels like 60 FPS" despite a 116 FPS display. While the pump is active it is
-  the SOLE accumulator of relative motion (`AccumulateRelativeMouseMotionLocked` returns for non-pump threads), so one
-  physical movement is never double-counted against a game that also surfaces raw input through the hooked paths. The
-  pump thread is stopped in `OptiInput::Shutdown` (joined before the state mutex is taken; its teardown epilogue takes
-  that mutex) and via `StopAsyncPresenter` when reprojection turns off. Sync-path limitation: the game thread is blocked
-  inside Present during warp bursts, so WM_INPUT is not pumped mid-burst; async (presenter thread) sees fully fresh
-  totals. Grid-anchored sampling (2026-08-31): presenter warps default to the deferred late latch (`ReprojLateLatchFence`
-  default on) — the warp command list queues behind a CPU-signaled fence and the constant slice is written ~0.75 ms
-  before the present deadline, giving exactly one refresh of input per slot instead of sampling at the jittering
-  dispatch-lead wake.
+  silently sees zero deltas. **Dedicated input pump (2026-09-01, `[Reproj] RawInputPump`, default on):** when the
+  async presenter is active with `LateLatch` enabled, `OptiInput::StartRawInputPump` spins a thread that installs a
+  PASSIVE `WH_MOUSE_LL` low-level hook and feeds the same timestamped `RawMouseMotionState`/`RawMouseHistory` totals
+  the presenter reads, at the mouse report rate (~1 kHz). This fixes cursor-locked games (KCD2) whose raw input is
+  consumed inside the engine's per-frame loop (`hooks:no recvRaw:no`), so the hooked paths never see WM_INPUT and the
+  late latch would otherwise read frozen totals that only advance at the 60 Hz game cadence — the displayed heading then
+  tracks the render rate and "feels like 60 FPS" despite a 116 FPS display. CRITICAL (2026-09-01): the pump must NOT
+  be a second `RegisterRawInputDevices` — on Wine a second registration redirects the entire raw-input stream to the
+  newest window, starving the game's own reads (KCD2's camera froze until the pump was rewritten to WH_MOUSE_LL). The
+  low-level hook is an observer: it never claims a device, so the game's raw delivery is untouched. Relative deltas are
+  derived from successive OS cursor positions with the same recenter filtering as the external-target path (moves that
+  land near the game-window center right after a large jump or an injected event are the game re-homing the cursor, not
+  motion). While the pump is actively delivering motion it is the SOLE accumulator of relative motion —
+  `AccumulateRelativeMouseMotionLocked` ignores non-pump threads — but the gate is self-expiring (250 ms of quiet
+  hook re-opens the game-facing paths), so a fully pinned cursor cannot starve a game that does surface raw input to
+  us. The pump thread is stopped in `OptiInput::Shutdown` (joined before the state mutex is taken; its teardown
+  epilogue takes that mutex) and via `StopAsyncPresenter` when reprojection turns off. Grid-anchored sampling
+  (2026-08-31): presenter warps default to the deferred late latch (`ReprojLateLatchFence` default on) — the warp
+  command list queues behind a CPU-signaled fence and the constant slice is written ~0.75 ms before the present
+  deadline, giving exactly one refresh of input per slot instead of sampling at the jittering dispatch-lead wake.
 - Late-latch yaw composes around CryEngine world Z, then pitch around the yawed camera-right axis (KCD2 only; generic
   cameras keep their local-up convention). Never yaw around the camera's local up vector: it tilts with pitch and
   produces roll/diagonal movement when panning horizontally while looking steeply up or down.

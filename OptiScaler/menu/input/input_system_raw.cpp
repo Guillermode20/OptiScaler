@@ -21,6 +21,30 @@ HINSTANCE GetCurrentModuleHandle()
     return module != nullptr ? module : GetModuleHandleW(nullptr);
 }
 
+// QPC wall-clock in milliseconds, same time base as RecordRawMouseMotionLocked.
+// Declared here (top of file) because AccumulateRelativeMouseMotionLocked uses
+// it to expire the pump's sole-accumulator gate.
+double RawInputPumpNowMs()
+{
+    static const double ticksToMilliseconds = []
+    {
+        LARGE_INTEGER frequency {};
+        QueryPerformanceFrequency(&frequency);
+        return frequency.QuadPart > 0 ? 1000.0 / static_cast<double>(frequency.QuadPart) : 0.0;
+    }();
+
+    LARGE_INTEGER counter {};
+    QueryPerformanceCounter(&counter);
+    return static_cast<double>(counter.QuadPart) * ticksToMilliseconds;
+}
+
+LONG PumpAbsLong(LONG value) { return value < 0 ? -value : value; }
+
+bool PumpIsNearPoint(const POINT& a, const POINT& b, LONG threshold)
+{
+    return PumpAbsLong(a.x - b.x) <= threshold && PumpAbsLong(a.y - b.y) <= threshold;
+}
+
 LRESULT CALLBACK ExternalRawInputSinkWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (msg == WM_INPUT)
@@ -560,13 +584,21 @@ void AccumulateRelativeMouseMotionLocked(LONG x, LONG y)
     if (x == 0 && y == 0)
         return;
 
-    // While the dedicated raw-input pump is active it is the SOLE accumulator
-    // of relative motion: the pump drains WM_INPUT at ~1 kHz from a hidden
-    // sink window that receives a copy of every packet (RIDEV_INPUTSINK), and
-    // the game-facing paths below sample at the game's own cadence. If those
-    // kept writing too, one physical movement would be counted twice and the
-    // late-latch sensitivity would double.
-    if (_state.RawInputPumpActive && GetCurrentThreadId() != _state.RawInputPumpThreadId)
+    // While the dedicated input pump is active AND is provably delivering
+    // motion it is the SOLE accumulator of relative motion: the pump observes
+    // the OS cursor via a passive WH_MOUSE_LL hook at the cursor event rate,
+    // and the game-facing paths below sample at the game's own cadence. If both
+    // kept writing while the pump is live, one physical movement would be
+    // counted twice and the late-latch sensitivity would double. The gate is
+    // self-expiring: if the OS cursor is fully pinned (no WM_MOUSEMOVE at all
+    // for > RawInputPumpGateWindowMs), the pump is not contributing and the
+    // game's own raw reads must be allowed through again, otherwise a quiet
+    // hook would silently starve the late latch in games that DO deliver raw
+    // input to us.
+    static constexpr double RawInputPumpGateWindowMs = 250.0;
+    if (_state.RawInputPumpActive && GetCurrentThreadId() != _state.RawInputPumpThreadId &&
+        _state.RawInputPumpMessageCount > 0 && _state.RawInputPumpLastMotionMs > 0.0 &&
+        (RawInputPumpNowMs() - _state.RawInputPumpLastMotionMs) < RawInputPumpGateWindowMs)
         return;
 
     _state.ReceivedAnyInputThisFrame = true;
@@ -716,65 +748,147 @@ namespace
 {
 constexpr UINT RawInputPumpMessageLimit = 256;
 
-DWORD WINAPI RawInputPumpThreadMain(LPVOID)
+// The game re-homes the OS cursor to the center of its client rect via
+// SetCursorPos every frame (cursor-locked camera). That jump is not physical
+// motion, so compute the screen-space center like the external-target path:
+// a move that ends up near that center right after a large jump or an injected
+// event is a recenter, not a flick.
+bool GetGameCenterScreenLocked(POINT& center)
 {
-    if (!RegisterExternalRawInputSinkClass())
-    {
-        LOG_WARN("raw input pump class registration failed");
-        return 1;
-    }
-
-    const HINSTANCE module = GetCurrentModuleHandle();
-    HWND hwnd = CreateWindowExW(0, ExternalRawInputSinkClassName, L"OptiInput RawInput Pump", WS_POPUP, 0, 0, 1, 1,
-                                nullptr, nullptr, module, nullptr);
+    HWND hwnd = _state.TargetHwnd != nullptr ? _state.TargetHwnd : _state.InputHwnd;
     if (hwnd == nullptr)
-    {
-        LOG_WARN("raw input pump CreateWindowExW failed error:{}", GetLastError());
-        return 1;
-    }
+        return false;
 
-    // RIDEV_INPUTSINK delivers a copy of every raw packet to this window (even
-    // in the background) without disturbing the game's own registration. This
-    // is the same mechanism the external-target sink uses for Remix and is
-    // Proton-validated.
-    RAWINPUTDEVICE device {};
-    device.usUsagePage = HID_USAGE_PAGE_GENERIC;
-    device.usUsage = HID_USAGE_GENERIC_MOUSE;
-    device.dwFlags = RIDEV_INPUTSINK;
-    device.hwndTarget = hwnd;
+    if (!IsWindow(hwnd))
+        return false;
 
-    BOOL registered = FALSE;
-    {
-        ScopedHookBypass bypass;
-        registered = o_RegisterRawInputDevices != nullptr
-                         ? o_RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE))
-                         : RegisterRawInputDevices(&device, 1, sizeof(RAWINPUTDEVICE));
-    }
+    RECT client {};
+    if (!GetClientRect(hwnd, &client))
+        return false;
 
-    if (!registered)
-    {
-        const DWORD error = GetLastError();
-        LOG_WARN("raw input pump RegisterRawInputDevices failed hwnd:{} error:{}", static_cast<void*>(hwnd), error);
-        DestroyWindow(hwnd);
-        return 1;
-    }
+    POINT topLeft = { client.left, client.top };
+    if (!ClientToScreen(hwnd, &topLeft))
+        return false;
 
-    HANDLE stopEvent = nullptr;
+    center.x = topLeft.x + (client.right - client.left) / 2;
+    center.y = topLeft.y + (client.bottom - client.top) / 2;
+    return true;
+}
+
+// Passively observes cursor movement via WH_MOUSE_LL. This is deliberately NOT
+// a second RegisterRawInputDevices: on Wine a second registration for the same
+// device redirects the entire raw-input stream to the newest window, starving
+// the game's own reads (KCD2 camera froze until this was removed). A low-level
+// hook is an observer — it never claims the device, so the game's raw input
+// delivery is untouched. Relative deltas are derived from successive cursor
+// positions; cursor-locked games re-center the OS cursor (SetCursorPos), which
+// shows up as large jumps that are filtered like the external-target path does.
+LRESULT CALLBACK RawInputPumpLowLevelMouseProc(int code, WPARAM wParam, LPARAM lParam)
+{
+    if (code != HC_ACTION || lParam == 0)
+        return CallNextHookEx(_state.RawInputPumpHook, code, wParam, lParam);
+
+    if (wParam != WM_MOUSEMOVE)
+        return CallNextHookEx(_state.RawInputPumpHook, code, wParam, lParam);
+
+    const MSLLHOOKSTRUCT* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
+    if (mouse == nullptr)
+        return CallNextHookEx(_state.RawInputPumpHook, code, wParam, lParam);
+
     {
         std::unique_lock lock(_state.Mutex);
-        _state.RawInputPumpHwnd = hwnd;
+
+        const POINT point = mouse->pt;
+        const bool injected = (mouse->flags & LLMHF_INJECTED) != 0;
+
+        if (!_state.RawInputPumpLastScreenValid)
+        {
+            _state.RawInputPumpLastScreen = point;
+            _state.RawInputPumpLastScreenValid = true;
+            return CallNextHookEx(_state.RawInputPumpHook, code, wParam, lParam);
+        }
+
+        const POINT previous = _state.RawInputPumpLastScreen;
+        _state.RawInputPumpLastScreen = point;
+
+        const LONG deltaX = point.x - previous.x;
+        const LONG deltaY = point.y - previous.y;
+
+        // Recenter detection mirrors the validated external-target convention:
+        // a move that lands near the game's client center right after a large
+        // jump (or is injected) is the game re-homing the cursor, not motion.
+        POINT center {};
+        const bool haveCenter = GetGameCenterScreenLocked(center);
+        const bool currentNearCenter = haveCenter && PumpIsNearPoint(point, center, 3);
+        const bool previousNearCenter = haveCenter && PumpIsNearPoint(previous, center, 3);
+
+        const bool looksLikeRecenter =
+            currentNearCenter &&
+            (injected || (!previousNearCenter && (PumpAbsLong(deltaX) > 3 || PumpAbsLong(deltaY) > 3)));
+
+        if (looksLikeRecenter)
+        {
+            _state.RawInputPumpMessageCount++;
+            return CallNextHookEx(_state.RawInputPumpHook, code, wParam, lParam);
+        }
+
+        if (deltaX == 0 && deltaY == 0)
+            return CallNextHookEx(_state.RawInputPumpHook, code, wParam, lParam);
+
+        // Feed the shared timestamped totals (game-facing paths are gated off
+        // while the pump is the active accumulator, so no double counting).
+        AccumulateRelativeMouseMotionLocked(deltaX, deltaY);
+        _state.RawInputPumpMessageCount++;
+        _state.RawInputPumpLastMotionMs = RawInputPumpNowMs();
+    }
+
+    return CallNextHookEx(_state.RawInputPumpHook, code, wParam, lParam);
+}
+
+DWORD WINAPI RawInputPumpThreadMain(LPVOID)
+{
+    HANDLE stopEvent = nullptr;
+    HHOOK hook = nullptr;
+    {
+        std::unique_lock lock(_state.Mutex);
+        _state.RawInputPumpHook = nullptr;
+        _state.RawInputPumpLastScreenValid = false;
+        _state.RawInputPumpLastScreen = {};
+        _state.RawInputPumpLastMotionMs = 0.0;
+    }
+
+    HINSTANCE module = GetWindowsHookProxyModule();
+    if (module == nullptr)
+        module = GetCurrentModuleHandle();
+    if (module == nullptr)
+        module = GetModuleHandleW(nullptr);
+
+    {
+        ScopedHookBypass bypass;
+        hook = o_SetWindowsHookExW != nullptr ? o_SetWindowsHookExW(WH_MOUSE_LL, RawInputPumpLowLevelMouseProc, module, 0)
+                                              : ::SetWindowsHookExW(WH_MOUSE_LL, RawInputPumpLowLevelMouseProc, module, 0);
+    }
+    if (hook == nullptr)
+    {
+        LOG_WARN("raw input pump WH_MOUSE_LL hook install failed error:{}", GetLastError());
+        return 1;
+    }
+
+    {
+        std::unique_lock lock(_state.Mutex);
+        _state.RawInputPumpHook = hook;
         _state.RawInputPumpThreadId = GetCurrentThreadId();
         stopEvent = _state.RawInputPumpStopEvent;
         _state.RawInputPumpActive = true;
     }
 
-    LOG_INFO("raw input pump started hwnd:{}", static_cast<void*>(hwnd));
+    LOG_INFO("raw input pump started (WH_MOUSE_LL hook:{})", static_cast<void*>(hook));
 
-    while (stopEvent != nullptr)
+    // The low-level hook is dispatched through this thread's message queue, so
+    // the pump must run a message loop. It paces at the OS cursor event rate
+    // (mouse report rate) instead of the game's render cadence.
+    while (stopEvent != nullptr && hook != nullptr)
     {
-        // Block until the stop event fires or a message arrives. WM_INPUT for
-        // the sink window is posted at the device report rate (up to 1000 Hz),
-        // so this paces naturally with the mouse and costs ~no CPU when idle.
         const DWORD waitResult =
             MsgWaitForMultipleObjectsEx(1, &stopEvent, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (waitResult == WAIT_OBJECT_0)
@@ -789,45 +903,30 @@ DWORD WINAPI RawInputPumpThreadMain(LPVOID)
 
         MSG msg {};
         UINT pumped = 0;
-        while (PeekMessageW(&msg, hwnd, 0, 0, PM_REMOVE) && pumped < RawInputPumpMessageLimit)
+        // No window owns these messages; drain any that arrived (the hook
+        // callback processes the actual mouse data).
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE) && pumped < RawInputPumpMessageLimit)
         {
             pumped++;
-            if (msg.message == WM_INPUT)
-            {
-                {
-                    std::unique_lock lock(_state.Mutex);
-                    HandleRawInputLocked(reinterpret_cast<HRAWINPUT>(msg.lParam));
-                    _state.RawInputPumpMessageCount++;
-                }
-                DefWindowProcW(msg.hwnd, msg.message, msg.wParam, msg.lParam);
-            }
-            else
-            {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
     }
 
-    // Unregister and tear down on this owning thread (window handles are
-    // thread-affine; DestroyWindow must run on the creating thread).
-    RAWINPUTDEVICE removeDevice {};
-    removeDevice.usUsagePage = HID_USAGE_PAGE_GENERIC;
-    removeDevice.usUsage = HID_USAGE_GENERIC_MOUSE;
-    removeDevice.dwFlags = RIDEV_REMOVE;
-    removeDevice.hwndTarget = hwnd;
     {
         ScopedHookBypass bypass;
-        if (o_RegisterRawInputDevices != nullptr)
-            o_RegisterRawInputDevices(&removeDevice, 1, sizeof(RAWINPUTDEVICE));
+        if (o_UnhookWindowsHookEx != nullptr)
+            o_UnhookWindowsHookEx(hook);
+        else
+            ::UnhookWindowsHookEx(hook);
     }
-    DestroyWindow(hwnd);
 
     {
         std::unique_lock lock(_state.Mutex);
-        _state.RawInputPumpHwnd = nullptr;
+        _state.RawInputPumpHook = nullptr;
         _state.RawInputPumpThreadId = 0;
         _state.RawInputPumpActive = false;
+        _state.RawInputPumpLastScreenValid = false;
     }
     LOG_INFO("raw input pump stopped");
     return 0;

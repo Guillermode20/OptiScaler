@@ -641,11 +641,15 @@ class Config
     CustomOptional<float> ReprojSmoothing { 0.0f };       // 0=off, 0..0.95 EMA on camera angular velocity
     CustomOptional<bool> ReprojLateLatch { true }; // sample mouse motion at scanout to timewarp with zero input lag
     // Cursor-locked games (KCD2) consume raw input inside their own per-frame
-    // loop, so the hooked paths never see WM_INPUT and the late latch would
-    // read frozen motion totals. This spins a dedicated thread that owns a
-    // hidden RIDEV_INPUTSINK window and feeds the timestamped totals at the
-    // mouse report rate (~1 kHz). While active it is the sole accumulator of
-    // relative motion so one physical movement is never counted twice.
+    // loop, so the hooked paths only see motion at game cadence and the late
+    // latch would read stale totals. This spins a dedicated thread that installs
+    // a PASSIVE WH_MOUSE_LL low-level hook (observer only — never a second
+    // RegisterRawInputDevices, which on Wine redirects the game's whole raw
+    // stream away from it) and feeds the timestamped totals at the mouse report
+    // rate (~1 kHz). While the hook is actively delivering motion it is the sole
+    // accumulator of relative motion so one physical movement is never counted
+    // twice; if the OS cursor is pinned and the hook goes quiet the gate
+    // expires so the game's own reads resume.
     CustomOptional<bool> ReprojRawInputPump { true };
     // Presenter warps queue behind a CPU-signaled fence and write their constant
     // slice ~0.75 ms before the present deadline. That keeps warp input sampling

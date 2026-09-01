@@ -359,18 +359,26 @@ struct InputState
     HWND ExternalRawInputSinkHwnd = nullptr;
     DWORD ExternalRawInputSinkThreadId = 0;
 
-    // Dedicated high-frequency raw-input pump for the async reprojection
+    // Dedicated high-frequency mouse-motion pump for the async reprojection
     // late latch. Cursor-locked games (KCD2) consume raw input inside their
-    // own per-frame loop, so OptiInput's hooked paths never see WM_INPUT and
-    // the presenter's 120 Hz latch would read frozen motion totals. This
-    // thread owns a hidden RIDEV_INPUTSINK window (thread-affine queue),
-    // drains WM_INPUT at ~1 kHz and feeds the same timestamped totals the
-    // presenter reads via GetRawMouseMotion(). While active it is the SOLE
-    // accumulator of relative motion (game-facing paths are gated off) so one
-    // physical movement is never counted twice.
+    // own per-frame loop, so OptiInput's hooked paths only see motion at the
+    // game's cadence and the presenter's 120 Hz latch would read stale totals.
+    // This thread installs a PASSIVE WH_MOUSE_LL low-level hook (observer
+    // only — it never registers raw input devices, so it cannot redirect or
+    // steal the game's own raw input delivery, which a second
+    // RegisterRawInputDevices on Wine demonstrably does) and feeds the same
+    // timestamped totals the presenter reads via GetRawMouseMotion(). While the
+    // hook is actively delivering motion it is the sole accumulator of relative
+    // motion (game-facing paths are gated off) so one physical movement is
+    // never counted twice; when the OS cursor is fully pinned and the hook goes
+    // quiet, the gate expires and the game's own reads resume — no regression
+    // versus no pump at all.
     std::thread RawInputPumpThread;
     HANDLE RawInputPumpStopEvent = nullptr;
-    HWND RawInputPumpHwnd = nullptr;
+    HHOOK RawInputPumpHook = nullptr;
+    POINT RawInputPumpLastScreen {};
+    bool RawInputPumpLastScreenValid = false;
+    double RawInputPumpLastMotionMs = 0.0;
     DWORD RawInputPumpThreadId = 0;
     bool RawInputPumpActive = false;
     std::uint64_t RawInputPumpMessageCount = 0;
@@ -624,6 +632,7 @@ std::uint32_t CountTrackedWindowsHooksLocked();
 bool ShouldBlockWindowsHookCallbackLocked(WindowsHookSlot& slot, int code, WPARAM wParam, LPARAM lParam);
 int WindowsHookMouseMessageToButton(int hookType, WPARAM wParam, LPARAM lParam);
 HOOKPROC GetWindowsHookProxyProc(std::size_t slotIndex);
+HINSTANCE GetWindowsHookProxyModule();
 LRESULT CALLBACK InvokeWindowsHookProxy(std::size_t slotIndex, int code, WPARAM wParam, LPARAM lParam);
 void UpdateExternalMouseHookLocked();
 void RemoveExternalMouseHookLocked();

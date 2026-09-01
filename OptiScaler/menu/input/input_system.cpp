@@ -192,7 +192,8 @@ void LogInputHealthSnapshotLocked(const char* origin)
             "foreground:{} foregroundPid:{} foregroundTid:{} focused:{} menu:{} subclassed:{} hooks:{} recvWnd:{} "
             "recvQueue:{} recvRaw:{} recvAny:{} polledActive:{} polledUsed:{} polledMouse:{} polledKeyboard:{} "
             "externalVirtualMouse:{} externalAuthoritative:{} externalGetCursor:{} externalVirtualUsed:{} "
-            "externalRelative:{} recenter:{} llMouseHook:{} rawSink:{} rawSinkPump:{} pendingDelta=({}, {}) "
+            "externalRelative:{} recenter:{} llMouseHook:{} rawSink:{} rawSinkPump:{} pump:{} pumpHook:{} "
+            "pumpMsg:{} pendingDelta=({}, {}) "
             "virtualMouse=({}, {}) mouse=({}, {}) wheel:{} rawMouseReg:{} rawKeyboardReg:{} "
             "rawMouseNoLegacy:{} rawMouseSink:{} rawMouseCapture:{} rawKeyboardNoLegacy:{} rawKeyboardSink:{} "
             "trackedHooks:{} "
@@ -220,8 +221,10 @@ void LogInputHealthSnapshotLocked(const char* origin)
             YesNo(_state.ExternalGetCursorPosVirtualizedThisFrame), YesNo(_state.ExternalVirtualMouseUsedThisFrame),
             YesNo(_state.ExternalVirtualMouseRelativeUsedThisFrame), YesNo(_state.ExternalCursorRecenteringDetected),
             YesNo(_state.ExternalLowLevelMouseHookInstalled), YesNo(_state.ExternalRawInputSinkRegistered),
-            YesNo(_state.ExternalRawInputSinkPumpUsedThisFrame), _state.ExternalPendingMouseDeltaX,
-            _state.ExternalPendingMouseDeltaY, _state.ExternalVirtualMouseClient.x, _state.ExternalVirtualMouseClient.y,
+            YesNo(_state.ExternalRawInputSinkPumpUsedThisFrame), YesNo(_state.RawInputPumpActive),
+            YesNo(_state.RawInputPumpHook != nullptr), _state.RawInputPumpMessageCount,
+            _state.ExternalPendingMouseDeltaX, _state.ExternalPendingMouseDeltaY, _state.ExternalVirtualMouseClient.x,
+            _state.ExternalVirtualMouseClient.y,
             _state.MouseClientPos.x, _state.MouseClientPos.y, _state.MouseWheel, YesNo(_state.RawMouseRegistered),
             YesNo(_state.RawKeyboardRegistered), YesNo(_state.RawMouseNoLegacy), YesNo(_state.RawMouseInputSink),
             YesNo(_state.RawMouseCaptureMouse), YesNo(_state.RawKeyboardNoLegacy), YesNo(_state.RawKeyboardInputSink),
@@ -255,14 +258,15 @@ void LogInputHealthSnapshotLocked(const char* origin)
 #else
         LOG_DEBUG("{} health frame:{} mode:{} target:{} input:{} focused:{} menu:{} subclassed:{} hooks:{} "
                   "recvWnd:{} recvQueue:{} recvRaw:{} polled:{} rawMouse:{} rawKeyboard:{} trackedHooks:{} "
-                  "xinput:{} dinput:{} hidMouse:{} hidKeyboard:{} hidGamepad:{}",
+                  "pump:{} pumpHook:{} xinput:{} dinput:{} hidMouse:{} hidKeyboard:{} hidGamepad:{}",
                   origin != nullptr ? origin : "?", frameIndex, AcquisitionModeName(_state.AcquisitionMode),
                   static_cast<void*>(_state.TargetHwnd), static_cast<void*>(_state.InputHwnd), YesNo(_state.Focused),
                   YesNo(_state.MenuVisible), YesNo(_state.WndProcSubclassed), YesNo(_state.HooksInstalled),
                   YesNo(_state.ReceivedWindowMessageThisFrame), YesNo(_state.ReceivedQueueMessageThisFrame),
                   YesNo(_state.ReceivedRawInputThisFrame), YesNo(_state.PolledInputActive),
                   YesNo(_state.RawMouseRegistered), YesNo(_state.RawKeyboardRegistered),
-                  CountTrackedWindowsHooksLocked(), YesNo(_state.XInputModuleLoaded),
+                  CountTrackedWindowsHooksLocked(), YesNo(_state.RawInputPumpActive),
+                  YesNo(_state.RawInputPumpHook != nullptr), YesNo(_state.XInputModuleLoaded),
                   YesNo(_state.DirectInputModuleLoaded), YesNo(_state.HidMouseHandleSeen),
                   YesNo(_state.HidKeyboardHandleSeen), YesNo(_state.HidGamepadHandleSeen));
 #endif
@@ -909,10 +913,12 @@ void ResetStateAfterShutdown()
         CloseHandle(_state.RawInputPumpStopEvent);
         _state.RawInputPumpStopEvent = nullptr;
     }
-    _state.RawInputPumpHwnd = nullptr;
     _state.RawInputPumpThreadId = 0;
     _state.RawInputPumpActive = false;
     _state.RawInputPumpMessageCount = 0;
+    _state.RawInputPumpHook = nullptr;
+    _state.RawInputPumpLastScreenValid = false;
+    _state.RawInputPumpLastMotionMs = 0.0;
 
     ResetRawInputBlockStateLocked();
     ResetRawInputSanitizeCacheLocked();
