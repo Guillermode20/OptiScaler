@@ -202,25 +202,31 @@ void FrameLimit::paceReprojectionSource(bool active)
     const uint64_t nowNs = get_timestamp();
     g_reprojectionSourceCapHz.store(capHz, std::memory_order_relaxed);
 
-    // First frame, cap changes, and long stalls all establish a new absolute grid.
-    // Resetting on a missed deadline avoids a catch-up burst after resize, alt-tab,
-    // or a frame that took longer than its cap interval.
-    if (pacer.nextDeadlineNs == 0 || std::abs(pacer.capHz - capHz) > 0.001f || nowNs >= pacer.nextDeadlineNs)
+    // Only reset the absolute grid on initial frame, cap change, or large stalls (> 2 intervals).
+    // Resetting on minor late frames prevents the pacer from recovering cadence and pulls
+    // sustainable 60 FPS down to 55 FPS.
+    const bool capChanged = std::abs(pacer.capHz - capHz) > 0.001f;
+    const bool stalled = pacer.nextDeadlineNs != 0 && (nowNs > pacer.nextDeadlineNs + 2 * intervalNs);
+    if (pacer.nextDeadlineNs == 0 || capChanged || stalled)
     {
-        const float errorMs = pacer.nextDeadlineNs != 0
-                                  ? static_cast<float>(static_cast<double>(nowNs - pacer.nextDeadlineNs) / 1'000'000.0)
-                                  : 0.0f;
         pacer.nextDeadlineNs = nowNs + intervalNs;
         pacer.capHz = capHz;
+        g_reprojectionSourceTimingErrorMs.store(0.0f, std::memory_order_relaxed);
+        return;
+    }
+
+    if (nowNs >= pacer.nextDeadlineNs)
+    {
+        // Frame finished slightly behind schedule. Advance to the next slot without sleeping
+        // so the subsequent frame can recover cadence instead of drifting down to 55 FPS.
+        const float errorMs = static_cast<float>(static_cast<double>(nowNs - pacer.nextDeadlineNs) / 1'000'000.0);
+        while (pacer.nextDeadlineNs <= nowNs)
+            pacer.nextDeadlineNs += intervalNs;
         g_reprojectionSourceTimingErrorMs.store(errorMs, std::memory_order_relaxed);
         return;
     }
 
     const uint64_t deadlineNs = pacer.nextDeadlineNs;
-    // The legacy limiter's 2 ms spin tail costs about 12% of a CPU core at
-    // 60 Hz. That contention turns an otherwise sustainable 60 FPS KCD2
-    // source into 25-30 ms frames. Keep the same absolute deadline grid, but
-    // use the source-specific 0.2 ms precision tail.
     sleepForReprojectionSourceMs(static_cast<double>(deadlineNs - nowNs) / 1'000'000.0);
     const uint64_t completedNs = get_timestamp();
     g_reprojectionSourceTimingErrorMs.store(

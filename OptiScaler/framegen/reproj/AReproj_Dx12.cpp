@@ -1408,7 +1408,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // Leave enough time for the lightweight warp/composite/copy to finish
         // before Present while still sampling substantially later than the
         // normal four-millisecond dispatch wake.
-        constexpr double LATE_SAMPLE_LEAD_MS = 2.5;
+        constexpr double LATE_SAMPLE_LEAD_MS = 3.5;
         WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;

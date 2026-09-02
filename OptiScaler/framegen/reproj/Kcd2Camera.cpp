@@ -3,6 +3,7 @@
 
 #include "Logger.h"
 #include "Util.h"
+#include "Config.h"
 #include "shaders/reprojection/RP_Common.h"
 #include "menu/menu_common.h"
 #include "scanner/scanner.h"
@@ -332,7 +333,7 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     }
     else
     {
-        constexpr float smoothing = 0.0f;
+        const float smoothing = Config::Instance()->ReprojSmoothing.value_or_default();
         if (smoothing > 0.001f)
         {
             if (!g_smoothingInit || std::abs(smoothing - g_lastSmoothing) > 0.01f)

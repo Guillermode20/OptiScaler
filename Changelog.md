@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.16 (2026-09-02)
+* reproj: advance source pacer deadline on slight overshoots to prevent 55fps drift, enable lightweight camera EMA smoothing, and increase late latch lead to 3.5ms
+
 ## v10.0.1.15 (2026-09-02)
 * reproj: fix sourceCutGeneration field name in ApplyLateInput
 
