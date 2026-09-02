@@ -667,6 +667,9 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     const double deltaX = static_cast<double>(current.TotalX - packet.sourceMouseX);
     const double deltaY = static_cast<double>(current.TotalY - packet.sourceMouseY);
 
+    if (deltaX == 0.0 && deltaY == 0.0)
+        return false;
+
     float sensX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
     float sensY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();
     const float trackedX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
@@ -992,6 +995,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     if (kcd2CameraTimestamp > 0.0)
     {
+        SetCameraData(packet.constants.cameraPosition, packet.constants.cameraUp, packet.constants.cameraRight,
+                      packet.constants.cameraForward, sourceIndex);
         // KCD2's pose comes from the WHGame hook, not the legacy upscaler camera
         // fields, so FillConstants may have zeroed the mode above. The hooked pose
         // is authoritative here. Rotation-only (mode 2) is the safe default and
@@ -1053,8 +1058,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // publication-time totals discarded all motion between camera update and
     // Present on every source frame, making the first output after each 60 Hz
     // anchor unsteered and preserving a visible 60 Hz input cadence.
-    const auto mouse = sourceTimestamp > 0.0 ? OptiInput::GetRawMouseMotionAt(sourceTimestamp)
-                                             : OptiInput::GetRawMouseMotion();
+    const auto mouse =
+        sourceTimestamp > 0.0 ? OptiInput::GetRawMouseMotionAt(sourceTimestamp) : OptiInput::GetRawMouseMotion();
     packet.sourceMouseX = mouse.TotalX;
     packet.sourceMouseY = mouse.TotalY;
     packet.sourceMouseTimestamp = mouse.TimestampMs;
@@ -1279,8 +1284,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // valid on a COMPUTE command list. When warp runs on the COMPUTE queue and UI
     // composition is needed, split it: compute does warp+copy, then the DIRECT SC
     // queue waits on the compute fence and composites UI over the finished warp.
-    const bool composeUi =
-        constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit();
+    const bool composeUi = constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit();
 
     if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
         timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
@@ -1508,7 +1512,9 @@ void AReproj_Dx12::RecordRealFrame()
 bool AReproj_Dx12::ShouldCaptureAnchor(double nowMs)
 {
     auto* config = Config::Instance();
-    const float sourceCapHz = config->ReprojSourceFramerateLimit.value_or_default();
+    float sourceCapHz = config->ReprojSourceFramerateLimit.value_or_default();
+    if (!(std::isfinite(sourceCapHz) && sourceCapHz > 0.0f))
+        sourceCapHz = config->FramerateLimit.value_or_default();
     if (std::isfinite(sourceCapHz) && sourceCapHz > 0.0f)
     {
         // A capped source already has one authoritative deadline grid. An
@@ -1639,8 +1645,7 @@ bool AReproj_Dx12::VirtualAnchorReady() const
             _scCommandList[i] == nullptr)
             return false;
         // If the compute queue is present, the warp command lists must be too.
-        if (_computeQueue != nullptr &&
-            (_computeAllocator[i] == nullptr || _computeCommandList[i] == nullptr))
+        if (_computeQueue != nullptr && (_computeAllocator[i] == nullptr || _computeCommandList[i] == nullptr))
             return false;
     }
     return true;
@@ -2079,6 +2084,7 @@ void AReproj_Dx12::Activate()
     if (Config::Instance()->FGDrawUIOverFG.value_or_default() && _renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
+    _asyncDowngraded = false;
     const bool async = StartAsyncPresenter();
     LOG_INFO("Reproj: activated ({})", async ? "async virtual swapchain" : "synchronous");
 }

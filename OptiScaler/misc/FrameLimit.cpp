@@ -180,7 +180,13 @@ void FrameLimit::paceReprojectionSource(bool active)
     };
     thread_local SourcePacer pacer;
 
-    const float requestedCap = active ? Config::Instance()->ReprojSourceFramerateLimit.value_or_default() : 0.0f;
+    float requestedCap = 0.0f;
+    if (active)
+    {
+        requestedCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
+        if (!(std::isfinite(requestedCap) && requestedCap > 0.0f))
+            requestedCap = Config::Instance()->FramerateLimit.value_or_default();
+    }
     float capHz = std::isfinite(requestedCap) && requestedCap > 0.0f ? requestedCap : 0.0f;
     // Clamp absurd INI values; 1000 Hz is well above any display/present rate and keeps interval sane.
     capHz = std::clamp(capHz, 0.0f, 1000.0f);

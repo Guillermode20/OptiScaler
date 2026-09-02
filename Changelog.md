@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.7 (2026-09-02)
+* Async Timewarp: allow setting framerate cap while timewarping to monitor refresh rate; fix TargetRefresh fallback overriding display refresh with FramerateLimit; integrate source pacing with FramerateLimit; fix watchdog false-tripping on normal vblank presents; fallback to camera angular velocity extrapolation when late mouse delta is zero; populate KCD2 camera vectors for dynamic mouse sensitivity calibration.
+
 ## v10.0.1.6 (2026-08-31)
 * Bare-basics timewarp: remove HybridFsrGenerator/Kcd2Input/ReprojInputPredictor/TargetPoseResolver, rate-limited velocity, adaptive dispatch lead; keep raw-mouse late latch + HUD isolation
 

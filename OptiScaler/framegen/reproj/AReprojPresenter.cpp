@@ -79,7 +79,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     // Any partial failure tears the whole compute subsystem down so the DIRECT queue
     // (via _presentQueue) is the seamless fallback; useCompute must never see a
     // compute queue without its fence/allocators/lists.
-    auto teardownCompute = [this]() {
+    auto teardownCompute = [this]()
+    {
         SAFE_RELEASE(_computeFence);
         for (size_t i = 0; i < BUFFER_COUNT; i++)
         {
@@ -120,7 +121,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
                 computeFrequency != _presentTimestampFrequency)
             {
                 LOG_WARN("Reproj: compute queue timestamp frequency ({}) differs from present queue ({}); "
-                         "keeping DIRECT warp so telemetry stays correct", computeFrequency, _presentTimestampFrequency);
+                         "keeping DIRECT warp so telemetry stays correct",
+                         computeFrequency, _presentTimestampFrequency);
                 teardownCompute();
             }
             else
@@ -161,7 +163,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
                     result = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_computeFence));
                     if (FAILED(result))
                     {
-                        LOG_WARN("Reproj: compute fence creation failed: {:X}; falling back to DIRECT warp", (UINT) result);
+                        LOG_WARN("Reproj: compute fence creation failed: {:X}; falling back to DIRECT warp",
+                                 (UINT) result);
                         teardownCompute();
                     }
                     else
@@ -421,7 +424,6 @@ void AReproj_Dx12::PresenterMain()
         // return timestamp as the phase source and leaves this unstable correction out.
         if (!completionClock && SampleDisplayClock(Util::MillisecondsNow()) && nextDeadlineMs > 0.0)
         {
-            refreshPeriodMs = std::min(_measuredRefreshPeriodMs, refreshPeriodMs);
             const auto nearestVblankMs =
                 _displayClockAnchorMs +
                 std::round((nextDeadlineMs - _displayClockAnchorMs) / refreshPeriodMs) * refreshPeriodMs;
@@ -881,7 +883,7 @@ void AReproj_Dx12::PresenterMain()
 
         constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;
         constexpr double WATCHDOG_WEDGE_MS = 2000.0;
-        const bool jammedPresent = presentDurationMs > refreshPeriodMs * 1.5;
+        const bool jammedPresent = presentDurationMs > std::max(50.0, refreshPeriodMs * 3.0);
         consecutiveJammedPresents = jammedPresent ? consecutiveJammedPresents + 1 : 0;
         if (presentDurationMs > WATCHDOG_WEDGE_MS || consecutiveJammedPresents >= WATCHDOG_CONSECUTIVE_JAMS)
         {

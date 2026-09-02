@@ -17,8 +17,6 @@ double AReproj_Dx12::TargetRefreshHz()
     std::scoped_lock lock(_refreshMutex);
     auto config = Config::Instance();
     auto target = static_cast<double>(config->ReprojTargetRefresh.value_or_default());
-    if (target <= 1.0)
-        target = static_cast<double>(config->FramerateLimit.value_or_default());
     if (target > 1.0)
         return std::clamp(target, 0.0, 1000.0);
 

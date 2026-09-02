@@ -1406,7 +1406,8 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (willPresent && IsReprojectionOutput(state.activeFgOutput))
     {
         const bool reprojActive = fg != nullptr && fg->IsActive() && !fg->IsPaused();
-        FrameLimit::sleep(reprojActive && !reprojVirtualized && config->ReprojCapAtHalfRefresh.value_or_default());
+        if (!reprojVirtualized)
+            FrameLimit::sleep(reprojActive && config->ReprojCapAtHalfRefresh.value_or_default());
     }
     else if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
              !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
