@@ -1664,6 +1664,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.newAnchorDisplays = _metricsNewAnchorDisplays;
     _runtimeMetrics.repeatedAnchorDisplays = _metricsRepeatedAnchorDisplays;
     _runtimeMetrics.missedDisplaySlots = _metricsMissedDisplaySlots;
+    _runtimeMetrics.droppedAnchors = _metricsSkippedAnchorSamples;
     if (_presentIntervalCount > 0)
     {
         std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
@@ -1676,12 +1677,13 @@ void AReproj_Dx12::LogMetricsIfDue()
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} hud={} ({}, block={:.2f}ms)",
+             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} ({}, block={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots,
              _runtimeMetrics.meanPresentIntervalMs, _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge,
              _runtimeMetrics.queueDepth, _metricsLateInputApplied, _metricsLateInputSamples,
-             _metricsLateInputMaxDegrees, _metricsHudComposites, presenter, _runtimeMetrics.gamePresentBlockMs);
+             _metricsLateInputMaxDegrees, _metricsHudComposites, _metricsSkippedAnchorSamples, presenter,
+             _runtimeMetrics.gamePresentBlockMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;
@@ -1939,20 +1941,13 @@ bool AReproj_Dx12::Present()
         auto packetIndex = AcquirePacket();
         if (packetIndex < 0)
         {
-            // No free packet slot: retire completed packets and wait for one.
-            RetirePackets();
-            std::unique_lock lock(_presentMutex);
-            _presentCv.wait_for(lock, std::chrono::milliseconds(2),
-                                [&]
-                                {
-                                    if (_presenterState.load() == PresenterState::Failed)
-                                        return true;
-                                    for (const auto& candidate : _packets)
-                                        if (candidate.state.load() == PacketState::Free)
-                                            return true;
-                                    return false;
-                                });
-            lock.unlock();
+            // No free packet slot: NEVER stall the game thread here. A 2 ms
+            // wait eats directly into the SourceFramerateLimit budget (the
+            // pacer can only delay frames, never speed them up), while a
+            // skipped anchor is invisible — the presenter keeps re-warping
+            // its active anchor until a newer packet arrives. AcquirePacket
+            // already retired completed packets, so one immediate re-scan is
+            // enough to catch a packet the presenter retired concurrently.
             packetIndex = AcquirePacket();
         }
         if (packetIndex < 0)
@@ -1968,6 +1963,7 @@ bool AReproj_Dx12::Present()
             RecordWarpFrame(false, true, 0.0f);
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
+            ++_metricsSkippedAnchorSamples;
             _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
             return true;
         }

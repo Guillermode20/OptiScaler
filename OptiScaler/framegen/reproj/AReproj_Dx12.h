@@ -43,6 +43,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         uint32_t newAnchorDisplays = 0;
         uint32_t repeatedAnchorDisplays = 0;
         uint32_t missedDisplaySlots = 0;
+        uint32_t droppedAnchors = 0;
     };
 
   private:
