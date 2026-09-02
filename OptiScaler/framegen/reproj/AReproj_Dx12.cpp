@@ -677,11 +677,12 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     OptiInput::RefreshMouseMotion();
     const auto current = OptiInput::GetRawMouseMotion();
 
-    Kcd2Camera::Snapshot latestCamera {}, prevCamera {};
+    Kcd2Camera::Snapshot latestCamera {};
+    Kcd2Camera::Snapshot prevCamera {};
     const bool haveLateCamera = Kcd2Camera::IsAvailable() &&
                                 Kcd2Camera::ReadSnapshots(latestCamera, prevCamera) &&
                                 latestCamera.timestampMs > packet.sourcePoseTimestamp &&
-                                latestCamera.cutGeneration == packet.cutGeneration;
+                                latestCamera.cutGeneration == packet.sourceCutGeneration;
 
     double deltaX = 0.0;
     double deltaY = 0.0;
