@@ -301,6 +301,48 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("RotateReprojVec3(yawForward, yawRight, latePitch)", composition)
         self.assertLess(composition.index("yawForward"), composition.index("latePitch"))
 
+    def test_packet_exhaustion_does_not_stall_game_thread(self):
+        # The SourceFramerateLimit pacer can only delay frames, never speed
+        # them up: any game-thread wait inside Present() eats the source
+        # budget directly. Packet exhaustion must drop the anchor (the
+        # presenter keeps re-warping its active anchor) and count it,
+        # never wait on the presenter condition variable.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        present = source.split("bool AReproj_Dx12::Present()", 1)[1].split(
+            "void AReproj_Dx12::Activate()", 1)[0]
+        exhaust = present.split("auto packetIndex = AcquirePacket();", 1)[1].split(
+            "auto& packet = _packets[packetIndex];", 1)[0]
+        self.assertNotIn("wait_for", exhaust)
+        self.assertNotIn("WaitForSingleObject", exhaust)
+        # One immediate re-scan catches a concurrently retired packet.
+        self.assertGreaterEqual(exhaust.count("AcquirePacket()"), 1)
+        self.assertIn("++_metricsSkippedAnchorSamples", exhaust)
+
+    def test_capture_copies_can_bypass_game_queue(self):
+        # Capture color/UI copies must be able to run on the COMPUTE queue so
+        # they overlap rendering; the game queue then only publishes its frame
+        # fence. Retirement/presenter/downgrade must follow the packet
+        # completion fence rather than assuming the UI fence.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
+            "bool AReproj_Dx12::DisplayPacket(", 1)[0]
+        self.assertIn("PollCaptureAllocator(packetIndex)", capture)
+        self.assertIn("GetCaptureCommandList(packetIndex)", capture)
+        self.assertIn("SubmitCaptureCommandList(packetIndex", capture)
+        self.assertIn("packet.completionFence = _captureFence", capture)
+        # DIRECT fallback path is verbatim when compute capture is unavailable.
+        self.assertIn("packet.completionFence = _uiFence", capture)
+        # The composed-HUD invariant survives the move: no warped composed frame.
+        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && packet.hasUi", capture)
+        retire = source.split("void AReproj_Dx12::RetirePackets()", 1)[1].split(
+            "uint32_t AReproj_Dx12::PacketQueueDepth()", 1)[0]
+        self.assertIn("packet.completionFence", retire)
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        self.assertIn("completionFence", presenter)
+        self.assertIn("_captureFence", presenter)
+
     def test_phase_fit_selects_input_window_that_explains_camera_motion(self):
         # Model the C++ through-origin least-squares score. Camera response is
         # delayed by two 4 ms candidates; the aligned candidate must have the

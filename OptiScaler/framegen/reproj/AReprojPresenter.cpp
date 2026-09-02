@@ -173,6 +173,52 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 
+    // Capture copies (color/UI) run on the COMPUTE queue so they overlap game
+    // rendering instead of extending the game's frame. Partial failure only
+    // disables the compute capture path — CaptureFramePacket falls back to
+    // the DIRECT UI command list per frame — while the compute warp above is
+    // unaffected. The presenter gates each warp on the packet completion
+    // fence, and the game queue pins slot lifetime (see
+    // SubmitCaptureCommandList), so no new ordering hazards are introduced.
+    if (_computeQueue != nullptr)
+    {
+        bool captureReady = true;
+        if (FAILED(_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureFence))))
+        {
+            LOG_WARN("Reproj: capture fence creation failed; capture stays on the DIRECT queue");
+            captureReady = false;
+        }
+        else
+        {
+            _captureFence->SetName(L"Reproj_CaptureFence");
+            for (size_t i = 0; captureReady && i < BUFFER_COUNT; i++)
+            {
+                if (FAILED(_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                                           IID_PPV_ARGS(&_captureAllocator[i]))))
+                {
+                    LOG_WARN("Reproj: capture allocator[{}] creation failed; capture stays on the DIRECT queue", i);
+                    captureReady = false;
+                    break;
+                }
+                _captureAllocator[i]->SetName(std::format(L"Reproj_CaptureAllocator[{}]", i).c_str());
+
+                if (FAILED(_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, _captureAllocator[i], nullptr,
+                                                      IID_PPV_ARGS(&_captureCommandList[i]))))
+                {
+                    LOG_WARN("Reproj: capture command list[{}] creation failed; capture stays on the DIRECT queue", i);
+                    captureReady = false;
+                    break;
+                }
+                _captureCommandList[i]->SetName(std::format(L"Reproj_CaptureCmdList[{}]", i).c_str());
+                _captureCommandList[i]->Close();
+            }
+        }
+        if (!captureReady)
+            DestroyCaptureResources();
+        else
+            LOG_INFO("Reproj: capture copies use the COMPUTE queue");
+    }
+
     // Telemetry uses the DIRECT queue for timestamp calibration (both queue types
     // support timestamp queries; DIRECT is the existing baseline for comparison).
     _telemetry.Initialize(_presentQueue);
@@ -210,6 +256,7 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     SAFE_RELEASE(_warpTimestampReadback);
     SAFE_RELEASE(_warpTimestampHeap);
     _presentTimestampFrequency = 0;
+    DestroyCaptureResources();
     SAFE_RELEASE(_computeFence);
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
@@ -632,10 +679,15 @@ void AReproj_Dx12::PresenterMain()
         bool captureReady = true;
         if (newestPacketIndex >= 0)
         {
-            // Check capture fence ready at selection
+            // Check capture fence ready at selection. The fence follows the
+            // queue the copies ran on (_uiFence for DIRECT, _captureFence
+            // for COMPUTE); both are exposed via the packet completion fence.
             auto& cand = _packets[newestPacketIndex];
-            if (cand.captureFenceValue != 0 && _uiFence != nullptr)
-                captureReady = _uiFence->GetCompletedValue() >= cand.captureFenceValue;
+            auto* captureFence = cand.completionFence != nullptr ? cand.completionFence : _uiFence;
+            const auto captureValue =
+                cand.completionFence != nullptr ? cand.completionFenceValue : cand.captureFenceValue;
+            if (captureValue != 0 && captureFence != nullptr)
+                captureReady = captureFence->GetCompletedValue() >= captureValue;
             auto expected = PacketState::Ready;
             if (_packets[newestPacketIndex].state.compare_exchange_strong(expected, PacketState::Presenting))
             {
@@ -643,7 +695,10 @@ void AReproj_Dx12::PresenterMain()
                 // Gate the warp on the same queue that will execute it so the
                 // captured frame data is ready before the compute/DIRECT warp runs.
                 auto* warpQueue = _computeQueue != nullptr ? _computeQueue : _presentQueue;
-                if (FAILED(warpQueue->Wait(_uiFence, newest.captureFenceValue)))
+                auto* waitFence = newest.completionFence != nullptr ? newest.completionFence : _uiFence;
+                const auto waitValue =
+                    newest.completionFence != nullptr ? newest.completionFenceValue : newest.captureFenceValue;
+                if (waitValue != 0 && waitFence != nullptr && FAILED(warpQueue->Wait(waitFence, waitValue)))
                 {
                     newest.state.store(PacketState::Retired);
                     _presenterState.store(PresenterState::Failed);

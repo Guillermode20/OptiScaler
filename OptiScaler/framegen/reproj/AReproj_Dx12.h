@@ -44,6 +44,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         uint32_t repeatedAnchorDisplays = 0;
         uint32_t missedDisplaySlots = 0;
         uint32_t droppedAnchors = 0;
+        uint32_t computeCaptures = 0;
     };
 
   private:
@@ -128,6 +129,19 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT64 _computeFenceValue = 0;
     UINT64 _computeAllocatorFenceValues[BUFFER_COUNT] = {};
 
+    // Capture resources: CaptureFramePacket records its color/UI copies on the
+    // COMPUTE queue instead of the game's DIRECT UI command list, so the copies
+    // overlap rendering instead of extending the game's frame. The game queue
+    // only publishes its frame fence value plus a Wait pin (see
+    // SubmitCaptureCommandList). Any failure here falls back to the DIRECT UI
+    // path per frame; the compute warp above is unaffected.
+    ID3D12CommandAllocator* _captureAllocator[BUFFER_COUNT] = {};
+    ID3D12GraphicsCommandList* _captureCommandList[BUFFER_COUNT] = {};
+    bool _captureCommandListResetted[BUFFER_COUNT] = {};
+    UINT64 _captureAllocatorFenceValues[BUFFER_COUNT] = {};
+    ID3D12Fence* _captureFence = nullptr;
+    UINT64 _captureFenceValue = 0;
+
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
     UINT64 _scFenceValue = 0;  // monotonic SC fence value (fence outlives context recreate)
@@ -168,11 +182,16 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool WaitForPresenterDeadline(double deadlineMs);
     bool DrainGpuWork();
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated = false); // skip-flag wrapped present
-    bool SubmitSCCommandList(int fIndex);                      // close + execute the SC command list
-    bool WaitForSCAllocator(int fIndex);                       // wait for the previous warp on this slot to finish
+    bool SubmitSCCommandList(int fIndex); // close + execute the SC command list
+    bool WaitForSCAllocator(int fIndex);  // wait for the previous warp on this slot to finish
     ID3D12GraphicsCommandList* GetComputeCommandList(int fIndex);
     bool SubmitComputeCommandList(int fIndex);
     bool WaitForComputeAllocator(int fIndex);
+    bool PollCaptureAllocator(int packetIndex) const; // game thread: never blocks, false = use DIRECT path
+    ID3D12GraphicsCommandList* GetCaptureCommandList(int packetIndex);   // game thread: poll-only, never blocks
+    bool SubmitCaptureCommandList(int packetIndex, UINT64 uiFenceValue); // compute Wait/Execute/Signal + game pin
+    void DiscardCaptureCommandList(int packetIndex);           // drop an unsubmitted recording, keep allocator reusable
+    void DestroyCaptureResources();                            // capture-only teardown, compute warp stays alive
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
     bool IsCameraAllZero(int fIndex) const;
     bool IsPoseFresh(double timestamp, float* ageMs = nullptr) const;
@@ -194,6 +213,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsLateInputSamples = 0;
     uint32_t _metricsLateInputApplied = 0;
     uint32_t _metricsHudComposites = 0;
+    uint32_t _metricsComputeCaptures = 0;
     float _metricsLateInputMaxDegrees = 0.0f;
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
