@@ -11,6 +11,7 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <numbers>
 #include <vector>
 
 #include <State.h>
@@ -658,6 +659,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     if (!packet.inputLatchReady || constants.mode != 2)
         return false;
 
+    ++_metricsLateInputSamples;
+
     OptiInput::RefreshMouseMotion();
     const auto current = OptiInput::GetRawMouseMotion();
 
@@ -693,6 +696,10 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     }
 
     PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch));
+    ++_metricsLateInputApplied;
+    _metricsLateInputMaxDegrees = std::max(
+        _metricsLateInputMaxDegrees,
+        static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
     if (_currentTelemetrySlot != nullptr)
     {
         _currentTelemetrySlot->lateInputApplied = true;
@@ -972,7 +979,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.kind = ContentFrameKind::Real;
     packet.interpolationFraction = 1.0f;
     FillConstants(sourceIndex, packet.constants);
-    packet.constants.hudlessSource = packet.hasUi ? 1u : 0u;
+    // 0 = no isolated UI, 1 = premultiplied alpha, 2 = straight alpha.
+    packet.constants.hudlessSource =
+        packet.hasUi ? (Config::Instance()->FGUIPremultipliedAlpha.value_or_default() ? 1u : 2u) : 0u;
     const auto colorDesc = packet.color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
     double kcd2PoseIntervalMs = 0.0;
@@ -1266,16 +1275,19 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = content.constants;
     constants.timeStep = timeStep;
-    constexpr bool deferredLateLatch = false;
+    // The independent COMPUTE queue can safely wait for a CPU fence without
+    // being serialized behind KCD2's DIRECT queue. Sample at scanout instead
+    // of four milliseconds early; DIRECT fallback stays immediate.
+    const bool deferredLateLatch = useCompute && _lateLatchFence != nullptr;
     if (!deferredLateLatch)
     {
         if (!ApplyLateInput(constants, packet))
-            PrepareRotationConstants(constants);
+            PrepareRotationConstants(constants, true);
     }
     const bool useDepth = packet.hasDepth;
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, packet.velocity, packet.velocityState,
                                     useDepth ? packet.depth : nullptr, packet.depthState, _warpOutput[outputIndex],
-                                    constants, outputIndex, deferredLateLatch);
+                                    constants, outputIndex, deferredLateLatch, packet.ui, packet.uiState);
     if (!ok)
     {
         backBuffer->Release();
@@ -1294,12 +1306,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     cmdList->CopyResource(backBuffer, _warpOutput[outputIndex]);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     backBuffer->Release();
-
-    // RUI (UI composition) uses a rasterizing pixel-shader pipeline, which is NOT
-    // valid on a COMPUTE command list. When warp runs on the COMPUTE queue and UI
-    // composition is needed, split it: compute does warp+copy, then the DIRECT SC
-    // queue waits on the compute fence and composites UI over the finished warp.
-    const bool composeUi = constants.debugView != 2 && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit();
 
     if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
         timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
@@ -1332,8 +1338,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
     else
     {
-        if (composeUi)
-            _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
         if (!SubmitSCCommandList(outputIndex))
         {
             if (lateLatchValue != 0)
@@ -1342,23 +1346,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         }
     }
 
-    // When the warp ran on COMPUTE and UI must be composited, run the RUI pass on
-    // the DIRECT SC queue after the compute warp completes.
-    if (useCompute && composeUi && _computeFence != nullptr)
-    {
-        _presentQueue->Wait(_computeFence, _computeAllocatorFenceValues[outputIndex]);
-        auto scCmdList = GetSCCommandList(outputIndex);
-        if (scCmdList != nullptr)
-        {
-            _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
-            _renderUI->Dispatch(realSwapChain, scCmdList, packet.ui, packet.uiState);
-            SubmitSCCommandList(outputIndex);
-        }
-    }
+    ++_metricsHudComposites;
 
-    // Retirement is tracked on _scFence (RetirePackets reads _scFence). When the
-    // warp ran on COMPUTE, SubmitComputeCommandList already signaled _scFence;
-    // if UI composition also ran on the SC queue, that later signal covers both.
+    // Retirement is tracked on _scFence; SubmitComputeCommandList signals it
+    // after the combined world-warp/UI-composite dispatch.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
@@ -1367,12 +1358,15 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // Submit early enough to sit behind Proton's game-queue backlog, then
         // release it with a target sampled immediately before the present
         // deadline. The target itself is predicted to scanout midpoint.
-        constexpr double LATE_SAMPLE_LEAD_MS = 0.75;
+        // Leave enough time for the lightweight warp/composite/copy to finish
+        // before Present while still sampling substantially later than the
+        // normal four-millisecond dispatch wake.
+        constexpr double LATE_SAMPLE_LEAD_MS = 1.5;
         WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, packet))
-            PrepareRotationConstants(lateConstants);
+            PrepareRotationConstants(lateConstants, true);
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -1382,6 +1376,13 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         if (!constantsWritten || FAILED(signalResult))
             return false;
     }
+
+    // The swapchain was created against the DIRECT queue, so do not rely on an
+    // implicit cross-queue dependency for a backbuffer written by COMPUTE.
+    // A short completion wait is deterministic and avoids routing any work back
+    // through KCD2's contended DIRECT queue.
+    if (useCompute && !WaitForComputeAllocator(outputIndex))
+        return false;
     return true;
 }
 
@@ -1626,13 +1627,14 @@ void AReproj_Dx12::LogMetricsIfDue()
         _runtimeMetrics.p95PresentIntervalMs = static_cast<float>(*p95);
     }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
-    LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={} sampledSkip={}) missed={} "
-             "interval={:.2f}/{:.2f}ms "
-             "lead={:.2f}ms poseAge={:.1f}ms queue={} pose=rendered ({}, block={:.2f}ms)",
+    LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
+             "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
+             "late={}/{} maxDeg={:.2f} hud={} ({}, block={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
-             _metricsRepeatedAnchorDisplays, _metricsSkippedAnchorSamples, _metricsMissedDisplaySlots,
+             _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots,
              _runtimeMetrics.meanPresentIntervalMs, _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge,
-             _runtimeMetrics.queueDepth, presenter, _runtimeMetrics.gamePresentBlockMs);
+             _runtimeMetrics.queueDepth, _metricsLateInputApplied, _metricsLateInputSamples,
+             _metricsLateInputMaxDegrees, _metricsHudComposites, presenter, _runtimeMetrics.gamePresentBlockMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;
@@ -1644,6 +1646,10 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsRepeatedAnchorDisplays = 0;
     _metricsSkippedAnchorSamples = 0;
     _metricsMissedDisplaySlots = 0;
+    _metricsLateInputSamples = 0;
+    _metricsLateInputApplied = 0;
+    _metricsHudComposites = 0;
+    _metricsLateInputMaxDegrees = 0.0f;
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -1674,15 +1680,13 @@ HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source
                                               UINT syncInterval, UINT flags, bool allowWarps)
 {
     (void) allowWarps;
-    LOG_INFO("Reproj diag: PresentVirtualFrameSync fIdx={} vb={} interval={} flags={:X}", fIndex, virtualBufferIndex,
-             syncInterval, flags);
     if (_wrappedSwapChain == nullptr || source == nullptr || _presentThread.joinable() ||
         _presenterState.load() == PresenterState::Running)
         return DXGI_ERROR_INVALID_CALL;
 
     if (!CopyLastFrame(fIndex, source))
     {
-        LOG_INFO("Reproj diag: PresentVirtualFrameSync CopyLastFrame failed");
+        LOG_WARN("Reproj: synchronous fallback could not copy the source frame");
         return E_FAIL;
     }
 
@@ -1691,14 +1695,14 @@ HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source
     ID3D12Resource* realBuffer = nullptr;
     if (FAILED(realSwapChain->GetBuffer(realIndex, IID_PPV_ARGS(&realBuffer))))
     {
-        LOG_INFO("Reproj diag: PresentVirtualFrameSync real GetBuffer({}) failed", realIndex);
+        LOG_WARN("Reproj: synchronous fallback GetBuffer({}) failed", realIndex);
         return E_FAIL;
     }
 
     auto* cmdList = GetUICommandList(fIndex);
     if (cmdList == nullptr)
     {
-        LOG_INFO("Reproj diag: PresentVirtualFrameSync no UI command list");
+        LOG_WARN("Reproj: synchronous fallback has no UI command list");
         realBuffer->Release();
         return E_FAIL;
     }
@@ -1723,22 +1727,21 @@ HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source
 
     if (!SubmitUICommandList(static_cast<UINT>(fIndex)))
     {
-        LOG_INFO("Reproj diag: PresentVirtualFrameSync submit failed");
+        LOG_WARN("Reproj: synchronous fallback command submission failed");
         return E_FAIL;
     }
     const auto captureValue = _uiAllocatorFenceValues[fIndex];
     if (FAILED(_wrappedSwapChain->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, captureValue)))
     {
-        LOG_INFO("Reproj diag: PresentVirtualFrameSync SubmitReprojectionBuffer failed");
+        LOG_WARN("Reproj: synchronous fallback buffer submission failed");
         return E_FAIL;
     }
     const auto advanceResult = _wrappedSwapChain->AdvanceReprojectionBuffer();
     if (FAILED(advanceResult))
     {
-        LOG_INFO("Reproj diag: PresentVirtualFrameSync Advance failed {:X}", (UINT) advanceResult);
+        LOG_WARN("Reproj: synchronous fallback buffer advance failed {:X}", (UINT) advanceResult);
         return advanceResult;
     }
-    LOG_INFO("Reproj diag: PresentVirtualFrameSync presenting real frame");
     return PresentFrame(syncInterval, flags);
 }
 
@@ -2099,6 +2102,10 @@ void AReproj_Dx12::Activate()
         _metricsPoseAgeTotalMs = 0.0;
         _metricsPoseSamples = 0;
         _metricsSkippedAnchorSamples = 0;
+        _metricsLateInputSamples = 0;
+        _metricsLateInputApplied = 0;
+        _metricsHudComposites = 0;
+        _metricsLateInputMaxDegrees = 0.0f;
         _runtimeMetrics = {};
     }
     _cachedRefreshHz = 0.0;

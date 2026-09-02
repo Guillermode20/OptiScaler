@@ -75,6 +75,7 @@ cbuffer RP_Constants : register(b0)
 };
 
 Texture2D<float4> LastColor : register(t0);
+Texture2D<float4> UI : register(t1);
 RWTexture2D<float4> Output : register(u0);
 SamplerState Bilinear : register(s0);
 
@@ -97,8 +98,18 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float2 edgePixels = min(sourceUv, 1.0f - sourceUv) * float2(DisplaySize);
     float coverage = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
 
-    float4 original = LastColor.SampleLevel(Bilinear, uv, 0);
+    // Preserve exact source/UI texels whenever no sub-pixel reconstruction is
+    // needed. Only the displaced world lookup uses bilinear filtering.
+    float4 original = LastColor.Load(int3(dtid.xy, 0));
     float4 warped = LastColor.SampleLevel(Bilinear, clamp(sourceUv, 0.0f, 1.0f), 0);
-    Output[dtid.xy] = float4(lerp(original.rgb, warped.rgb, coverage), 1.0f);
+    float3 world = lerp(original.rgb, warped.rgb, coverage);
+    if (HudlessSource != 0)
+    {
+        float4 ui = UI.Load(int3(dtid.xy, 0));
+        float alpha = saturate(ui.a);
+        float3 uiRgb = HudlessSource == 1 ? ui.rgb : ui.rgb * alpha;
+        world = uiRgb + world * (1.0f - alpha);
+    }
+    Output[dtid.xy] = float4(world, 1.0f);
 }
 )";

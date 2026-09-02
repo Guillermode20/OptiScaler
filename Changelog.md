@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.12 (2026-09-02)
+* Stabilize minimal async timewarp cadence, HUD composition, and late input
+
 ## v10.0.1.11 (2026-09-02)
 * Simplify Async Timewarp to camera warp with unwarped HUD
 

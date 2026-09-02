@@ -152,6 +152,7 @@ void LogInputHealthSnapshotLocked(const char* origin)
     static std::uint64_t lastNoInputWarnFrame = 0;
     static std::uint64_t lastNoInputHwndWarnFrame = 0;
     static std::uint64_t lastNoSubclassWarnFrame = 0;
+    static std::uint64_t lastHealthLogFrame = 0;
 
     frameIndex++;
 
@@ -179,13 +180,15 @@ void LogInputHealthSnapshotLocked(const char* origin)
 
 #if OPTIINPUT_VERBOSE_LOGGING
     const bool shouldLogHealth =
-        stateChanged || (frameIndex % 120) == 0 || (_state.MenuVisible && (frameIndex % 30) == 0);
+        (stateChanged && frameIndex - lastHealthLogFrame >= 120) || (frameIndex % 600) == 0 ||
+        (_state.MenuVisible && (frameIndex % 120) == 0);
 #else
-    const bool shouldLogHealth = stateChanged || (frameIndex % 600) == 0;
+    const bool shouldLogHealth = (stateChanged && frameIndex - lastHealthLogFrame >= 120) || (frameIndex % 600) == 0;
 #endif
 
     if (shouldLogHealth)
     {
+        lastHealthLogFrame = frameIndex;
 #if OPTIINPUT_VERBOSE_LOGGING
         LOG_DEBUG(
             "{} health frame:{} mode:{} target:{} targetPid:{} input:{} inputPid:{} explicitInput:{} externalTarget:{} "

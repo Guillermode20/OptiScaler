@@ -108,8 +108,10 @@ It respects `GH_TOKEN`/`gh auth` (`repo`+`workflow`), requires `7z`, and leaves 
 - **Current primary target is KCD2**; use DRG only as a regression comparison unless explicitly requested. KCD2-specific camera/UI/guard-band work is tracked in `docs/KCD2AsyncReprojectionPlan.md`.
 - **Current scope (2026-09-02):** Async Timewarp is one fixed pipeline: virtualized game backbuffers publish
   60 Hz HUD-less world anchors, the presenter applies rotation-only camera timewarp at detected display cadence using
-  fresh raw mouse motion, and the isolated HUD is composited afterward. If camera data or separate world/UI resources
-  are missing, present the game frame unchanged; never warp a composed HUD. Depth/MV warp modes, Hybrid Timewarp,
+  fresh raw mouse motion, and the isolated HUD is composited in the same compute dispatch. A compute-fence late latch
+  samples input 1.5 ms before the target scanout; no fresh input produces an identity warp rather than rendered-camera
+  extrapolation. If camera data or separate world/UI resources are missing, present the game frame unchanged; never
+  warp a composed HUD. Depth/MV warp modes, Hybrid Timewarp,
   synchronous generated warps, anchor subsampling, smoothing/debug modes, queue/late-latch toggles, and detailed
   telemetry controls are removed. The only tuning left is target refresh, source cap, and optional mouse sensitivity.
 - Scope cut (2026-08-31): `HybridFsrGenerator`, `Kcd2Input`, `ReprojInputPredictor`, and `TargetPoseResolver` were
@@ -185,20 +187,19 @@ Known issues / limitations:
   ~98 FPS). Do not retry CPU-blocking queue-arrival latching. The next architecture experiment should avoid normal
   cross-queue scheduling latency—likely submit KCD2 warp work on the game queue with explicit ordering, or revisit a
   carefully bounded priority strategy; the previous high-priority presenter starved source rendering to ~35 FPS.
-  **COMPUTE-queue warp experiment (2026-09-01, awaiting validation):** the async warp now runs on a dedicated
+  **COMPUTE-queue warp path (updated 2026-09-02, awaiting validation):** the async warp runs on a dedicated
   `D3D12_COMMAND_LIST_TYPE_COMPUTE` queue (`AReproj_Dx12::_computeQueue`, `[Reproj] UseComputeQueue=true` default)
   created at presenter startup with normal priority, plus per-slot compute allocators/lists/`_computeFence`. VKD3D
   serializes DIRECT queues (the 10–17 ms `latchGpu` delay), but a COMPUTE queue is not serialized behind the game's
-  DIRECT queue, so the warp + backbuffer copy should reach GPU start within the slot. KCD2's HUD path is preserved by
-  splitting UI composition (RUI uses a rasterizing pixel shader, invalid on COMPUTE): the DIRECT SC queue
-  `Wait(_computeFence, …)` then composites UI over the finished warp before `Present(1,0)`. `SubmitComputeCommandList`
+  DIRECT queue, so the warp + backbuffer copy should reach GPU start within the slot. KCD2's premultiplied or
+  straight-alpha isolated UI is sampled at exact pixel coordinates and composited into the warp output by RPD before
+  the single backbuffer copy. The presenter waits for that compute fence on the CPU before `Present(1,0)`; it submits
+  no HUD work to KCD2's contended DIRECT queue. `SubmitComputeCommandList`
   signals both `_computeFence` (allocator recycling) and `_scFence` (packet retirement / telemetry). Any partial
   compute creation failure (queue, allocators, lists, fence, or a timestamp frequency differing from the present
-  queue's — needed for correct GPU→CPU telemetry conversion) tears the whole compute subsystem down and falls back to
-  the DIRECT present queue. Open risks to validate on KCD2: (a) VKD3D accepting a compute-queue copy into the swapchain
-  backbuffer, and (b) the DIRECT UI pass still landing late behind the game queue — if `presentBlockMs` stays high
-  while `latchGpu.p95` drops to <1 ms, the UI split is the residual bottleneck and the follow-up is a compute-based
-  UI blend into `_warpOutput` (backbuffers are not UAV) or game-queue submission of the UI pass.
+  queue's — needed for correct GPU timing) tears the whole compute subsystem down and falls back to the DIRECT present
+  queue. Validate cadence, `late=applied/sampled`, `maxDeg`, and `hud` from the once-per-second log summary plus live
+  image/latency feel; these counters intentionally replace the removed heavyweight per-slot telemetry.
 - Late-latch yaw composes around CryEngine world Z, then pitch around the yawed camera-right axis (KCD2 only; generic
   cameras keep their local-up convention). Never yaw around the camera's local up vector: it tilts with pitch and
   produces roll/diagonal movement when panning horizontally while looking steeply up or down.
@@ -226,6 +227,8 @@ Known issues / limitations:
 ## Reprojection Telemetry (removed 2026-09-02)
 
 Detailed per-slot reprojection telemetry and its INI/menu controls are no longer part of the minimal timewarp path.
+The once-per-second runtime line must retain source/display cadence, misses, late-input applied/sampled, maximum late
+rotation, and HUD-composite count because those values directly prove the requested behavior.
 The remaining one-slot bookkeeping shim is inert and exists only until presenter cleanup removes its internal call
 sites; do not add new diagnostics to it or treat it as a supported feature.
 

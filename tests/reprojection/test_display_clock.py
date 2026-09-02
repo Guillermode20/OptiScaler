@@ -214,6 +214,38 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("CopyPacketResource(cmdList, velocity", capture)
         self.assertIn("packet.constants.mode = 2", capture)
 
+    def test_async_warp_composites_ui_in_compute_without_direct_queue_roundtrip(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
+        dispatch = source.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
+            "bool AReproj_Dx12::DispatchWarp", 1)[0]
+        self.assertIn("packet.ui, packet.uiState", dispatch)
+        self.assertNotIn("_presentQueue->Wait(_computeFence", dispatch)
+        self.assertNotIn("_renderUI->Dispatch", dispatch)
+        self.assertIn("Texture2D<float4> UI : register(t1)", shader)
+        self.assertIn("UI.Load(int3(dtid.xy, 0))", shader)
+
+    def test_compute_warp_uses_scanout_time_latch(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        dispatch = source.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
+            "bool AReproj_Dx12::DispatchWarp", 1)[0]
+        self.assertIn("deferredLateLatch = useCompute && _lateLatchFence != nullptr", dispatch)
+        self.assertIn("WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS)", dispatch)
+        self.assertIn("useCompute && !WaitForComputeAllocator(outputIndex)", dispatch)
+        self.assertGreaterEqual(dispatch.count("PrepareRotationConstants("), 2)
+        self.assertNotIn("PrepareRotationConstants(constants);", dispatch)
+        self.assertNotIn("PrepareRotationConstants(lateConstants);", dispatch)
+
+    def test_goal_telemetry_survives_without_per_frame_reproj_info_spam(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        self.assertIn("late={}/{} maxDeg={:.2f} hud={}", source)
+        sync_present = source.split("HRESULT AReproj_Dx12::PresentVirtualFrameSync", 1)[1].split(
+            "bool AReproj_Dx12::IsCameraAllZero", 1)[0]
+        self.assertNotIn('LOG_INFO("Reproj diag:', sync_present)
+
     def test_kcd2_rotation_path_is_rigid_and_bounded(self):
         root = Path(__file__).resolve().parents[2]
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")

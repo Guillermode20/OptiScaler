@@ -26,7 +26,8 @@ void RP_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource
 bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor,
                        D3D12_RESOURCE_STATES lastColorState, ID3D12Resource* velocity,
                        D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth, D3D12_RESOURCE_STATES depthState,
-                       ID3D12Resource* output, RP_Constants& constants, int constantSlot, bool deferConstants)
+                       ID3D12Resource* output, RP_Constants& constants, int constantSlot, bool deferConstants,
+                       ID3D12Resource* ui, D3D12_RESOURCE_STATES uiState)
 {
     if (!_init || _device == nullptr || cmdList == nullptr || lastColor == nullptr || output == nullptr)
     {
@@ -50,6 +51,9 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     if (depth != nullptr)
         ResourceBarrier(cmdList, depth, depthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
+    if (ui != nullptr)
+        ResourceBarrier(cmdList, ui, uiState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
     ResourceBarrier(cmdList, output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Sample the previous frame byte-faithfully: an sRGB backbuffer copy would otherwise
@@ -68,7 +72,9 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     }
 
     CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(0), lastColorViewFormat);
-    if (velocity != nullptr)
+    if (ui != nullptr)
+        CreateShaderResourceView(_device, ui, currentHeap.GetSrvCPU(1));
+    else if (velocity != nullptr)
         CreateShaderResourceView(_device, velocity, currentHeap.GetSrvCPU(1));
     else
         CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(1), lastColorViewFormat);
@@ -107,6 +113,9 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     if (depth != nullptr)
         ResourceBarrier(cmdList, depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depthState);
+
+    if (ui != nullptr)
+        ResourceBarrier(cmdList, ui, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, uiState);
 
     return true;
 }

@@ -190,6 +190,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsNewAnchorDisplays = 0;
     uint32_t _metricsRepeatedAnchorDisplays = 0;
     uint32_t _metricsMissedDisplaySlots = 0;
+    uint32_t _metricsLateInputSamples = 0;
+    uint32_t _metricsLateInputApplied = 0;
+    uint32_t _metricsHudComposites = 0;
+    float _metricsLateInputMaxDegrees = 0.0f;
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;
