@@ -675,11 +675,11 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     const float trackedX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
     const float trackedY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
     if (sensX <= 0.0f)
-        sensX = (trackedX > 1e-5f && trackedX < 0.0005f) ? trackedX : 0.000185f;
+        sensX = (trackedX > 1e-5f && trackedX < 0.0025f) ? trackedX : 0.000185f;
     if (sensY <= 0.0f)
-        sensY = (trackedY > 1e-5f && trackedY < 0.0005f) ? trackedY : 0.000185f;
-    sensX = std::clamp(sensX, 1e-5f, 0.0005f);
-    sensY = std::clamp(sensY, 1e-5f, 0.0005f);
+        sensY = (trackedY > 1e-5f && trackedY < 0.0025f) ? trackedY : 0.000185f;
+    sensX = std::clamp(sensX, 1e-5f, 0.0025f);
+    sensY = std::clamp(sensY, 1e-5f, 0.0025f);
 
     double yaw = deltaX * sensX;
     double pitch = -deltaY * sensY;
@@ -687,7 +687,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     if (!std::isfinite(yaw) || !std::isfinite(pitch))
         return false;
 
-    constexpr double maxRotation = 0.08; // ~4.5 degrees maximum warp per slot
+    constexpr double maxRotation = 0.35; // ~20 degrees maximum warp per slot to prevent truncation on fast pans
     const double rotation = std::hypot(yaw, pitch);
     if (rotation > maxRotation)
     {
@@ -738,7 +738,7 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
         if (std::abs(dX) >= 4.0 && std::abs(yaw) > 1e-4 && (dX * yaw > 0.0))
         {
             const float measuredSensX = static_cast<float>(std::abs(yaw) / std::abs(dX));
-            if (measuredSensX > 5e-5f && measuredSensX < 0.0005f)
+            if (measuredSensX > 5e-5f && measuredSensX < 0.0025f)
             {
                 if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed))
                 {
@@ -758,7 +758,7 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
         if (std::abs(dY) >= 4.0 && std::abs(pitch) > 1e-4 && (-dY * pitch > 0.0))
         {
             const float measuredSensY = static_cast<float>(std::abs(pitch) / std::abs(dY));
-            if (measuredSensY > 5e-5f && measuredSensY < 0.0005f)
+            if (measuredSensY > 5e-5f && measuredSensY < 0.0025f)
             {
                 const float oldY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
                 _trackedMouseSensitivityY.store(oldY * 0.9f + measuredSensY * 0.1f, std::memory_order_relaxed);
@@ -1282,7 +1282,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (!deferredLateLatch)
     {
         if (!ApplyLateInput(constants, packet))
-            PrepareRotationConstants(constants, true);
+            PrepareRotationConstants(constants, false);
     }
     const bool useDepth = packet.hasDepth;
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, packet.velocity, packet.velocityState,
@@ -1361,12 +1361,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // Leave enough time for the lightweight warp/composite/copy to finish
         // before Present while still sampling substantially later than the
         // normal four-millisecond dispatch wake.
-        constexpr double LATE_SAMPLE_LEAD_MS = 1.5;
+        constexpr double LATE_SAMPLE_LEAD_MS = 2.5;
         WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, packet))
-            PrepareRotationConstants(lateConstants, true);
+            PrepareRotationConstants(lateConstants, false);
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         std::atomic_thread_fence(std::memory_order_seq_cst);

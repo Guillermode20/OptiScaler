@@ -109,7 +109,7 @@ It respects `GH_TOKEN`/`gh auth` (`repo`+`workflow`), requires `7z`, and leaves 
 - **Current scope (2026-09-02):** Async Timewarp is one fixed pipeline: virtualized game backbuffers publish
   60 Hz HUD-less world anchors, the presenter applies rotation-only camera timewarp at detected display cadence using
   fresh raw mouse motion, and the isolated HUD is composited in the same compute dispatch. A compute-fence late latch
-  samples input 1.5 ms before the target scanout; no fresh input produces an identity warp rather than rendered-camera
+  samples input 2.5 ms before the target scanout; missing fresh input falls back to rendered-camera angular velocity
   extrapolation. If camera data or separate world/UI resources are missing, present the game frame unchanged; never
   warp a composed HUD. Depth/MV warp modes, Hybrid Timewarp,
   synchronous generated warps, anchor subsampling, smoothing/debug modes, queue/late-latch toggles, and detailed

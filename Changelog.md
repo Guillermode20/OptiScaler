@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.13 (2026-09-02)
+* reproj: increase late latch clamp, lead time to 2.5ms, and add extrapolation fallback
+
 ## v10.0.1.12 (2026-09-02)
 * Stabilize minimal async timewarp cadence, HUD composition, and late input
 
