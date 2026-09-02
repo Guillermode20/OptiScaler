@@ -715,10 +715,10 @@ void AReproj_Dx12::PresenterMain()
         const auto representedPeriod =
             selectedContent->sourcePoseInterval > 1.0 ? selectedContent->sourcePoseInterval : rawPeriod;
         const auto realPeriodMs = std::max(representedPeriod, refreshPeriodMs);
-        const bool poseOriginValid = packet.hasCamera && selectedContent->sourcePoseTimestamp > 0.0 &&
-                                     selectedContent->sourcePoseTimestamp <= targetDisplayMs;
-        const auto warpOriginMs =
-            poseOriginValid ? selectedContent->sourcePoseTimestamp : selectedContent->renderTimestamp;
+        // Measure anchor age from the moment the anchor was published (renderTimestamp)
+        // rather than simulation pose sampling time, which includes the engine's internal
+        // render latency and would artificially bias timeStep by 1.5 - 2.0 frames.
+        const auto warpOriginMs = selectedContent->renderTimestamp;
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
         auto maxTimeStep = std::max(0.25f, config->ReprojMaxTimeStep.value_or_default());
         // Bare-bones warp step: anchor age / represented period, clamped only by

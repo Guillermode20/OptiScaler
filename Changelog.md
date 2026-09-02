@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.10 (2026-09-02)
+* Fix anchorAgeMs phase offset by using renderTimestamp
+
 ## v10.0.1.9 (2026-09-02)
 * Fix double-speed warp 2.0x multiplier and disable LateLatch by default
 
