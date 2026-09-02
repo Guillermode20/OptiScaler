@@ -658,7 +658,7 @@ class Config
     // jitters with the adaptive dispatch lead and the Proton waitable signal
     // phase, which re-introduces source-rate judder into the warp trajectory.
     // Set false to sample input at dispatch-lead time.
-    CustomOptional<bool> ReprojLateLatchFence { true };
+    CustomOptional<bool> ReprojLateLatchFence { false };
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<bool> ReprojTelemetry { false };

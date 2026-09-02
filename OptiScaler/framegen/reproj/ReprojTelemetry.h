@@ -219,6 +219,8 @@ struct ReprojSlotRecord
     int64_t lateInputDeltaY = 0;
     float lateInputYawRad = 0.0f;
     float lateInputPitchRad = 0.0f;
+    float lateInputSensX = 0.0f;
+    float lateInputSensY = 0.0f;
     float cameraLatencyEstimateMs = std::numeric_limits<float>::quiet_NaN();
     float gpuDurationMs = std::numeric_limits<float>::quiet_NaN();
     float gpuEndLatenessMs = std::numeric_limits<float>::quiet_NaN();
@@ -320,6 +322,8 @@ struct ReprojTelemetrySnapshot
     uint32_t lateInputNonzero = 0;
     float lateInputDeltaP95 = std::numeric_limits<float>::quiet_NaN();
     float lateInputRotationDegreesP95 = std::numeric_limits<float>::quiet_NaN();
+    float trackedSensX = std::numeric_limits<float>::quiet_NaN();
+    float trackedSensY = std::numeric_limits<float>::quiet_NaN();
     float targetCoverage = 0.0f;
     float targetErrorP95Degrees = std::numeric_limits<float>::quiet_NaN();
     uint32_t contentReal = 0;

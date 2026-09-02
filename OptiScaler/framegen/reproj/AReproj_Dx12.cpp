@@ -675,9 +675,9 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     const float trackedX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
     const float trackedY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
     if (sensX <= 0.0f)
-        sensX = trackedX > 1e-5f ? trackedX : 0.001f;
+        sensX = trackedX > 1e-5f ? trackedX : 0.00015f;
     if (sensY <= 0.0f)
-        sensY = trackedY > 1e-5f ? trackedY : 0.001f;
+        sensY = trackedY > 1e-5f ? trackedY : 0.00015f;
 
     double yaw = deltaX * sensX;
     double pitch = -deltaY * sensY;
@@ -685,7 +685,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     if (!std::isfinite(yaw) || !std::isfinite(pitch))
         return false;
 
-    constexpr double maxRotation = 0.35;
+    constexpr double maxRotation = 0.08; // ~4.5 degrees maximum warp per slot
     const double rotation = std::hypot(yaw, pitch);
     if (rotation > maxRotation)
     {
@@ -701,6 +701,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         _currentTelemetrySlot->lateInputDeltaY = current.TotalY - packet.sourceMouseY;
         _currentTelemetrySlot->lateInputYawRad = static_cast<float>(yaw);
         _currentTelemetrySlot->lateInputPitchRad = static_cast<float>(pitch);
+        _currentTelemetrySlot->lateInputSensX = sensX;
+        _currentTelemetrySlot->lateInputSensY = sensY;
     }
     return true;
 }
@@ -737,6 +739,7 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
                     _trackedMouseSensitivityX.store(measuredSensX, std::memory_order_relaxed);
                     _trackedMouseSensitivityY.store(measuredSensX, std::memory_order_relaxed);
                     _hasTrackedMouseSensitivity.store(true, std::memory_order_relaxed);
+                    LOG_INFO("Reproj: generic mouse sensitivity tracked: sensX={:.7f}", measuredSensX);
                 }
                 else
                 {
@@ -997,6 +1000,50 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     {
         SetCameraData(packet.constants.cameraPosition, packet.constants.cameraUp, packet.constants.cameraRight,
                       packet.constants.cameraForward, sourceIndex);
+
+        if (kcd2PoseIntervalMs > 1.0 && kcd2PoseIntervalMs < 100.0)
+        {
+            float kcd2Yaw = 0.0f;
+            float kcd2Pitch = 0.0f;
+            DecomposeCameraPairRotation(packet.constants.cameraForward, packet.constants.prevCameraForward,
+                                        packet.constants.prevCameraRight, packet.constants.prevCameraUp,
+                                        &kcd2Yaw, &kcd2Pitch);
+            const double prevPoseTime = kcd2CameraTimestamp - kcd2PoseIntervalMs;
+            const auto mouseNow = OptiInput::GetRawMouseMotionAt(kcd2CameraTimestamp);
+            const auto mousePrev = OptiInput::GetRawMouseMotionAt(prevPoseTime);
+            const double dX = static_cast<double>(mouseNow.TotalX - mousePrev.TotalX);
+            const double dY = static_cast<double>(mouseNow.TotalY - mousePrev.TotalY);
+
+            if (std::abs(dX) >= 4.0 && std::abs(kcd2Yaw) > 1e-4 && (dX * kcd2Yaw > 0.0))
+            {
+                const float measuredSensX = static_cast<float>(std::abs(kcd2Yaw) / std::abs(dX));
+                if (measuredSensX > 1e-5f && measuredSensX < 0.005f)
+                {
+                    if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed))
+                    {
+                        _trackedMouseSensitivityX.store(measuredSensX, std::memory_order_relaxed);
+                        _trackedMouseSensitivityY.store(measuredSensX, std::memory_order_relaxed);
+                        _hasTrackedMouseSensitivity.store(true, std::memory_order_relaxed);
+                        LOG_INFO("Reproj: KCD2 mouse sens calibrated: sensX={:.7f} (dX={:.1f}, yaw={:.5f} rad)",
+                                 measuredSensX, dX, kcd2Yaw);
+                    }
+                    else
+                    {
+                        const float oldX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
+                        _trackedMouseSensitivityX.store(oldX * 0.9f + measuredSensX * 0.1f, std::memory_order_relaxed);
+                    }
+                }
+            }
+            if (std::abs(dY) >= 4.0 && std::abs(kcd2Pitch) > 1e-4 && (-dY * kcd2Pitch > 0.0))
+            {
+                const float measuredSensY = static_cast<float>(std::abs(kcd2Pitch) / std::abs(dY));
+                if (measuredSensY > 1e-5f && measuredSensY < 0.005f)
+                {
+                    const float oldY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
+                    _trackedMouseSensitivityY.store(oldY * 0.9f + measuredSensY * 0.1f, std::memory_order_relaxed);
+                }
+            }
+        }
         // KCD2's pose comes from the WHGame hook, not the legacy upscaler camera
         // fields, so FillConstants may have zeroed the mode above. The hooked pose
         // is authoritative here. Rotation-only (mode 2) is the safe default and

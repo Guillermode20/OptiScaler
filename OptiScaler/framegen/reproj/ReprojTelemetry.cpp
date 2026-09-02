@@ -423,12 +423,15 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     std::array<float, TRACE_SLOT_COUNT> latchToGpu {};
     std::array<float, TRACE_SLOT_COUNT> lateInputDeltas {};
     std::array<float, TRACE_SLOT_COUNT> lateInputRotations {};
+    std::array<float, TRACE_SLOT_COUNT> lateInputSensX {};
+    std::array<float, TRACE_SLOT_COUNT> lateInputSensY {};
     std::array<float, TRACE_SLOT_COUNT> shadowRaw {};
     std::array<float, TRACE_SLOT_COUNT> shadowSource {};
 
     size_t nPresent = 0, nWake = 0, nWait = 0, nCmd = 0, nQueue = 0, nGpu = 0, nMargin = 0, nBlock = 0;
     size_t nRaw = 0, nSelected = 0, nRatio = 0, nPoseInterval = 0, nAge = 0, nUnclamped = 0, nFinal = 0, nShadowRaw = 0,
-           nShadowSource = 0, nLatchToGpu = 0, nLateInputDelta = 0, nLateInputRotation = 0;
+           nShadowSource = 0, nLatchToGpu = 0, nLateInputDelta = 0, nLateInputRotation = 0, nLateInputSensX = 0,
+           nLateInputSensY = 0;
 
     uint32_t scheduled = 0, presented = 0, missed = 0, skippedRep = 0, newAnchor = 0, repeated = 0, slipped = 0;
     uint32_t lateInputApplied = 0, lateInputNonzero = 0;
@@ -534,6 +537,10 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
                     lateInputDeltas[nLateInputDelta++] = delta;
                 if (nLateInputRotation < TRACE_SLOT_COUNT)
                     lateInputRotations[nLateInputRotation++] = rotationDegrees;
+                if (slot->lateInputSensX > 0.0f && nLateInputSensX < TRACE_SLOT_COUNT)
+                    lateInputSensX[nLateInputSensX++] = slot->lateInputSensX;
+                if (slot->lateInputSensY > 0.0f && nLateInputSensY < TRACE_SLOT_COUNT)
+                    lateInputSensY[nLateInputSensY++] = slot->lateInputSensY;
             }
             if (std::isfinite(slot->gpuEndLatenessMs) && nMargin < TRACE_SLOT_COUNT)
                 gpuMargins[nMargin++] = slot->gpuEndLatenessMs;
@@ -696,6 +703,8 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.lateInputNonzero = lateInputNonzero;
     snap.lateInputDeltaP95 = Percentile(lateInputDeltas, nLateInputDelta, 0.95);
     snap.lateInputRotationDegreesP95 = Percentile(lateInputRotations, nLateInputRotation, 0.95);
+    snap.trackedSensX = Percentile(lateInputSensX, nLateInputSensX, 0.50);
+    snap.trackedSensY = Percentile(lateInputSensY, nLateInputSensY, 0.50);
     snap.contentReal = contentReal;
     snap.contentGenerated = contentGenerated;
     snap.cameraBasisAvailable = camAvail;
@@ -763,7 +772,8 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              "fps={:.1f} poseInterval.p50={:.2f} poseInterval.p95={:.2f} content.real={} content.generated={} "
              "target.coverage={:.3f} target.errorP95={:.3f} latchGpu.p95={:.2f} "
              "lateInput.applied={} lateInput.nonzero={} lateInput.deltaP95={:.2f} lateInput.rotationDegP95={:.3f} "
-             "slipped={} source.capRequestedHz={:.2f} source.capActive={} target.enabled={} target.samples={}",
+             "slipped={} source.capRequestedHz={:.2f} source.capActive={} target.enabled={} target.samples={} "
+             "sens.x={:.7f} sens.y={:.7f}",
              snap.scheduledSlots, snap.presented, snap.classifiedMisses, snap.legacyMisses, snap.newAnchorOutputs,
              snap.repeatedAnchorOutputs, snap.skippedRepresentedSlots, snap.causeCpu, snap.causeWaitable,
              snap.causeCapture, snap.causeQueue, snap.causeGpu, snap.causePresent, snap.causeClock, snap.causeSchedule,
@@ -784,7 +794,8 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
              snap.lateInputApplied, snap.lateInputNonzero, snap.lateInputDeltaP95,
              snap.lateInputRotationDegreesP95, snap.slippedPresents, snap.sourceCapRequestedHz,
              snap.sourceCapActive ? 1 : 0,
-             snap.targetResolverEnabled ? 1 : 0, snap.targetActiveSamples);
+             snap.targetResolverEnabled ? 1 : 0, snap.targetActiveSamples,
+             snap.trackedSensX, snap.trackedSensY);
 }
 
 bool ReprojTelemetry::ShouldDumpMiss(const ReprojTelemetrySnapshot& snap) const

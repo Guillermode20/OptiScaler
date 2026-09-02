@@ -45,6 +45,7 @@ LATE_INPUT_EXT_RE = re.compile(
     r"lateInput\.applied=(?P<lateInputApplied>\d+) lateInput\.nonzero=(?P<lateInputNonzero>\d+) "
     r"lateInput\.deltaP95=(?P<lateInputDeltaP95>[-\d\.NaN]+) "
     r"lateInput\.rotationDegP95=(?P<lateInputRotationDegP95>[-\d\.NaN]+)"
+    r"(?:.*?sens\.x=(?P<sensX>[-\d\.NaN]+) sens\.y=(?P<sensY>[-\d\.NaN]+))?"
 )
 
 SLOT_RE = re.compile(
@@ -195,6 +196,9 @@ def analyze(path):
         print(summary)
         if rotation_p95:
             print(f"Late input rotation p95: {percentile(rotation_p95, 0.95):.3f} deg")
+        sens_x = [t.get("sensX") for t in late_input_windows if t.get("sensX") is not None]
+        if sens_x:
+            print(f"Late input sensitivity p50: {percentile(sens_x, 0.50):.7f} rad/count")
         if latch_gpu:
             print(f"Late-latch signal-to-GPU-start p95: {percentile(latch_gpu, 0.95):.2f} ms")
 

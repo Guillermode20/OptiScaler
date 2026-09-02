@@ -213,8 +213,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _lastCapturedMouseTimestamp = 0.0;
     int64_t _lastCapturedMouseX = 0;
     int64_t _lastCapturedMouseY = 0;
-    std::atomic<float> _trackedMouseSensitivityX { 0.001f };
-    std::atomic<float> _trackedMouseSensitivityY { 0.001f };
+    std::atomic<float> _trackedMouseSensitivityX { 0.00015f };
+    std::atomic<float> _trackedMouseSensitivityY { 0.00015f };
     std::atomic<bool> _hasTrackedMouseSensitivity { false };
 
   protected:
