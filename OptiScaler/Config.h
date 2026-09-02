@@ -640,7 +640,7 @@ class Config
     CustomOptional<bool> ReprojCenterCropDebug { false }; // show only central 50% of the viewport
     CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
     CustomOptional<float> ReprojSmoothing { 0.0f };       // 0=off, 0..0.95 EMA on camera angular velocity
-    CustomOptional<bool> ReprojLateLatch { true }; // sample mouse motion at scanout to timewarp with zero input lag
+    CustomOptional<bool> ReprojLateLatch { false }; // sample mouse motion at scanout to timewarp with zero input lag
     // Cursor-locked games (KCD2) consume raw input inside their own per-frame
     // loop, so the hooked paths only see motion at game cadence and the late
     // latch would read stale totals. This spins a dedicated thread that installs

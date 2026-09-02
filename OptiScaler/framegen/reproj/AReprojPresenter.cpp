@@ -724,7 +724,7 @@ void AReproj_Dx12::PresenterMain()
         // Bare-bones warp step: anchor age / represented period, clamped only by
         // the absolute extrapolation cap. No velocity limiting.
         const auto unclampedStep =
-            static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default() * 2.0f);
+            static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default());
         auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
 
         if (tSlot)
@@ -737,7 +737,7 @@ void AReproj_Dx12::PresenterMain()
             tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
             tSlot->anchorAgeMs = static_cast<float>(anchorAgeMs);
             tSlot->unclampedTimeStep =
-                static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default() * 2.0f);
+                static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default());
             tSlot->finalTimeStep = timeStep;
             tSlot->maxTimeStep = maxTimeStep;
             tSlot->timestepClamped = tSlot->unclampedTimeStep > maxTimeStep || tSlot->unclampedTimeStep < 0;

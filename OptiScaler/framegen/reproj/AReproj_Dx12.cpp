@@ -675,9 +675,11 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     const float trackedX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
     const float trackedY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
     if (sensX <= 0.0f)
-        sensX = trackedX > 1e-5f ? trackedX : 0.00015f;
+        sensX = (trackedX > 1e-5f && trackedX < 0.0005f) ? trackedX : 0.000185f;
     if (sensY <= 0.0f)
-        sensY = trackedY > 1e-5f ? trackedY : 0.00015f;
+        sensY = (trackedY > 1e-5f && trackedY < 0.0005f) ? trackedY : 0.000185f;
+    sensX = std::clamp(sensX, 1e-5f, 0.0005f);
+    sensY = std::clamp(sensY, 1e-5f, 0.0005f);
 
     double yaw = deltaX * sensX;
     double pitch = -deltaY * sensY;
@@ -732,7 +734,7 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
         if (std::abs(dX) >= 4.0 && std::abs(yaw) > 1e-4 && (dX * yaw > 0.0))
         {
             const float measuredSensX = static_cast<float>(std::abs(yaw) / std::abs(dX));
-            if (measuredSensX > 1e-5f && measuredSensX < 0.01f)
+            if (measuredSensX > 5e-5f && measuredSensX < 0.0005f)
             {
                 if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed))
                 {
@@ -752,7 +754,7 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
         if (std::abs(dY) >= 4.0 && std::abs(pitch) > 1e-4 && (-dY * pitch > 0.0))
         {
             const float measuredSensY = static_cast<float>(std::abs(pitch) / std::abs(dY));
-            if (measuredSensY > 1e-5f && measuredSensY < 0.01f)
+            if (measuredSensY > 5e-5f && measuredSensY < 0.0005f)
             {
                 const float oldY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
                 _trackedMouseSensitivityY.store(oldY * 0.9f + measuredSensY * 0.1f, std::memory_order_relaxed);
@@ -2077,7 +2079,7 @@ bool AReproj_Dx12::Present()
         // using the old fixed midpoint.
         const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
         const auto timeStep =
-            std::clamp(static_cast<float>((refreshPeriodMs * warp) / realPeriodMs) * configuredStep * 2.0f, 0.0f, 1.0f);
+            std::clamp(static_cast<float>((refreshPeriodMs * warp) / realPeriodMs) * configuredStep, 0.0f, 1.0f);
         if (!DispatchWarp(fIndex, timeStep))
         {
             LOG_WARN("Reproj: failed to dispatch warp {}/{}, dropping it", warp, warpCount);
