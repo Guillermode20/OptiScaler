@@ -814,17 +814,18 @@ LRESULT CALLBACK RawInputPumpLowLevelMouseProc(int code, WPARAM wParam, LPARAM l
         const LONG deltaX = point.x - previous.x;
         const LONG deltaY = point.y - previous.y;
 
-        // Recenter detection mirrors the validated external-target convention:
-        // a move that lands near the game's client center right after a large
-        // jump (or is injected) is the game re-homing the cursor, not motion.
+        // Recenter detection: a cursor-locked game re-centers the cursor by calling
+        // SetCursorPos(center). That jump lands at the exact center point.
+        // A continuous sweep by the player traversing near center must not be discarded.
         POINT center {};
         const bool haveCenter = GetGameCenterScreenLocked(center);
-        const bool currentNearCenter = haveCenter && PumpIsNearPoint(point, center, 3);
-        const bool previousNearCenter = haveCenter && PumpIsNearPoint(previous, center, 3);
+        const bool currentAtCenter = haveCenter && (point.x == center.x && point.y == center.y);
+        const bool previousNearCenter = haveCenter && PumpIsNearPoint(previous, center, 2);
 
         const bool looksLikeRecenter =
-            currentNearCenter &&
-            (injected || (!previousNearCenter && (PumpAbsLong(deltaX) > 3 || PumpAbsLong(deltaY) > 3)));
+            haveCenter &&
+            (injected ||
+             (currentAtCenter && !previousNearCenter && (PumpAbsLong(deltaX) > 4 || PumpAbsLong(deltaY) > 4)));
 
         if (looksLikeRecenter)
         {

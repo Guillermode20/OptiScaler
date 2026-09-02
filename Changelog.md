@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.14 (2026-09-02)
+* reproj: anchor late latch to authoritative CView pose with residual mouse delta and fixed recenter detection
+
 ## v10.0.1.13 (2026-09-02)
 * reproj: increase late latch clamp, lead time to 2.5ms, and add extrapolation fallback
 
