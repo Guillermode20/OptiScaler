@@ -106,6 +106,12 @@ It respects `GH_TOKEN`/`gh auth` (`repo`+`workflow`), requires `7z`, and leaves 
 ## Async Reprojection (in-progress feature in this repo)
 
 - **Current primary target is KCD2**; use DRG only as a regression comparison unless explicitly requested. KCD2-specific camera/UI/guard-band work is tracked in `docs/KCD2AsyncReprojectionPlan.md`.
+- **Current scope (2026-09-02):** Async Timewarp is one fixed pipeline: virtualized game backbuffers publish
+  60 Hz HUD-less world anchors, the presenter applies rotation-only camera timewarp at detected display cadence using
+  fresh raw mouse motion, and the isolated HUD is composited afterward. If camera data or separate world/UI resources
+  are missing, present the game frame unchanged; never warp a composed HUD. Depth/MV warp modes, Hybrid Timewarp,
+  synchronous generated warps, anchor subsampling, smoothing/debug modes, queue/late-latch toggles, and detailed
+  telemetry controls are removed. The only tuning left is target refresh, source cap, and optional mouse sensitivity.
 - Scope cut (2026-08-31): `HybridFsrGenerator`, `Kcd2Input`, `ReprojInputPredictor`, and `TargetPoseResolver` were
   removed along with the hybrid generated-content sequence, the rate-limited warp velocity clamp, and the
   adaptive/queue-aware dispatch lead. The branch now targets the bare timewarp loop: capture packet (color+velocity+
@@ -217,7 +223,13 @@ Known issues / limitations:
 - `IFGFeature_Dx12::CreateBufferResource` **reuses** an existing resource when the desc matches and does not transition it. If a pass leaves that resource in a custom state (e.g. `NON_PIXEL_SHADER_RESOURCE`), the caller must track and transition it.
 - sRGB formats cannot be UAVs. For a private warp output, use the typeless parent (`R8G8B8A8_TYPELESS` etc.) as the UAV and sample the sRGB source via a UNORM SRV to keep the copy byte-faithful (avoids double gamma).
 
-## Reprojection Telemetry (telemetry_plan.md)
+## Reprojection Telemetry (removed 2026-09-02)
+
+Detailed per-slot reprojection telemetry and its INI/menu controls are no longer part of the minimal timewarp path.
+The remaining one-slot bookkeeping shim is inert and exists only until presenter cleanup removes its internal call
+sites; do not add new diagnostics to it or treat it as a supported feature.
+
+<!-- Historical telemetry design below is retained for archaeology only.
 
 - Dedicated component `OptiScaler/framegen/reproj/ReprojTelemetry.{h,cpp}` owns a 512-slot fixed ring (~4.2 s at 120 Hz, <256 KB). Presenter thread is sole writer; menu/log reads a published snapshot. No allocation/vector/sort/format per slot; telemetry failure never fails presentation.
 - QPC is canonical time domain (`ReprojClock`). GPU timestamps are calibrated via `ID3D12CommandQueue::GetClockCalibration` once per second; conversion uses `cpuQpc = calibratedCpu + (gpu - calibratedGpu) * qpcFreq / gpuFreq`. Invalid calibration is marked unavailable, never forced to zero.
@@ -227,6 +239,7 @@ Known issues / limitations:
 - Classifier assigns exactly one `ReprojMissCause` (CpuWakeLate, WaitableLate, CaptureNotReady, PresentQueueBacklog, WarpGpuSlow, PresentSlip, ClockCorrection, Unknown) with secondary bitmask. Successful present with `interval > 1.5*refresh` is a slipped slot.
 - Aggregation publishes once per second: cadence, CPU, GPU, DXGI, prediction, cause totals. Uses fixed arrays and nth_element for p50/p95/p99 only at publish time. Log line is `ReprojTelemetry v=1 ...` with stable keys for parser.
 - INI: `[Reproj] Telemetry` (master enable) and `TelemetryMissDump` (rate-limited 16-before/after slot dump via async log, 10 s throttle).
+-->
 - Analysis tool: `tests/reprojection/analyze_telemetry.py` parses `OptiScaler.log` for telemetry and slot dumps, prints FPS/interval/queue distributions, clamp rate, path distribution, correlations, worst windows/slots. Fixture at `tests/reprojection/fixtures/telemetry_sample.log` guards log format regressions.
 - Hard invariants for Commit 1: no per-slot allocation/log/fence wait/readback-before-fence, no presenter motion-grid readback, no display-clock/packet/timestep behavior change—instrumentation only. Behavior changes are isolated follow-ups.
 - Overlay shows effective path (MV/depth/rotation) and truthful resource lines (velocity/depth/camera basis/constants) with warnings for missing camera, invalid depth, frequent clamping, queue dominance, polluted DXGI, missing calibration.

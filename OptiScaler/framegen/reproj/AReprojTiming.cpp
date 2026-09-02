@@ -51,7 +51,7 @@ uint32_t AReproj_Dx12::WarpCountForPeriod(double realFrameMs, double refreshHz) 
 
     const auto refreshMs = 1000.0 / refreshHz;
     const auto requested = realFrameMs > refreshMs ? static_cast<int>(std::ceil(realFrameMs / refreshMs)) - 1 : 0;
-    const auto maximum = std::clamp(Config::Instance()->ReprojMaxWarpFrames.value_or_default(), 1, 8);
+    constexpr uint32_t maximum = 1;
     return static_cast<uint32_t>(std::clamp(requested, 0, maximum));
 }
 

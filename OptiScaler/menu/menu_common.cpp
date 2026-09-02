@@ -3840,6 +3840,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         }
     }
 
+#if 0 // Removed experimental reprojection controls; async timewarp has one fixed pipeline.
     // Async reprojection controls - show diagnostic even before swapchain is ready
     if (IsReprojectionOutput(config->FGOutput.value_or_default()) && !state.reprojDisableReason.empty())
     {
@@ -4132,6 +4133,20 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                                        "HUD warning: the supplied UI is being warped with the scene.");
             }
         }
+    }
+
+#endif
+    if (IsReprojectionOutput(state.activeFgOutput) && state.currentFGSwapchain != nullptr)
+    {
+        ImGui::SeparatorText("Output (Async Timewarp)");
+        bool enabled = config->ReprojEnabled.value_or_default();
+        if (ImGui::Checkbox("Enable Async Timewarp##reproj", &enabled))
+        {
+            config->ReprojEnabled = enabled;
+            config->FGEnabled = enabled;
+            state.fgChanged = true;
+        }
+        ImGui::TextDisabled("60 Hz world -> display-rate camera warp -> unwarped HUD");
     }
 
     // XeFG controls

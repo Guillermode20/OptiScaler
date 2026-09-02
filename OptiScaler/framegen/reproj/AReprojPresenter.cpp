@@ -55,8 +55,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     // render queue (source drops 60→35 FPS, queue 26ms, wake 21ms late, 60% miss).
     // Use the normal-priority presenter queue on Linux; keep HIGH as opt-in via
     // ReprojHighPriorityQueue=true (Windows native).
-    const bool wantHighPriority =
-        !State::Instance().isRunningOnLinux && Config::Instance()->ReprojHighPriorityQueue.value_or_default();
+    constexpr bool wantHighPriority = false;
     queueDesc.Priority = wantHighPriority ? D3D12_COMMAND_QUEUE_PRIORITY_HIGH : D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
     auto result = _device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_presentQueue));
     if (FAILED(result) && wantHighPriority)
@@ -96,7 +95,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     D3D12_COMMAND_QUEUE_DESC computeDesc {};
     computeDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     computeDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    if (!Config::Instance()->ReprojUseComputeQueue.value_or_default())
+    if (false)
     {
         LOG_INFO("Reproj: compute queue disabled by config; async warp uses DIRECT queue");
     }
@@ -178,6 +177,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     // support timestamp queries; DIRECT is the existing baseline for comparison).
     _telemetry.Initialize(_presentQueue);
     _telemetry.SetTimestampResources(nullptr, nullptr, nullptr, _presentTimestampFrequency);
+#if 0 // Per-slot GPU telemetry is intentionally absent from the minimal path.
     D3D12_QUERY_HEAP_DESC queryDesc {};
     queryDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     queryDesc.Count = ReprojTelemetry::TRACE_SLOT_COUNT * 2;
@@ -197,6 +197,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
                                              _presentTimestampFrequency);
         }
     }
+#endif
     LOG_INFO("Reproj: async presenter created (SC: DIRECT, warp: {})",
              _computeQueue != nullptr ? "COMPUTE" : "DIRECT (fallback)");
     return true;
@@ -223,8 +224,6 @@ void AReproj_Dx12::DestroyAsyncPresenter()
 
 bool AReproj_Dx12::StartAsyncPresenter()
 {
-    if (!Config::Instance()->ReprojAsync.value_or_default())
-        return false;
     if (_presentThread.joinable())
         return true;
 
@@ -237,7 +236,7 @@ bool AReproj_Dx12::StartAsyncPresenter()
         return false;
     }
 
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default() && _renderUI == nullptr)
+    if (_renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
 
@@ -265,8 +264,7 @@ bool AReproj_Dx12::StartAsyncPresenter()
     // second RegisterRawInputDevices, which on Wine steals the game's raw
     // delivery) keeps the timestamped totals fresh at the mouse report rate
     // while the async presenter is live, independent of game cadence.
-    if (Config::Instance()->ReprojLateLatch.value_or_default() &&
-        Config::Instance()->ReprojRawInputPump.value_or_default())
+    if (true)
     {
         if (!OptiInput::StartRawInputPump())
             LOG_WARN("Reproj: raw input pump unavailable; late latch may read stale motion");
@@ -369,7 +367,7 @@ void AReproj_Dx12::PresenterMain()
 
     // Telemetry: ensure clock initialized (already in ReprojTelemetry ctor)
     // Poll calibration once at thread start if enabled.
-    if (config->ReprojTelemetry.value_or_default())
+    if (false)
         _telemetry.TryCalibrate();
 
     while (!_stopPresenter.load())
@@ -382,7 +380,7 @@ void AReproj_Dx12::PresenterMain()
         // current slot while retaining a small safety margin.
         const auto maxUsableLeadMs = std::max(3.0, std::min(20.0, refreshPeriodMs * 0.75));
         const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs);
-        const bool completionClock = config->ReprojPresentCompletionClock.value_or_default();
+        constexpr bool completionClock = true;
 
         // Handle TargetRefresh change without restart: reset EMA and grid
         // so 240→120 doesn't stay stuck at 4ms period with early correction drift.
@@ -401,7 +399,7 @@ void AReproj_Dx12::PresenterMain()
 
         // Telemetry per-slot record (only if enabled, otherwise dummy to avoid overhead)
         ReprojSlotRecord* tSlot = nullptr;
-        const bool telemetryEnabled = config->ReprojTelemetry.value_or_default();
+        constexpr bool telemetryEnabled = false;
         if (telemetryEnabled)
         {
             tSlot = _telemetry.BeginSlot();
@@ -720,11 +718,11 @@ void AReproj_Dx12::PresenterMain()
         // render latency and would artificially bias timeStep by 1.5 - 2.0 frames.
         const auto warpOriginMs = selectedContent->renderTimestamp;
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
-        auto maxTimeStep = std::max(0.25f, config->ReprojMaxTimeStep.value_or_default());
+        constexpr float maxTimeStep = 2.5f;
         // Bare-bones warp step: anchor age / represented period, clamped only by
         // the absolute extrapolation cap. No velocity limiting.
         const auto unclampedStep =
-            static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default());
+            static_cast<float>(anchorAgeMs / realPeriodMs);
         auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
 
         if (tSlot)
@@ -737,7 +735,7 @@ void AReproj_Dx12::PresenterMain()
             tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
             tSlot->anchorAgeMs = static_cast<float>(anchorAgeMs);
             tSlot->unclampedTimeStep =
-                static_cast<float>((anchorAgeMs / realPeriodMs) * config->ReprojTimeStep.value_or_default());
+                static_cast<float>(anchorAgeMs / realPeriodMs);
             tSlot->finalTimeStep = timeStep;
             tSlot->maxTimeStep = maxTimeStep;
             tSlot->timestepClamped = tSlot->unclampedTimeStep > maxTimeStep || tSlot->unclampedTimeStep < 0;
@@ -749,7 +747,7 @@ void AReproj_Dx12::PresenterMain()
             tSlot->cameraAspect = selectedContent->constants.cameraAspect;
             tSlot->cameraNear = selectedContent->constants.cameraNear;
             tSlot->cameraFar = selectedContent->constants.cameraFar;
-            tSlot->requestedMode = static_cast<ReprojEffectiveMode>(config->ReprojMode.value_or_default());
+            tSlot->requestedMode = ReprojEffectiveMode::RotationOnly;
             // Record the actual constants submitted to the shader.  Packet resource
             // availability alone cannot distinguish the stable rotation-only path
             // from full depth/camera reprojection.

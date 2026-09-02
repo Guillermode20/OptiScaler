@@ -480,8 +480,7 @@ bool WrappedIDXGISwapChain4::InitializeReprojectionVirtualization()
     std::scoped_lock lock(_reprojectionMutex);
     if (_reprojectionVirtualized)
         return true;
-    const bool asyncReprojection = Config::Instance()->ReprojAsync.value_or_default() ||
-                                   State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+    const bool asyncReprojection = IsReprojectionOutput(State::Instance().activeFgOutput);
     if (_reprojectionShuttingDown || !asyncReprojection || _real2 == nullptr || _real3 == nullptr)
         return false;
 

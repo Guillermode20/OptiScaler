@@ -609,63 +609,13 @@ class Config
     CustomOptional<bool> FGDLSSGForceDMFG { false };           // Overrides Opti's DLSSG mode to Dynamic
     CustomOptional<float> FGDLSSGFramerateTargetDMFG { 0.0f }; // 0.0 means auto-detects the display refresh rate
 
-    // Async Timewarp / Reprojection (ASW-style, see AsyncReprojection.md)
-    // Selecting FGOutput=Reproj is the opt-in; this setting only exists as an
-    // explicit off-switch on top of that selection (default resolves to on).
+    // Async timewarp: a 60 Hz rendered world is camera-warped at display cadence,
+    // then the unwarped HUD is composited. Keep this surface deliberately small.
     CustomOptional<bool> ReprojEnabled { true };
-    CustomOptional<bool> ReprojAsync { false };           // virtual game buffers + worker-owned real presents
-    CustomOptional<int> ReprojMode { 1 };                 // 0 = MV warp, 1 = depth-aware, 2 = camera-only
-    CustomOptional<float> ReprojStrength { 1.0f };        // blend of the warp result with the original frame
-    CustomOptional<float> ReprojTimeStep { 0.5f };        // warp fraction (0.5 = midpoint between real frames)
-    CustomOptional<float> ReprojMaxTimeStep { 2.5f };     // async warp extrapolation cap in source-frame units
-    CustomOptional<bool> ReprojInvertMV { false };        // per-game MV sign convention
-    CustomOptional<bool> ReprojUseJitterCancel { true };  // subtract jitter from the sample position
-    CustomOptional<bool> ReprojCapAtHalfRefresh { true }; // apply FrameLimit only in synchronous fallback mode
-    CustomOptional<int> ReprojMaxWarpFrames {
-        1
-    }; // bounds blocking warps in synchronous mode; async mode fills every refresh slot instead
-    CustomOptional<float> ReprojTargetRefresh { 0.0f };        // 0 = FramerateLimit, then active display refresh
-    CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // async + virtualized only; 0 = uncapped
-    // Experimental async pacing controls.  They are deliberately independent so
-    // a game can be tested with one timing change at a time.
-    CustomOptional<bool> ReprojNonBlockingAnchorSampling { false }; // sample anchors, never sleep the game thread
-    CustomOptional<float> ReprojAnchorSampleHz { 0.0f };            // 0 = SourceFramerateLimit, then TargetRefresh / 2
-    CustomOptional<bool> ReprojHighPriorityQueue { false };         // Windows only: use HIGH priority presenter queue
-    CustomOptional<bool> ReprojUseComputeQueue { true }; // submit async warp on a COMPUTE queue to avoid VKD3D DIRECT serialization
-    CustomOptional<bool> ReprojPresentCompletionClock { true }; // use completed Present timestamps, not DXGI stats
-    CustomOptional<bool> ReprojUseDepth { true };         // fall back to MV warp when depth/camera data is unavailable
-    CustomOptional<bool> ReprojRotationOnly { true };     // safer default: no generic late camera translation exists
-    CustomOptional<float> ReprojMaxPoseAgeMs { 100.0f };  // do not warp anchors with an old source pose
-    CustomOptional<bool> ReprojDebugView { false };       // false-color warp debug output
-    CustomOptional<bool> ReprojCenterCropDebug { false }; // show only central 50% of the viewport
-    CustomOptional<bool> ReprojForceBorderless { false }; // force borderless to allow tearing fake presents
-    CustomOptional<float> ReprojSmoothing { 0.0f };       // 0=off, 0..0.95 EMA on camera angular velocity
-    CustomOptional<bool> ReprojLateLatch { false }; // sample mouse motion at scanout to timewarp with zero input lag
-    // Cursor-locked games (KCD2) consume raw input inside their own per-frame
-    // loop, so the hooked paths only see motion at game cadence and the late
-    // latch would read stale totals. This spins a dedicated thread that installs
-    // a PASSIVE WH_MOUSE_LL low-level hook (observer only — never a second
-    // RegisterRawInputDevices, which on Wine redirects the game's whole raw
-    // stream away from it) and feeds the timestamped totals at the mouse report
-    // rate (~1 kHz). While the hook is actively delivering motion it is the sole
-    // accumulator of relative motion so one physical movement is never counted
-    // twice; if the OS cursor is pinned and the hook goes quiet the gate
-    // expires so the game's own reads resume.
-    CustomOptional<bool> ReprojRawInputPump { true };
-    // Presenter warps queue behind a CPU-signaled fence and write their constant
-    // slice ~0.75 ms before the present deadline. That keeps warp input sampling
-    // anchored to the display-clock grid: sampling at dispatch time instead
-    // jitters with the adaptive dispatch lead and the Proton waitable signal
-    // phase, which re-introduces source-rate judder into the warp trajectory.
-    // Set false to sample input at dispatch-lead time.
-    CustomOptional<bool> ReprojLateLatchFence { false };
+    CustomOptional<float> ReprojTargetRefresh { 0.0f };        // 0 = active display refresh
+    CustomOptional<float> ReprojSourceFramerateLimit { 60.0f }; // pace only the virtualized game thread
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
-    CustomOptional<bool> ReprojTelemetry { false };
-    CustomOptional<bool> ReprojTelemetryMissDump { false };
-    // Experimental, version-sensitive KCD2 late-UI interception.  It remains
-    // opt-in until a retail build has been live-validated.
-    CustomOptional<bool> ReprojKcd2HudIsolation { false };
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

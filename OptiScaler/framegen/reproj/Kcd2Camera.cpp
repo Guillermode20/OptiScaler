@@ -332,8 +332,7 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     }
     else
     {
-        const float rawSmoothing = Config::Instance()->ReprojSmoothing.value_or_default();
-        const float smoothing = std::clamp(rawSmoothing, 0.0f, 0.95f);
+        constexpr float smoothing = 0.0f;
         if (smoothing > 0.001f)
         {
             if (!g_smoothingInit || std::abs(smoothing - g_lastSmoothing) > 0.01f)

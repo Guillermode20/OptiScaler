@@ -46,13 +46,12 @@ enum class FGOutput : uint32_t
     FSRFG,
     DLSSG,
     XeFG,
-    Reproj,         // Async Timewarp (ASW-style), see AsyncReprojection.md
-    HybridTimewarp, // FSR generated content followed by scanout-time reprojection
+    Reproj, // Async camera timewarp
 };
 
 constexpr bool IsReprojectionOutput(FGOutput output)
 {
-    return output == FGOutput::Reproj || output == FGOutput::HybridTimewarp;
+    return output == FGOutput::Reproj;
 }
 
 enum class FGNvngxReplacement : uint32_t

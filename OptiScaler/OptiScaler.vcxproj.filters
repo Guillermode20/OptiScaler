@@ -602,9 +602,6 @@
     <ClInclude Include="shaders\format_transfer\precompile\FT_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="shaders\reprojection\precompile\RP_Shader.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="shaders\reprojection\precompile\RPD_Shader.h">
       <Filter>Header Files</Filter>
     </ClInclude>

@@ -800,8 +800,7 @@ void ReprojTelemetry::LogSnapshot(const ReprojTelemetrySnapshot& snap)
 
 bool ReprojTelemetry::ShouldDumpMiss(const ReprojTelemetrySnapshot& snap) const
 {
-    if (!Config::Instance()->ReprojTelemetryMissDump.value_or_default())
-        return false;
+    return false;
     if (!snap.valid)
         return false;
     // Severe miss or burst
@@ -812,8 +811,7 @@ bool ReprojTelemetry::ShouldDumpMiss(const ReprojTelemetrySnapshot& snap) const
 
 void ReprojTelemetry::DumpMissWindow(uint64_t triggerSequence)
 {
-    if (!Config::Instance()->ReprojTelemetry.value_or_default())
-        return;
+    return;
     const int64_t now = _clock.NowQpc();
     if (_lastDumpQpc != 0 && _clock.DeltaMs(_lastDumpQpc, now) < 10000.0)
         return;

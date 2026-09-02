@@ -358,7 +358,9 @@ struct ReprojTelemetrySnapshot
 class ReprojTelemetry
 {
   public:
-    static constexpr uint32_t TRACE_SLOT_COUNT = 512;
+    // Detailed tracing was removed from the minimal timewarp path. Keep one
+    // inert slot until the remaining presenter bookkeeping is retired.
+    static constexpr uint32_t TRACE_SLOT_COUNT = 1;
     static constexpr uint32_t GPU_QUERY_COUNT = TRACE_SLOT_COUNT * 2;
 
     ReprojTelemetry();

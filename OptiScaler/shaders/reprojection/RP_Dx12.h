@@ -10,9 +10,7 @@
 
 #define RP_NUM_OF_HEAPS BUFFER_COUNT
 
-// Async reprojection warp pass. Two PSOs sharing one root signature:
-//   - MV-only warp (v1): LastColor(t0) + Velocity(t1)
-//   - depth-aware warp (v2): + Depth(t2), camera block in the constant buffer
+// Rotation-only async camera warp pass.
 // Root signature: 3 SRVs, 1 UAV, 1 CBV, 1 static bilinear-clamp sampler.
 class RP_Dx12 : public Shader_Dx12
 {
@@ -20,7 +18,6 @@ class RP_Dx12 : public Shader_Dx12
     FrameDescriptorHeap _frameHeaps[RP_NUM_OF_HEAPS];
     ID3D12Resource* _constantBuffers[RP_NUM_OF_HEAPS] = {};
     UINT8* _constantBufferData[RP_NUM_OF_HEAPS] = {};
-    ID3D12PipelineState* _pipelineStateDepth = nullptr;
 
     static void ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource,
                                 D3D12_RESOURCE_STATES beforeState, D3D12_RESOURCE_STATES afterState);

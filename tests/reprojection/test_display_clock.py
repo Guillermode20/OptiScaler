@@ -164,10 +164,7 @@ class ReprojectionTests(unittest.TestCase):
     def test_runtime_and_precompiled_shader_sources_match(self):
         root = Path(__file__).resolve().parents[2]
         common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")
-        pairs = {
-            "RPMV_ShaderCode": root / "OptiScaler/shaders/reprojection/precompile/RP.hlsl",
-            "RPD_ShaderCode": root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl",
-        }
+        pairs = {"RPD_ShaderCode": root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl"}
         for symbol, source_path in pairs.items():
             marker = f'{symbol} = R"(\n'
             embedded = common.split(marker, 1)[1].split('\n)";', 1)[0]
@@ -202,24 +199,20 @@ class ReprojectionTests(unittest.TestCase):
         self.assertLess(publish.index("FrameLimit::paceReprojectionSource(true)"), publish.index("return true"))
         self.assertIn("FrameLimit::paceReprojectionSource(false)", source)
 
-    def test_nonblocking_anchor_sampling_advances_virtual_ring_before_source_pacing(self):
+    def test_every_paced_source_frame_is_an_anchor(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        skip_path = source.split("if (!captureThisPresent)", 1)[1].split("RecordRealFrame();", 1)[0]
-        self.assertIn("SubmitReprojectionBuffer", skip_path)
-        self.assertIn("AdvanceReprojectionBuffer", skip_path)
-        self.assertIn("FrameLimit::paceReprojectionSource(true)", skip_path)
-        self.assertLess(skip_path.index("AdvanceReprojectionBuffer"), skip_path.index("FrameLimit::paceReprojectionSource(true)"))
-        self.assertIn("ShouldCaptureAnchor", source)
+        self.assertIn("constexpr bool captureThisPresent = true", source)
+        self.assertIn("FrameLimit::paceReprojectionSource(true)", source)
 
-    def test_capped_source_has_one_authoritative_anchor_clock(self):
+    def test_minimal_path_requires_camera_and_separate_hud(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        sampler = source.split("bool AReproj_Dx12::ShouldCaptureAnchor", 1)[1].split(
-            "void AReproj_Dx12::RecordWarpFrame", 1)[0]
-        self.assertIn("ReprojSourceFramerateLimit", sampler)
-        self.assertIn("Publish every paced frame", sampler)
-        self.assertLess(sampler.index("ReprojSourceFramerateLimit"), sampler.index("ReprojNonBlockingAnchorSampling"))
+        capture = source.split("bool AReproj_Dx12::CaptureFramePacket", 1)[1].split(
+            "bool AReproj_Dx12::DisplayPacket", 1)[0]
+        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && packet.hasUi", capture)
+        self.assertNotIn("CopyPacketResource(cmdList, velocity", capture)
+        self.assertIn("packet.constants.mode = 2", capture)
 
     def test_kcd2_rotation_path_is_rigid_and_bounded(self):
         root = Path(__file__).resolve().parents[2]
@@ -236,24 +229,20 @@ class ReprojectionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        self.assertIn("ReprojPresentCompletionClock { true }", config)
+        self.assertNotIn("ReprojPresentCompletionClock", config)
+        self.assertIn("constexpr bool completionClock = true", presenter)
         self.assertIn("if (!completionClock && SampleDisplayClock", presenter)
         self.assertIn("if (completionClock || nextDeadlineMs <= 0.0)", presenter)
         self.assertIn("maxUsableLeadMs", presenter)
         self.assertIn("std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs)", presenter)
 
-    def test_telemetry_separates_slips_from_absent_slots(self):
+    def test_experimental_control_surface_is_removed(self):
         root = Path(__file__).resolve().parents[2]
-        header = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.h").read_text(encoding="utf-8")
-        telemetry = (root / "OptiScaler/framegen/reproj/ReprojTelemetry.cpp").read_text(encoding="utf-8")
-        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        analyzer = (root / "tests/reprojection/analyze_telemetry.py").read_text(encoding="utf-8")
-        self.assertIn("slippedPresents", header)
-        self.assertIn("SoftwareScheduleSkip", header)
-        self.assertIn("slippedPresents = slipped", telemetry)
-        self.assertNotIn("Count slipped presents as misses", telemetry)
-        self.assertIn("tSlot->representedSlots = 1", presenter)
-        self.assertIn("slippedPresented", analyzer)
+        config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
+        for removed in ("ReprojMode", "ReprojUseDepth", "ReprojRotationOnly", "ReprojLateLatch",
+                        "ReprojNonBlockingAnchorSampling", "ReprojTelemetry"):
+            self.assertNotIn(removed, config)
+        self.assertIn("ReprojSourceFramerateLimit { 60.0f }", config)
 
     def test_source_cap_does_not_burn_two_ms_of_cpu_every_frame(self):
         # KCD2 can sustain more than 60 FPS uncapped. A full 2 ms busy tail in

@@ -27,7 +27,7 @@
 
 const char* AReproj_Dx12::Name()
 {
-    return State::Instance().activeFgOutput == FGOutput::HybridTimewarp ? "Hybrid Timewarp" : "Async Timewarp";
+    return "Async Timewarp";
 }
 
 feature_version AReproj_Dx12::Version() { return feature_version { 1, 0, 0 }; }
@@ -424,7 +424,7 @@ bool AReproj_Dx12::IsPoseFresh(double timestamp, float* ageMs) const
     if (ageMs != nullptr)
         *ageMs = static_cast<float>(age);
 
-    const auto maxAge = std::clamp<double>(Config::Instance()->ReprojMaxPoseAgeMs.value_or_default(), 1.0, 1000.0);
+    constexpr double maxAge = 1000.0;
     return std::isfinite(age) && age <= maxAge;
 }
 
@@ -655,9 +655,6 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
 
 bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet)
 {
-    if (!Config::Instance()->ReprojLateLatch.value_or_default())
-        return false;
-
     if (!packet.inputLatchReady || constants.mode != 2)
         return false;
 
@@ -770,25 +767,21 @@ void AReproj_Dx12::UpdateMouseSensitivity(int sourceIndex, double sourcePoseTime
 void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
 {
     auto& state = State::Instance();
-    auto config = Config::Instance();
-    auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
-
     cb = {};
     cb.displayWidth = (uint32_t) state.currentSwapchainDesc.BufferDesc.Width;
     cb.displayHeight = (uint32_t) state.currentSwapchainDesc.BufferDesc.Height;
-    cb.mvWidth = velocity ? (uint32_t) velocity->width : 0;
-    cb.mvHeight = velocity ? (uint32_t) velocity->height : 0;
-    cb.strength = config->ReprojStrength.value_or_default();
+    cb.mvWidth = cb.displayWidth;
+    cb.mvHeight = cb.displayHeight;
+    cb.strength = 1.0f;
     cb.mvScaleX = _mvScaleX[fIndex];
     cb.mvScaleY = _mvScaleY[fIndex];
     cb.jitterX = _jitterX[fIndex];
     cb.jitterY = _jitterY[fIndex];
-    cb.invertMV = config->ReprojInvertMV.value_or_default() ? 1 : 0;
-    cb.jitterCancelled = (config->ReprojUseJitterCancel.value_or_default() && IsJitteredMVs()) ? 1 : 0;
+    cb.invertMV = 0;
+    cb.jitterCancelled = 0;
     cb.invertedDepth = IsInvertedDepth() ? 1 : 0;
-    cb.mode = config->ReprojMode.value_or_default();
-    cb.debugView =
-        config->ReprojCenterCropDebug.value_or_default() ? 2 : (config->ReprojDebugView.value_or_default() ? 1 : 0);
+    cb.mode = 2;
+    cb.debugView = 0;
     cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
@@ -810,8 +803,6 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
                            !IsCameraAllZero(fIndex) && !IsCameraAllZero(prevIndex);
     if (!hasCamera)
         cb.mode = 0;
-    else if (config->ReprojRotationOnly.value_or_default() && cb.mode != 0)
-        cb.mode = 2;
 }
 
 bool AReproj_Dx12::CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
@@ -903,11 +894,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
 {
     (void) virtualBufferIndex;
     auto& packet = _packets[packetIndex];
-    auto velocity = GetResource(FG_ResourceType::Velocity, sourceIndex);
     if (gameBackBuffer == nullptr)
         return false;
 
-    auto depth = GetResource(FG_ResourceType::Depth, sourceIndex);
     auto hudless = GetResource(FG_ResourceType::HudlessColor, sourceIndex);
     D3D12_RESOURCE_STATES kcd2HudlessState {};
     auto* kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(gameBackBuffer, &kcd2HudlessState);
@@ -931,8 +920,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
 
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default() && hudlessResource && uiResource && hudlessReady &&
-        uiReady)
+    if (hudlessResource && uiResource && hudlessReady && uiReady)
     {
         const auto hudlessDesc = hudlessResource->GetDesc();
         const auto backBufferDesc = gameBackBuffer->GetDesc();
@@ -948,14 +936,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     auto cmdList = GetUICommandList(packetIndex);
     bool ok = cmdList != nullptr &&
               CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
-    if (ok && velocity)
-        ok = CopyPacketResource(cmdList, velocity->GetResource(), velocity->state, &packet.velocity,
-                                packet.velocityState, L"Reproj_PacketVelocity");
+    // Rotation-only timewarp does not consume motion vectors.
 
-    packet.hasDepth = ok && warpAllowed && depth && Config::Instance()->ReprojUseDepth.value_or_default();
-    if (packet.hasDepth)
-        packet.hasDepth = CopyPacketResource(cmdList, depth->GetResource(), depth->state, &packet.depth,
-                                             packet.depthState, L"Reproj_PacketDepth");
+    packet.hasDepth = false;
 
     if (ok && packet.hasUi)
     {
@@ -1055,23 +1038,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         // populates cameraNear/Far only when they pass those range checks, so an
         // unknown build leaves them at zero and must fail closed to the rotation
         // homography rather than feed garbage near/far to the depth reconstruction.
-        uint32_t kcd2Mode = packet.constants.mode;
-        if (Config::Instance()->ReprojRotationOnly.value_or_default())
-            kcd2Mode = 2; // safe default: rotation homography needs only the orientation basis
-        else if (kcd2Mode == 0)
-        {
-            // RotationOnly=false: if FillConstants zeroed the mode because the
-            // legacy camera fields are empty for KCD2, restore the configured
-            // mode so Mode=1 (depth) is actually honored.
-            const auto configuredMode = static_cast<uint32_t>(Config::Instance()->ReprojMode.value_or_default());
-            kcd2Mode = configuredMode > 2u ? 2u : configuredMode;
-        }
-        const bool kcd2ProjectionValid = packet.constants.cameraNear > 0.0f &&
-                                         packet.constants.cameraFar > packet.constants.cameraNear &&
-                                         packet.constants.cameraVFov > 0.01f;
-        if (kcd2Mode == 1 && !kcd2ProjectionValid)
-            kcd2Mode = 2; // unknown build: fail closed to rotation instead of garbage near/far
-        packet.constants.mode = kcd2Mode;
+        packet.constants.mode = 2;
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     Kcd2Camera::Snapshot currentCamera {};
@@ -1081,7 +1048,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // Rate-limited raw CCamera projection dump: lets a live session confirm the near/far field
     // mapping (stock CryEngine layout assumed) against in-game view distance before depth mode
     // is enabled. Values also land in telemetry slots via packet.constants.cameraNear/Far.
-    if (kcd2CameraTimestamp > 0.0 && Config::Instance()->ReprojTelemetry.value_or_default())
+    if (false)
     {
         static double lastProjectionLogMs = 0.0;
         const auto nowLogMs = Util::MillisecondsNow();
@@ -1114,7 +1081,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourceMouseTimestamp = mouse.TimestampMs;
     packet.inputLatchReady = true;
     UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
-    packet.warpAllowed = warpAllowed && velocity;
+    // Never warp a composed frame. Timewarp is valid only when a camera pose,
+    // HUD-less world, and separately composited UI are all available.
+    packet.warpAllowed = warpAllowed && packet.hasCamera && packet.hasUi;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
     packet.sourcePoseTimestamp = sourceTimestamp;
@@ -1247,7 +1216,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     auto& packet = _packets[packetIndex];
     auto& content = static_cast<ContentFrame&>(packet);
     if (_swapChain == nullptr || _warp == nullptr || !_warp->IsInit() || content.color == nullptr ||
-        packet.velocity == nullptr || !packet.warpAllowed)
+        !packet.warpAllowed)
         return false;
 
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
@@ -1297,10 +1266,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = content.constants;
     constants.timeStep = timeStep;
-    const bool deferredLateLatch = (Config::Instance()->ReprojLateLatchFence.value_or_default() ||
-                                    State::Instance().activeFgOutput == FGOutput::HybridTimewarp) &&
-                                   _lateLatchFence != nullptr && warpQueue != nullptr &&
-                                   scanoutDeadlineMs > Util::MillisecondsNow();
+    constexpr bool deferredLateLatch = false;
     if (!deferredLateLatch)
     {
         if (!ApplyLateInput(constants, packet))
@@ -1470,7 +1436,7 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     cb.hudlessSource = _syncHasUi[fIndex] ? 1u : 0u;
 
     // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
-    bool hasDepth = config->ReprojUseDepth.value_or_default() && depth;
+    bool hasDepth = false;
     if (!hasDepth)
         cb.mode = 0;
 
@@ -1560,6 +1526,9 @@ void AReproj_Dx12::RecordRealFrame()
 
 bool AReproj_Dx12::ShouldCaptureAnchor(double nowMs)
 {
+    (void) nowMs;
+    return true;
+#if 0
     auto* config = Config::Instance();
     float sourceCapHz = config->ReprojSourceFramerateLimit.value_or_default();
     if (!(std::isfinite(sourceCapHz) && sourceCapHz > 0.0f))
@@ -1602,6 +1571,7 @@ bool AReproj_Dx12::ShouldCaptureAnchor(double nowMs)
     const auto missedPeriods = std::floor((nowMs - _nextAnchorSampleMs) / periodMs);
     _nextAnchorSampleMs += (missedPeriods + 1.0) * periodMs;
     return true;
+#endif
 }
 
 void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs)
@@ -1792,9 +1762,7 @@ bool AReproj_Dx12::Present()
 
     // A disable, context transition, or loss of virtual ownership must discard
     // the game-thread pacing grid. The next eligible publication starts fresh.
-    if (!virtualized || !IsActive() || IsPaused() ||
-        (!Config::Instance()->ReprojAsync.value_or_default() &&
-         State::Instance().activeFgOutput != FGOutput::HybridTimewarp))
+    if (!virtualized || !IsActive() || IsPaused())
         FrameLimit::paceReprojectionSource(false);
 
     UINT virtualBufferIndex = 0;
@@ -1838,12 +1806,10 @@ bool AReproj_Dx12::Present()
     // (Streamline/FSR3/FFX API) as well as the current upscaler slot.
     const auto fIndex = GetIndexWillBeDispatched();
     _lastDispatchedFrame = _frameCount;
-    const bool nonBlockingAnchorSampling = Config::Instance()->ReprojNonBlockingAnchorSampling.value_or_default();
-    const bool captureThisPresent = !virtualized || !nonBlockingAnchorSampling || ShouldCaptureAnchor(presentStart);
+    constexpr bool captureThisPresent = true;
     float poseAge = 0.0f;
-    const bool useDepth = Config::Instance()->ReprojUseDepth.value_or_default() &&
-                          _resourceReady[fIndex].contains(FG_ResourceType::Depth);
-    const bool needsCameraPose = Config::Instance()->ReprojMode.value_or_default() != 0 && useDepth;
+    constexpr bool useDepth = false;
+    constexpr bool needsCameraPose = true;
     const int prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
     // Distinguish "camera data never arrived" (fall back to the MV warp, which both
     // dispatch paths already handle by clamping cb.mode to 0) from "camera data went
@@ -1857,9 +1823,8 @@ bool AReproj_Dx12::Present()
         _runtimeMetrics.depthReady = useDepth;
         _runtimeMetrics.anchorStale = cameraAvailable && !poseFresh;
         _runtimeMetrics.focusLost = !focused;
-        _runtimeMetrics.rotationOnly = Config::Instance()->ReprojRotationOnly.value_or_default() ||
-                                       Config::Instance()->ReprojMode.value_or_default() == 2;
-        _runtimeMetrics.hudWarped = !Config::Instance()->FGDrawUIOverFG.value_or_default();
+        _runtimeMetrics.rotationOnly = true;
+        _runtimeMetrics.hudWarped = false;
     }
 
     // 1. Flush any pending deferred command lists (resource copies from SetResource etc.)
@@ -1885,11 +1850,10 @@ bool AReproj_Dx12::Present()
     // exactly ATW over a stalled renderer - the point of timewarp is that aim
     // feel is independent of the render rate.
     const bool focusLost = !focused && !State::Instance().isRunningOnLinux;
-    const bool hasVelocity = _resourceReady[fIndex].contains(FG_ResourceType::Velocity);
-    const bool warpAllowed = !stalled && !_reset[fIndex] && hasVelocity && !focusLost;
+    const bool warpAllowed = !stalled && !_reset[fIndex] && !focusLost;
     if (!warpAllowed)
-        LOG_DEBUG("Reproj: publishing unwarped anchor (reset:{} velocity:{} focused:{} poseAge:{:.1f}ms)",
-                  _reset[fIndex], hasVelocity, focused, poseAge);
+        LOG_DEBUG("Reproj: publishing unwarped anchor (reset:{} focused:{} poseAge:{:.1f}ms)", _reset[fIndex],
+                  focused, poseAge);
 
     if (virtualized && _presenterState.load() == PresenterState::Running)
     {
@@ -2005,6 +1969,17 @@ bool AReproj_Dx12::Present()
         return SUCCEEDED(fallbackResult);
     }
 
+    // Async ownership is required for timewarp. If it is unavailable, present the
+    // game frame unchanged; never run a blocking generated-frame fallback.
+    HRESULT fallbackResult = virtualized
+                                 ? PresentVirtualFrameSync(fIndex, gameBackBuffer, virtualBufferIndex, syncInterval,
+                                                           presentFlags, false)
+                                 : PresentFrame(syncInterval, presentFlags);
+    SAFE_RELEASE(gameBackBuffer);
+    return SUCCEEDED(fallbackResult);
+
+#if 0
+    // Removed synchronous reprojection path.
     // Synchronous path.  With virtualization the game source is copied to the real
     // anchor while the worker is stopped; otherwise retain the legacy raw-buffer path.
     RecordRealFrame();
@@ -2077,7 +2052,7 @@ bool AReproj_Dx12::Present()
         // A warp is placed at its display deadline relative to the real frame. This
         // gives 1/3 and 2/3 exposure for a 40 -> 120 FPS cadence instead of repeatedly
         // using the old fixed midpoint.
-        const auto configuredStep = Config::Instance()->ReprojTimeStep.value_or_default();
+        constexpr float configuredStep = 1.0f;
         const auto timeStep =
             std::clamp(static_cast<float>((refreshPeriodMs * warp) / realPeriodMs) * configuredStep, 0.0f, 1.0f);
         if (!DispatchWarp(fIndex, timeStep))
@@ -2104,6 +2079,7 @@ bool AReproj_Dx12::Present()
     }
 
     return true;
+#endif
 }
 
 void AReproj_Dx12::Activate()
@@ -2130,7 +2106,7 @@ void AReproj_Dx12::Activate()
     _lastRealFrameTimestamp = 0.0;
     _nextAnchorSampleMs = 0.0;
     _anchorSampleHz = 0.0f;
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default() && _renderUI == nullptr)
+    if (_renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
     _asyncDowngraded = false;
@@ -2235,11 +2211,7 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
         {
             LOG_WARN("Reproj swapchain already created for the same output window!");
 
-            auto bufferCount = (Config::Instance()->ReprojAsync.value_or_default() ||
-                                State::Instance().activeFgOutput == FGOutput::HybridTimewarp) &&
-                                       desc->BufferCount < 3
-                                   ? 3
-                                   : desc->BufferCount;
+            auto bufferCount = std::max<UINT>(desc->BufferCount, 3u);
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               bufferCount, desc->BufferDesc.Width, desc->BufferDesc.Height, desc->BufferDesc.Format,
                               desc->Flags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == S_OK;
@@ -2291,8 +2263,7 @@ bool AReproj_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cm
     // Async presentation needs a free game buffer while the worker owns the real
     // swapchain. The synchronous presenter blocks the game thread, so preserve the
     // game's buffer count (some engines require its original count during startup).
-    const bool asyncRequested = Config::Instance()->ReprojAsync.value_or_default() ||
-                                State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+    constexpr bool asyncRequested = true;
     const auto originalBufferCount = desc->BufferCount;
     const auto originalFlags = desc->Flags;
     const auto originalSwapEffect = desc->SwapEffect;
@@ -2400,11 +2371,7 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
         {
             LOG_WARN("Reproj swapchain already created for the same output window!");
 
-            auto bufferCount = (Config::Instance()->ReprojAsync.value_or_default() ||
-                                State::Instance().activeFgOutput == FGOutput::HybridTimewarp) &&
-                                       desc->BufferCount < 3
-                                   ? 3
-                                   : desc->BufferCount;
+            auto bufferCount = std::max<UINT>(desc->BufferCount, 3u);
             auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
                               bufferCount, desc->Width, desc->Height, desc->Format,
                               desc->Flags | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) == S_OK;
@@ -2456,8 +2423,7 @@ bool AReproj_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* c
     // Async presentation needs a free game buffer while the worker owns the real
     // swapchain. The synchronous presenter blocks the game thread, so preserve the
     // game's buffer count (some engines require its original count during startup).
-    const bool asyncRequested = Config::Instance()->ReprojAsync.value_or_default() ||
-                                State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+    constexpr bool asyncRequested = true;
     const auto originalBufferCount = desc->BufferCount;
     const auto originalFlags = desc->Flags;
     const auto originalSwapEffect = desc->SwapEffect;
@@ -2664,18 +2630,6 @@ void AReproj_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants
     ReprojCheckAndUpdateFlag<FG_Flags::InvertedDepth>(fgConstants.flags, "Inverted Depth");
     ReprojCheckAndUpdateFlag<FG_Flags::JitteredMVs>(fgConstants.flags, "Jittered MVs");
     ReprojCheckAndUpdateFlag<FG_Flags::DisplayResolutionMVs>(fgConstants.flags, "Display Resolution MVs");
-
-    static std::optional<bool> lastAsyncRequest;
-    const bool asyncRequest = Config::Instance()->ReprojAsync.value_or_default() ||
-                              State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
-    if (lastAsyncRequest.has_value() && *lastAsyncRequest != asyncRequest)
-    {
-        State::Instance().fgChanged = true;
-        State::Instance().scChanged = true;
-        LOG_WARN("Reproj: Async changed to {}; the game must recreate its swapchain for the setting to take effect",
-                 asyncRequest);
-    }
-    lastAsyncRequest = asyncRequest;
 
     // The raw Dx12Upscaler config code cannot gate this path: "auto" parses to
     // Upscaler::Reset and many games resolve the actual backend only after their

@@ -1180,8 +1180,7 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
             if (heap != nullptr && heap->GetByCpuHandle(handle.ptr, info))
             {
                 traceTargets[i] = info.buffer;
-                if (Config::Instance()->ReprojKcd2HudIsolation.value_or_default() ||
-                    Config::Instance()->FGDrawUIOverFG.value_or_default())
+                if (IsReprojectionOutput(State::Instance().activeFgOutput))
                 {
                     if (Kcd2HudIsolation::TryRedirect(This, info.buffer, &replacementRtvs[i]))
                         anyRedirected = true;

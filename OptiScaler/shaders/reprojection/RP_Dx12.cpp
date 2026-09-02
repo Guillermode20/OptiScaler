@@ -6,7 +6,6 @@
 #include <Config.h>
 #include <State.h>
 
-#include "precompile/RP_Shader.h"
 #include "precompile/RPD_Shader.h"
 
 void RP_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* resource,
@@ -29,8 +28,7 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
                        D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth, D3D12_RESOURCE_STATES depthState,
                        ID3D12Resource* output, RP_Constants& constants, int constantSlot, bool deferConstants)
 {
-    if (!_init || _device == nullptr || cmdList == nullptr || lastColor == nullptr || velocity == nullptr ||
-        output == nullptr)
+    if (!_init || _device == nullptr || cmdList == nullptr || lastColor == nullptr || output == nullptr)
     {
         return false;
     }
@@ -46,7 +44,8 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     // Transition inputs/output to the states the shader needs
     ResourceBarrier(cmdList, lastColor, lastColorState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    ResourceBarrier(cmdList, velocity, velocityState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (velocity != nullptr)
+        ResourceBarrier(cmdList, velocity, velocityState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     if (depth != nullptr)
         ResourceBarrier(cmdList, depth, depthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -69,10 +68,15 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     }
 
     CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(0), lastColorViewFormat);
-    CreateShaderResourceView(_device, velocity, currentHeap.GetSrvCPU(1));
+    if (velocity != nullptr)
+        CreateShaderResourceView(_device, velocity, currentHeap.GetSrvCPU(1));
+    else
+        CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(1), lastColorViewFormat);
 
     if (depth != nullptr)
         CreateShaderResourceView(_device, depth, currentHeap.GetSrvCPU(2));
+    else
+        CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(2), lastColorViewFormat);
 
     CreateUnorderedAccessView(_device, output, currentHeap.GetUavCPU(0), 0);
 
@@ -86,10 +90,7 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     cmdList->SetComputeRootSignature(_rootSignature);
 
-    // v2 (depth-aware/camera rotation) uses depth pipeline; mode 0 uses MV-only PSO
-    auto pso =
-        (constants.mode == 2 || (depth != nullptr && constants.mode != 0)) ? _pipelineStateDepth : _pipelineState;
-    cmdList->SetPipelineState(pso);
+    cmdList->SetPipelineState(_pipelineState);
 
     cmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
 
@@ -101,7 +102,8 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     // Restore the velocity/depth inputs to their pre-dispatch states. The caller's
     // SetResource copy path reuses these resources and expects them unchanged.
-    ResourceBarrier(cmdList, velocity, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, velocityState);
+    if (velocity != nullptr)
+        ResourceBarrier(cmdList, velocity, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, velocityState);
 
     if (depth != nullptr)
         ResourceBarrier(cmdList, depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depthState);
@@ -152,15 +154,9 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
         }
     }
 
-    if (!CreateComputePipeline(InDevice, &_pipelineState, RP_cso, sizeof(RP_cso), RPMV_ShaderCode.c_str()))
+    if (!CreateComputePipeline(InDevice, &_pipelineState, RPD_cso, sizeof(RPD_cso), RPD_ShaderCode.c_str()))
     {
-        LOG_ERROR("[{}] Failed to create MV compute pipeline", _name);
-        return;
-    }
-
-    if (!CreateComputePipeline(InDevice, &_pipelineStateDepth, RPD_cso, sizeof(RPD_cso), RPD_ShaderCode.c_str()))
-    {
-        LOG_ERROR("[{}] Failed to create depth compute pipeline", _name);
+        LOG_ERROR("[{}] Failed to create camera-warp compute pipeline", _name);
         return;
     }
 
@@ -199,8 +195,6 @@ RP_Dx12::~RP_Dx12()
 {
     if (!_init || State::Instance().isShuttingDown)
         return;
-
-    SAFE_RELEASE(_pipelineStateDepth);
 
     for (int i = 0; i < RP_NUM_OF_HEAPS; i++)
     {

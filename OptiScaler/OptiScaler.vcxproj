@@ -390,7 +390,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\depth_transfer\precompile\dt_int_Shader_Vk.h" />
     <ClInclude Include="shaders\depth_transfer\precompile\dt_Shader_Vk.h" />
     <ClInclude Include="shaders\format_transfer\precompile\FT_Shader.h" />
-    <ClInclude Include="shaders\reprojection\precompile\RP_Shader.h" />
     <ClInclude Include="shaders\reprojection\precompile\RPD_Shader.h" />
     <ClInclude Include="shaders\reprojection\RP_Common.h" />
     <ClInclude Include="shaders\reprojection\RP_Dx12.h" />

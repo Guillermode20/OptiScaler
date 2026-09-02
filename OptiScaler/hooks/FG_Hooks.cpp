@@ -433,9 +433,7 @@ void FGHooks::HookFGSwapchain(IDXGISwapChain* pSwapChain)
             DetourAttach(&(PVOID&) o_FGSCGetFrameLatencyWaitableObject, hkGetFrameLatencyWaitableObject);
 
         if (State::Instance().activeFgOutput == FGOutput::XeFG ||
-            (IsReprojectionOutput(State::Instance().activeFgOutput) &&
-             (Config::Instance()->ReprojAsync.value_or_default() ||
-              State::Instance().activeFgOutput == FGOutput::HybridTimewarp)))
+            IsReprojectionOutput(State::Instance().activeFgOutput))
         {
             if (o_FGSCGetFullscreenState != nullptr)
                 DetourAttach(&(PVOID&) o_FGSCGetFullscreenState, hkGetFullscreenState);
@@ -473,10 +471,7 @@ HRESULT FGHooks::hkSetFullscreenState(IDXGISwapChain* This, BOOL Fullscreen, IDX
         fg->Deactivate();
     }
 
-    // XeFG and async reprojection both prefer borderless so their internal presents can tear
-    const bool forceBorderless = Config::Instance()->FGXeFGForceBorderless.value_or_default() ||
-                                 (IsReprojectionOutput(State::Instance().activeFgOutput) &&
-                                  Config::Instance()->ReprojForceBorderless.value_or_default());
+    const bool forceBorderless = Config::Instance()->FGXeFGForceBorderless.value_or_default();
 
     bool modeChanged = false;
     bool orgFS = Fullscreen;
@@ -673,8 +668,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
     // Only async reprojection needs a third buffer while its worker owns the real swapchain.
     if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
-        const bool asyncReprojection = Config::Instance()->ReprojAsync.value_or_default() ||
-                                       State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+        constexpr bool asyncReprojection = true;
         if (asyncReprojection && BufferCount > 0 && BufferCount < 3)
             BufferCount = 3;
 
@@ -685,9 +679,7 @@ HRESULT FGHooks::hkResizeBuffers(IDXGISwapChain* This, UINT BufferCount, UINT Wi
 
     // Wine/vkd3d crashes when a waitable swapchain is resized (KCD2 at startup). A
     // redundant resize (geometry unchanged) is a no-op anyway, so answer S_OK directly.
-    if (IsReprojectionOutput(State::Instance().activeFgOutput) &&
-        (Config::Instance()->ReprojAsync.value_or_default() ||
-         State::Instance().activeFgOutput == FGOutput::HybridTimewarp))
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
         DXGI_SWAP_CHAIN_DESC scDesc {};
         // Compare against the real chain: wrapped GetDesc() reports the game-visible count.
@@ -947,8 +939,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
     // Only async reprojection needs a third buffer while its worker owns the real swapchain.
     if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
-        const bool asyncReprojection = Config::Instance()->ReprojAsync.value_or_default() ||
-                                       State::Instance().activeFgOutput == FGOutput::HybridTimewarp;
+        constexpr bool asyncReprojection = true;
         if (asyncReprojection && BufferCount > 0 && BufferCount < 3)
             BufferCount = 3;
 
@@ -959,9 +950,7 @@ HRESULT FGHooks::hkResizeBuffers1(IDXGISwapChain3* This, UINT BufferCount, UINT 
 
     // Wine/vkd3d crashes when a waitable swapchain is resized (KCD2 at startup). A
     // redundant resize (geometry unchanged) is a no-op anyway, so answer S_OK directly.
-    if (IsReprojectionOutput(State::Instance().activeFgOutput) &&
-        (Config::Instance()->ReprojAsync.value_or_default() ||
-         State::Instance().activeFgOutput == FGOutput::HybridTimewarp))
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
     {
         DXGI_SWAP_CHAIN_DESC scDesc {};
         // Compare against the real chain: wrapped GetDesc() reports the game-visible count.
@@ -1407,7 +1396,7 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     {
         const bool reprojActive = fg != nullptr && fg->IsActive() && !fg->IsPaused();
         if (!reprojVirtualized)
-            FrameLimit::sleep(reprojActive && config->ReprojCapAtHalfRefresh.value_or_default());
+            FrameLimit::sleep(reprojActive);
     }
     else if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
              !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
