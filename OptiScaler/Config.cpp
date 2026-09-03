@@ -1021,6 +1021,12 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojMouseSensitivityY.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "Smoothing",
                      GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "DepthEnabled",
+                     GetBoolValue(Instance()->ReprojDepthEnabled.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "BobDampen",
+                     GetFloatValue(Instance()->ReprojBobDampen.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "DepthScale",
+                     GetFloatValue(Instance()->ReprojDepthScale.value_for_config()).c_str());
     }
 
     // XeFG output
