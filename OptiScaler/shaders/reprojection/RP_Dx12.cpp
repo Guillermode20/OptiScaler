@@ -134,7 +134,7 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
 
-    if (!SetupRootSignature(InDevice, 3, 1, 1, 0, 0, 1, &sampler)))
+    if (!SetupRootSignature(InDevice, 3, 1, 1, 0, 0, 1, &sampler))
     {
         LOG_ERROR("Failed to setup root signature");
         return;

@@ -644,7 +644,14 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
         }
     }
 
+    const auto sourceX = ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward);
+    const auto sourceY = ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward);
     const auto sourceZ = ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward);
+    // Mode reaches here as 2 (camera) or 0 (no camera: FillConstants left raw
+    // prev rows in place, which no dispatch consumes). Depth is signaled via
+    // DepthSize, never via mode, so mode 1 cannot arrive here.
+    if (constants.mode != 2)
+        return;
     const float tanHalfFov = std::tan(constants.cameraVFov * 0.5f);
     const float focalX = constants.cameraAspect * tanHalfFov;
     const float focalY = tanHalfFov;
