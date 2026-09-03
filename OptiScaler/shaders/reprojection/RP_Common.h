@@ -128,8 +128,12 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     // with the TARGET camera, and shift the sample by the residual. Exact for
     // planar surfaces and for pure rotation (residual ~0, reduces to the
     // rotation result); first-order otherwise, which suffices for per-slot
-    // translations of a few centimeters. Silhouettes and large residuals break
-    // the smooth-surface assumption and keep the rotation result.
+    // translations of a few centimeters. The correction BLENDS with the
+    // rotation result by a continuous confidence weight (never a hard switch:
+    // neighboring pixels/slots hovering at a threshold must not flicker
+    // between paths). Silhouettes and large residuals break the smooth-surface
+    // assumption and keep the rotation result. DebugView 2 paints confidence
+    // (green) vs fallback (magenta) instead of the scene.
     // Thresholds (silhouette discontinuity, residual pixels) are starting
     // points for footage tuning.
     bool saneDepthCfg = DepthSize.x > 0 && DepthSize.y > 0 && CameraNear > 0.0f && CameraFar > CameraNear &&
@@ -164,20 +168,23 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                            Depth.Load(int3(max(dpx - int2(0, 1), int2(0, 0)), 0)).x);
             float disc = max(dx, dy) / max(d, 1.0e-3f);
             float resid = length((outUv - uvT) * float2(DisplaySize));
-            bool confident = tz > 1.0e-6f && disc < 0.5f && resid < 24.0f;
+            float wResid = 1.0f - smoothstep(12.0f, 24.0f, resid);
+            float wDisc = 1.0f - smoothstep(0.25f, 0.5f, disc);
             bool covered1 = all(corrUv >= 0.0f) && all(corrUv <= 1.0f);
-            if (confident && covered1)
-            {
-                float2 e1 = min(corrUv, 1.0f - corrUv) * float2(DisplaySize);
-                float cov1 = saturate(min(e1.x, e1.y) * 0.5f);
-                float3 dc = LastColor.SampleLevel(Bilinear, corrUv, 0).rgb;
-                if (cov1 < 1.0f)
-                    dc = lerp(LastColor.Load(int3(dtid.xy, 0)).rgb, dc, cov1);
-                world = dc;
-            }
+            float wDepth = (tz > 1.0e-6f && covered1) ? wResid * wDisc : 0.0f;
+            float2 e1 = min(corrUv, 1.0f - corrUv) * float2(DisplaySize);
+            float cov1 = saturate(min(e1.x, e1.y) * 0.5f);
+            float3 dc = LastColor.SampleLevel(Bilinear, corrUv, 0).rgb;
+            if (cov1 < 1.0f)
+                dc = lerp(LastColor.Load(int3(dtid.xy, 0)).rgb, dc, cov1);
+            if (DebugView == 2)
+                world = float3(1.0f - wDepth, wDepth, 0.2f);
+            else
+                world = lerp(world, dc, wDepth);
         }
     }
-    if (HudlessSource != 0)
+    // Visualize mode shows raw confidence; compositing the HUD over it would hide the result.
+    if (HudlessSource != 0 && DebugView != 2)
     {
         float4 ui = UI.Load(int3(dtid.xy, 0));
         float alpha = saturate(ui.a);

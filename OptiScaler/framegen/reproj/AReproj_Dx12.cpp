@@ -1510,16 +1510,15 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = content.constants;
     constants.timeStep = timeStep;
-    // Depth-corrected translation (mode 1): needs the INI switch, a captured
-    // anchor depth, and sane near/far. DepthSize on the constants is the
-    // contract PrepareRotationConstants reads to store the target pose and
-    // flip to mode 1; zero keeps rotation-only. Per-pixel failures still fall
-    // back to the rotation homography inside the shader.
+    // Depth-corrected translation (mode 1): needs the DepthWarp switch, a
+    // captured anchor depth, and sane near/far. DepthSize on the constants is
+    // the contract PrepareRotationConstants reads to store the target pose and
+    // flip to mode 1; zero keeps rotation-only. Per-pixel failures blend back
+    // to the rotation homography inside the shader (no hard-switch seams).
+    const int depthWarpMode = Config::Instance()->ReprojDepthWarp.value_or_default();
     const bool depthSane = content.constants.cameraNear > 0.0f &&
                            content.constants.cameraFar > content.constants.cameraNear;
-    bool useDepth =
-        Config::Instance()->ReprojDepthWarp.value_or_default() && packet.hasDepth && packet.depth != nullptr &&
-        depthSane;
+    bool useDepth = depthWarpMode != 0 && packet.hasDepth && packet.depth != nullptr && depthSane;
     if (useDepth)
     {
         const auto depthDesc = packet.depth->GetDesc();
@@ -1530,6 +1529,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         {
             constants.depthWidth = static_cast<uint32_t>(depthDesc.Width);
             constants.depthHeight = static_cast<uint32_t>(depthDesc.Height);
+            // Visualize mode paints per-pixel depth confidence (green) vs
+            // rotation fallback (magenta) instead of the scene.
+            if (depthWarpMode == 2)
+                constants.debugView = 2;
         }
     }
     // The independent COMPUTE queue can safely wait for a CPU fence without
@@ -1628,6 +1631,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // application recomputes the target pose from fresh input.
         lateConstants.depthWidth = constants.depthWidth;
         lateConstants.depthHeight = constants.depthHeight;
+        lateConstants.debugView = constants.debugView;
         if (!ApplyLateInput(lateConstants, packet))
             PrepareRotationConstants(lateConstants, false);
 

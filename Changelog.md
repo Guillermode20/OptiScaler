@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.25 (2026-09-03)
+* Depth v2: continuous confidence blend instead of hard switch; DepthWarp visualize mode; default rotation until validated
+
 ## v10.0.1.24 (2026-09-03)
 * Depth-corrected translation warp (mode 1) with per-pixel rotation fallback; anchor depth capture; DepthWarp switch
 

@@ -188,7 +188,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojMouseSensitivityX.set_from_config(readFloat("AsyncTimewarp", "MouseSensitivityX"));
             ReprojMouseSensitivityY.set_from_config(readFloat("AsyncTimewarp", "MouseSensitivityY"));
             ReprojSmoothing.set_from_config(readFloat("AsyncTimewarp", "Smoothing"));
-            ReprojDepthWarp.set_from_config(readBool("AsyncTimewarp", "DepthWarp"));
+            ReprojDepthWarp.set_from_config(readInt("AsyncTimewarp", "DepthWarp"));
         }
 
         // OptiFG
@@ -1020,7 +1020,7 @@ bool Config::SaveIni()
         ini.SetValue("AsyncTimewarp", "Smoothing",
                      GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "DepthWarp",
-                     GetBoolValue(Instance()->ReprojDepthWarp.value_for_config()).c_str());
+                     GetIntValue(Instance()->ReprojDepthWarp.value_for_config()).c_str());
     }
 
     // XeFG output
