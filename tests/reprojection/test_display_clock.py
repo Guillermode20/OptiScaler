@@ -192,6 +192,79 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIsNotNone(recovered_at)
         self.assertGreater(recovered_at - shed_at, 400.0)
 
+    def test_late_sample_lead_defaults_to_adaptive_and_retunes(self):
+        # LateSampleLead auto/0 = adaptive: after each warp completes the
+        # presenter measures headroom to the deadline and slides the sample
+        # later (smaller lead) whenever more than ~2 ms of slack remains, so the
+        # mouse is sampled as late as the warp allows instead of a fixed 4 ms.
+        root = Path(__file__).resolve().parents[2]
+        config_h = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
+        block = config_h.split("CustomOptional<float> ReprojLateSampleLead", 1)[1]
+        self.assertIn("0.0f", block)  # auto/0 = adaptive, not the old 4.0 constant
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        dispatch = reproj.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1]
+        self.assertIn("adaptiveLateSample", dispatch)
+        self.assertIn("SAMPLE_LEAD_MIN_MS", dispatch)
+        self.assertIn("SAMPLE_LEAD_MAX_MS", dispatch)
+        self.assertIn("SAMPLE_LEAD_REDUCE_HEADROOM_MS", dispatch)
+        self.assertIn("SAMPLE_LEAD_GROW_HEADROOM_MS", dispatch)
+        self.assertIn("_lateSampleLeadMs = std::max(SAMPLE_LEAD_MIN_MS, _lateSampleLeadMs - SAMPLE_LEAD_STEP_MS)",
+                      dispatch)
+        # A fixed value (>0.5) still overrides with the old constant-lead path.
+        self.assertIn("lateLeadCfg > 0.5", dispatch)
+        # The adaptive hunt runs only on the compute late-latch path, never on
+        # the DIRECT fallback where the sample cannot be deferred.
+        self.assertIn("adaptiveLateSample && lateLatchValue != 0", dispatch)
+        # The 1 Hz log reports the effective lead (auto shows it converging).
+        log = reproj.split("void AReproj_Dx12::LogMetricsIfDue", 1)[1]
+        self.assertIn("sampLead=", log)
+        self.assertIn("_lastLateSampleLeadMs.load()", log)
+        # INI key stays the existing one; auto resolves to the new default.
+        config_cpp = (root / "OptiScaler/Config.cpp").read_text(encoding="utf-8")
+        self.assertIn('readFloat("AsyncTimewarp", "LateSampleLead")', config_cpp)
+
+    def test_adaptive_late_sample_controller_model(self):
+        # Model the DispatchPacketWarp sample-lead hunt. Cost = signal latency +
+        # warp + copy + CPU wake. Headroom = lead - cost; reduce the lead by a
+        # step while headroom > 2.0 ms (sample was released too early), grow it
+        # when headroom < 0.9 ms (crowding the vblank). A fast warp must end up
+        # sampling later than the old fixed 4.0 ms, and a sudden GPU stall must
+        # push the lead back up instead of missing vblanks.
+        def controller(cost_ms, slots=200):
+            lead = 4.0
+            trace = []
+            for _ in range(slots):
+                headroom = lead - cost_ms
+                if headroom > 2.0:
+                    lead = max(2.0, lead - 0.25)
+                elif headroom < 0.9:
+                    lead = min(6.0, lead + 0.25)
+                trace.append(lead)
+            return lead, trace
+
+        # Typical warp cost ~1-1.5 ms: converges to cost + 2.0 (headroom at the
+        # reduce edge) = 3.0-3.5 ms, fresher than the old constant 4.0.
+        for cost in (1.0, 1.5):
+            lead, trace = controller(cost)
+            self.assertAlmostEqual(lead, cost + 2.0, delta=0.26)
+            self.assertLess(lead, 4.0)
+        # Expensive warp (cost >= 2.0): the controller must not push below 4.0.
+        lead, _ = controller(2.0)
+        self.assertAlmostEqual(lead, 4.0, delta=0.26)
+        # A late GPU stall (cost spikes to 5 ms) grows the lead to the cap, and
+        # recovery back to a fast warp decays it to the fresh setting again.
+        lead = 4.0
+        for _ in range(60):
+            headroom = lead - 5.0
+            lead = min(6.0, lead + 0.25) if headroom < 0.9 else max(2.0, lead - 0.25)
+        self.assertAlmostEqual(lead, 6.0, delta=0.26)
+        lead, _ = controller(1.0)
+        self.assertAlmostEqual(lead, 3.0, delta=0.26)
+        # Under the old wide 1.2-3.0 ms deadband a typical 1.5 ms cost would
+        # leave 2.5 ms headroom and never move - the retuned 2.0 edge is what
+        # makes the adaptive default actually hunt.
+        self.assertGreater(4.0 - 1.5, 2.0)
+
     def test_presenter_uses_present_completion_clock(self):
         root = Path(__file__).resolve().parents[2]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")

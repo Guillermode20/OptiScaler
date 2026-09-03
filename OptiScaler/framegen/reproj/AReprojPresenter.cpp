@@ -603,6 +603,8 @@ void AReproj_Dx12::PresenterMain()
     _shedEngagedAtMs = 0.0;
     _heldPacketIndex = -1;
     _metricsUiBorrows = 0;
+    _lateSampleLeadMs = 4.0;
+    _lastLateSampleLeadMs.store(4.0);
 
     while (!_stopPresenter.load())
     {

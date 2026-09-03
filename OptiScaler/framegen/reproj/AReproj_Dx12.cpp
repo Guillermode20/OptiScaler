@@ -2018,6 +2018,11 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int pr
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
+    // 0/auto (default) = adaptive: hunt the mouse sample as close to the
+    // present deadline as the warp actually allows. A fixed ms value
+    // (>0.5) overrides and keeps the old constant-lead behavior.
+    const double lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
+    const bool adaptiveLateSample = !(lateLeadCfg > 0.5);
     if (lateLatchValue != 0)
     {
         // Submit early enough to sit behind Proton's game-queue backlog, then
@@ -2025,9 +2030,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int pr
         // deadline. The target itself is predicted to scanout midpoint.
         // Leave enough time for the lightweight warp/composite/copy to finish
         // before Present while still sampling substantially later than the
-        // normal four-millisecond dispatch wake.
-        const double lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
-        const double lateLeadMs = lateLeadCfg > 0.5 ? lateLeadCfg : 4.0;
+        // normal dispatch wake.
+        const double lateLeadMs =
+            adaptiveLateSample ? std::clamp(_lateSampleLeadMs, SAMPLE_LEAD_MIN_MS, SAMPLE_LEAD_MAX_MS) : lateLeadCfg;
+        _lastLateSampleLeadMs.store(lateLeadMs);
         WaitForPresenterDeadline(scanoutDeadlineMs - lateLeadMs);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
@@ -2047,12 +2053,29 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int pr
     // queue), but poisoning that queue with a 120 Hz wait serializes all later
     // KCD2 rendering behind presenter work.  Wait on the presenter thread for
     // the independent compute submission instead.  The late latch already
-    // releases the short warp 3.5 ms before the slot, so this wait normally
-    // observes an already-completed fence and never enters the game queue.
+    // releases the short warp before the slot, so this wait normally observes
+    // an already-completed fence and never enters the game queue.
     if (useCompute && _computeFence != nullptr)
     {
         if (!WaitForComputeAllocator(outputIndex))
             return false;
+        // Adaptive late sample: this wait returns when the warp completed on
+        // the GPU. Slide the sample later (smaller lead) when the warp left
+        // more than ~2 ms of headroom (it was released too early), earlier
+        // when it is crowding the vblank below ~1 ms. The controller settles
+        // at signal+warp+copy cost plus ~1.5 ms of CPU wake/Present margin, so
+        // the mouse is sampled as late as the hardware allows — typically a
+        // fixed 4.0 ms lead never hunts at all because the warp cost leaves
+        // 2-3 ms of slack that a 1.2-3.0 ms deadband would not touch.
+        if (adaptiveLateSample && lateLatchValue != 0)
+        {
+            const double warpDoneMs = Util::MillisecondsNow();
+            const double headroomMs = scanoutDeadlineMs - warpDoneMs;
+            if (headroomMs > SAMPLE_LEAD_REDUCE_HEADROOM_MS)
+                _lateSampleLeadMs = std::max(SAMPLE_LEAD_MIN_MS, _lateSampleLeadMs - SAMPLE_LEAD_STEP_MS);
+            else if (headroomMs < SAMPLE_LEAD_GROW_HEADROOM_MS)
+                _lateSampleLeadMs = std::min(SAMPLE_LEAD_MAX_MS, _lateSampleLeadMs + SAMPLE_LEAD_STEP_MS);
+        }
     }
     return true;
 }
@@ -2249,12 +2272,13 @@ void AReproj_Dx12::LogMetricsIfDue()
     const double lateCamAge =
         _metricsLateCamAgeSamples > 0 ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples : 0.0;
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
-             "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
+             "interval={:.2f}/{:.2f}ms lead={:.2f}ms sampLead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} uiBorrow={} latch={}/{}/{} "
              "lateAge={:.1f}ms sensX={:.7f} hold={} shed={} stallEma={:.1f}ms ({}, block={:.2f}ms pace={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
-             _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
+             _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, _lastLateSampleLeadMs.load(), poseAge,
+             _runtimeMetrics.queueDepth,
              _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
              _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, _metricsUiBorrows,
              _metricsLateCamHits, _metricsPacketBaseHits, _metricsLateFallbacks, lateCamAge,

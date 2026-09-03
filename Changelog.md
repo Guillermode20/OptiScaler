@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.38 (2026-09-03)
+* Adaptive late-latch sample lead: LateSampleLead=auto (default) now hunts the mouse sample as late as the warp allows instead of a fixed 4 ms - the presenter measures post-warp headroom each slot and slides the lead within [2,6] ms; fixed values still override. New sampLead= log key.
+
 ## v10.0.1.37 (2026-09-03)
 * Reproj latency pass: capture worker now submits the world color copy gated on a mid-frame world fence (signaled when the CL containing the KCD2 world snapshot is submitted), UI copy gated on the present gate; presenter warps on color-ready and composites the newest completed UI (borrowing the previous anchor for the first slot); new-anchor slots blend the previous anchor's warped color (kSwapBlendFactor=0.25) so the 60 Hz content swap does not snap. Expected: capWait/uiBorrow down, poseAge down, first display of each anchor one slot earlier.
 

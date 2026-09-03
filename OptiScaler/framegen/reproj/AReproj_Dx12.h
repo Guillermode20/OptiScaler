@@ -128,6 +128,19 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     // (fraction of the held previous anchor's warped color). 0.0 = no blend.
     static constexpr float kSwapBlendFactor = 0.25f;
 
+    // Adaptive late-latch sample lead (DispatchPacketWarp): the sample time is
+    // scanned backward from the present deadline (SAMPLE_LEAD_MAX_MS) toward
+    // SAMPLE_LEAD_MIN_MS; each slot measures headroom after the warp completes
+    // and slides the lead by SAMPLE_LEAD_STEP_MS to keep headroom inside
+    // (SAMPLE_LEAD_GROW_HEADROOM_MS, SAMPLE_LEAD_REDUCE_HEADROOM_MS], so the
+    // mouse is sampled as late as the signal+warp+copy cost plus ~1.5 ms of
+    // CPU-wake/Present margin allows. Config LateSampleLead>0.5 overrides.
+    static constexpr double SAMPLE_LEAD_MIN_MS = 2.0;
+    static constexpr double SAMPLE_LEAD_MAX_MS = 6.0;
+    static constexpr double SAMPLE_LEAD_STEP_MS = 0.25;
+    static constexpr double SAMPLE_LEAD_REDUCE_HEADROOM_MS = 2.0; // headroom above this -> sample later
+    static constexpr double SAMPLE_LEAD_GROW_HEADROOM_MS = 0.9;  // headroom below this -> sample earlier
+
     ReprojFramePacket _packets[BUFFER_COUNT];
     std::atomic<UINT64> _publishedFrameId { 0 };
     std::atomic<UINT64> _readyFrameId { 0 };
@@ -310,6 +323,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _lastShedEvaluateMs = 0.0; // stall EMA decay clock
     double _cadenceEmaMs = 0.0;       // smoothed source publish period
     std::atomic<double> _stallEmaMs { 0.0 }; // smoothed game-thread GPU stall
+    double _lateSampleLeadMs = 4.0;  // adaptive mouse-sample lead (presenter thread); hunts toward warp duration + margin
+    std::atomic<double> _lastLateSampleLeadMs { 4.0 }; // effective sample lead of the last slot, for the 1 Hz log line
     double _lastStallSampleMs = 0.0;  // when the stall EMA was last fed
     float _lastStallSampleValue = -1.0f; // last stall sample seen (dedupe repeats)
     double _shedEngagedAtMs = 0.0;    // when the current shed began

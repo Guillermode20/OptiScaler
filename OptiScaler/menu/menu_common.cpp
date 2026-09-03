@@ -4203,9 +4203,18 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                        "Prevents game thread stalls.");
 
         float lateLead = config->ReprojLateSampleLead.value_or_default();
-        if (ImGui::SliderFloat("Late sample lead##reproj-live", &lateLead, 1.0f, 8.0f, "%.1f ms"))
-            config->ReprojLateSampleLead = std::clamp(lateLead, 1.0f, 8.0f);
-        ShowHelpMarker("Lead time before deadline to release compute warp. 4.0 ms default.");
+        const bool adaptiveLead = !(lateLead > 0.5f);
+        if (ImGui::Checkbox("Adaptive late sample##reproj-live", &adaptiveLead))
+            config->ReprojLateSampleLead = adaptiveLead ? 0.0f : 4.0f;
+        ShowHelpMarker("auto = hunt the mouse sample as late as the warp allows (default). Uncheck to pin a fixed lead.");
+        if (!adaptiveLead)
+        {
+            float fixedLead = std::clamp(lateLead, 1.0f, 8.0f);
+            if (ImGui::SliderFloat("Late sample lead##reproj-live", &fixedLead, 1.0f, 8.0f, "%.1f ms"))
+                config->ReprojLateSampleLead = fixedLead;
+            ShowHelpMarker("Lead time before the present deadline to sample mouse input. Smaller = fresher input, "
+                           "larger = safer against warp overrunning the vblank.");
+        }
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {

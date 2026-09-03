@@ -627,8 +627,8 @@ class Config
         false
     }; // allow timewarping composed frame if HUD isolation is off/unavailable
     CustomOptional<float> ReprojLateSampleLead {
-        4.0f
-    }; // ms before present deadline to release late-latch compute warp
+        0.0f
+    }; // ms before present deadline to sample late-latch mouse; 0 = auto (sample as late as the warp allows)
     CustomOptional<bool> ReprojNonBlockingHandoff {
         true
     }; // release virtual backbuffer without GPU wait when HUD isolation active
