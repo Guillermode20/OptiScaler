@@ -127,7 +127,7 @@ All other behavior (late latch, compute warp, input pump, timestep cap, dispatch
 | `[AsyncTimewarp] Smoothing` | 0.25 | EMA on KCD2 camera angular velocity; `0` = off |
 | `[FrameGen] DrawUIOverFG` | false | Required for HUD composition (with Hudfix) |
 
-Hardcoded constants agents must know: warp timestep clamp `2.5`; late-latch lead `3.5 ms`; dispatch lead adapts from post-wait headroom within `[3.0, min(8, 0.75·period)]` ms; presenter thread runs at `THREAD_PRIORITY_TIME_CRITICAL`.
+Hardcoded constants agents must know: warp timestep clamp `2.5`; late-latch lead `3.5 ms`; per-slot late rotation ceiling `0.11 rad` (~6.3°); hitch hold after ~2.5 source periods without a publish; dispatch lead adapts from post-wait headroom within `[3.0, min(8, 0.75·period)]` ms; presenter thread runs at `THREAD_PRIORITY_TIME_CRITICAL`.
 
 ### Reading the once-per-second log line
 
@@ -136,6 +136,7 @@ Healthy at 60 Hz source / 120 Hz display: source 59–60, display ≥ 117, `miss
 
 ### Invariants (do not break)
 
+- The game thread never waits for the GPU on the capture path: packet exhaustion AND a busy capture allocator both drop the anchor (signal, submit, advance, count `dropAnchor`) instead of stalling. A skipped anchor is invisible; a stalled game thread deepens every hitch behind it.
 - Packet lifecycle is `FREE -> CAPTURING -> READY -> PRESENTING -> RETIRED -> FREE`. Recycling requires both capture completion and presenter retirement fences. Stop/join the presenter before draining/releasing D3D12/DXGI objects.
 - The worker may touch real backbuffers only while virtualization is active; the game must never receive or render into them. Virtual buffers belong to the swapchain — an FG context reset stops the presenter but must not destroy them unless the swapchain resizes or is released.
 - Pacing is gated by BOTH the DXGI frame-latency waitable AND a software deadline of `lastPresent + refreshPeriod` (on Proton the waitable alone fires on queue capacity, ~3–4 ms with tearing, and must not drive cadence). The presenter runs on a completion clock: the next deadline derives from Present-completion timestamps and DXGI frame-statistics phase correction is bypassed entirely, because Wine advances those statistics per presented output rather than per physical vblank.
@@ -166,6 +167,7 @@ When the game stops publishing anchors for more than ~2.5 source periods (stream
 
 ### Current status
 
+- v10.0.1-pre22 (2026-09-03): non-blocking capture skip + rotation ceiling 0.08→0.11 rad. Live data showed the old ceiling binding (three windows at exactly 4.58°) and game-thread `block` spikes >2 ms during loads (allocator pressure). Fast pans additionally stream content, compounding the stale-anchor disease — pure rotation itself is provably fine (slow pans smooth).
 - v10.0.1-pre21 (2026-09-03): hitch hold + latch-path diagnostics. KCD2 castle walk: steady state is healthy (source 85–105, display ~118–121, missed 0–4, lateCam steering, lateAge ~5 ms) but walking/loading judder persists. `hold` stays 0 (publishes never stall: 74–104/s — the game thread is fine, the GPU queue runs deep, so captures complete 1–3 frames late: poseAge 25–46 ms, capWait 25–39 even when healthy). Working model: stale anchors + walking translation that a rotation-only warp cannot represent + snaps on anchor update. `sensX` finally calibrated but wanders ±4% (0.00047–0.00051, never settles) — side-show, not the cause (residual tails are small). Remaining real fixes are Phase-4 capture latency and/or depth warp for translation (both big), or less game GPU load for fresher anchors. KCD2 runs uncapped (cap=60 regressed feel); do not re-impose without a live A/B.
 
 ## D3D12 base-class gotchas

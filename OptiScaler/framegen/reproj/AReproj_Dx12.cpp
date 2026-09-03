@@ -769,7 +769,11 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         return false;
     }
 
-    constexpr double maxRotation = 0.08; // ~4.58 degrees maximum warp per slot
+    // Ceiling per slot: beyond this the warp under-rotates and the correction
+    // lands next slot (fast-flick stutter). Live logs showed slots binding at
+    // the old 0.08 ceiling, so it now admits ~660 deg/s flicks; the cost is
+    // larger transient edge disocclusion on extreme flicks only.
+    constexpr double maxRotation = 0.11; // ~6.3 degrees maximum warp per slot
     const double rotation = std::hypot(yaw, pitch);
     if (rotation > maxRotation)
     {
@@ -989,6 +993,44 @@ uint32_t AReproj_Dx12::PacketQueueDepth() const
         depth += state == PacketState::Ready || state == PacketState::Presenting;
     }
     return depth;
+}
+
+bool AReproj_Dx12::CaptureAllocatorReady(int packetIndex)
+{
+    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT)
+        return false;
+    // Mirror WaitForUIAllocator without waiting: a nonzero tracked value that
+    // the UI fence has not reached means the slot's prior submission is still
+    // in flight. A null allocator/fence means GetUICommandList will create or
+    // proceed without waiting, so report ready and let it through.
+    if (_uiCommandAllocator[packetIndex] == nullptr || _uiFence == nullptr)
+        return true;
+    const auto fenceValue = _uiAllocatorFenceValues[packetIndex];
+    return fenceValue == 0 || _uiFence->GetCompletedValue() >= fenceValue;
+}
+
+void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
+                                         WrappedIDXGISwapChain4* wrapped, double presentStartMs)
+{
+    // Drop publication but still retire and advance the logical game buffer.
+    // The fence signal is enqueued on the game queue behind all prior work,
+    // so it correctly orders after even the in-flight submission that forced
+    // the skip; no allocator is touched, so nothing is reset under the GPU.
+    const auto fenceValue = ++_uiFenceValue;
+    _uiAllocatorFenceValues[fIndex] = fenceValue;
+    if (_gameCommandQueue == nullptr || _uiFence == nullptr || wrapped == nullptr ||
+        FAILED(_gameCommandQueue->Signal(_uiFence, fenceValue)) ||
+        FAILED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue)) ||
+        FAILED(wrapped->AdvanceReprojectionBuffer()))
+        _presenterState.store(PresenterState::Failed);
+    RecordWarpFrame(false, true, 0.0f);
+    SAFE_RELEASE(gameBackBuffer);
+    std::scoped_lock metricsLock(_metricsMutex);
+    ++_metricsSkippedAnchorSamples;
+    // No pacing happened on this dropped-publication path, so pace= is
+    // reset rather than left carrying the previous frame's sleep time.
+    _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStartMs);
+    _runtimeMetrics.gamePresentPaceMs = 0.0f;
 }
 
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
@@ -1958,26 +2000,23 @@ bool AReproj_Dx12::Present()
         }
         if (packetIndex < 0)
         {
-            // Drop publication but still retire and advance the logical game buffer.
-            const auto fenceValue = ++_uiFenceValue;
-            _uiAllocatorFenceValues[fIndex] = fenceValue;
-            if (_gameCommandQueue == nullptr || _uiFence == nullptr ||
-                FAILED(_gameCommandQueue->Signal(_uiFence, fenceValue)) ||
-                FAILED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue)) ||
-                FAILED(wrapped->AdvanceReprojectionBuffer()))
-                _presenterState.store(PresenterState::Failed);
-            RecordWarpFrame(false, true, 0.0f);
-            SAFE_RELEASE(gameBackBuffer);
-            std::scoped_lock metricsLock(_metricsMutex);
-            ++_metricsSkippedAnchorSamples;
-            // No pacing happened on this dropped-publication path, so pace= is
-            // reset rather than left carrying the previous frame's sleep time.
-            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
-            _runtimeMetrics.gamePresentPaceMs = 0.0f;
+            SkipAnchorPublication(fIndex, gameBackBuffer, virtualBufferIndex, wrapped, presentStart);
             return true;
         }
 
         auto& packet = _packets[packetIndex];
+        // Never stall the game thread on capture-allocator pressure either:
+        // when the GPU runs behind (streaming), this slot's prior UI
+        // submission may still be in flight and GetUICommandList would block
+        // inside CaptureFramePacket. Drop the anchor instead — the presenter
+        // holds its active anchor and a skipped anchor is invisible, while a
+        // stalled game thread deepens the hitch for everything behind it.
+        if (!CaptureAllocatorReady(packetIndex))
+        {
+            packet.state.store(PacketState::Free);
+            SkipAnchorPublication(fIndex, gameBackBuffer, virtualBufferIndex, wrapped, presentStart);
+            return true;
+        }
         const bool captured = CaptureFramePacket(fIndex, packetIndex, gameBackBuffer, virtualBufferIndex, warpAllowed);
         // The capture fence is the packet completion fence CaptureFramePacket
         // submitted its DIRECT copies with; AdvanceReprojectionBuffer gates
