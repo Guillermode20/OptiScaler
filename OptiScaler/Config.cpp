@@ -195,6 +195,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojAllowComposedWarp.set_from_config(readBool("AsyncTimewarp", "AllowComposedWarp"));
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
             ReprojNonBlockingHandoff.set_from_config(readBool("AsyncTimewarp", "NonBlockingHandoff"));
+            ReprojRepeatWarp.set_from_config(readBool("AsyncTimewarp", "RepeatWarp"));
+            ReprojAsyncComputeWarp.set_from_config(readBool("AsyncTimewarp", "AsyncComputeWarp"));
         }
 
         // OptiFG
@@ -1039,6 +1041,10 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojLateSampleLead.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "NonBlockingHandoff",
                      GetBoolValue(Instance()->ReprojNonBlockingHandoff.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "RepeatWarp",
+                     GetBoolValue(Instance()->ReprojRepeatWarp.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "AsyncComputeWarp",
+                     GetBoolValue(Instance()->ReprojAsyncComputeWarp.value_for_config()).c_str());
     }
 
     // XeFG output

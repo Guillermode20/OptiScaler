@@ -95,7 +95,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     D3D12_COMMAND_QUEUE_DESC computeDesc {};
     computeDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
     computeDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    if (false)
+    if (!Config::Instance()->ReprojAsyncComputeWarp.value_or_default())
     {
         LOG_INFO("Reproj: compute queue disabled by config; async warp uses DIRECT queue");
     }
@@ -695,7 +695,9 @@ void AReproj_Dx12::PresenterMain()
         // No per-slot telemetry: timeStep inputs stay local, the 1 Hz log line aggregates.
         constexpr uint32_t queryStart = UINT32_MAX;
 
-        const bool dispatched = packet.warpAllowed && !focusLost
+        const bool shouldWarp =
+            packet.warpAllowed && !focusLost && (newContent || Config::Instance()->ReprojRepeatWarp.value_or_default());
+        const bool dispatched = shouldWarp
                                     ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
                                     : DisplayPacket(activePacketIndex, true, queryStart);
 

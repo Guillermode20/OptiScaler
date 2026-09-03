@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.33 (2026-09-03)
+* Expose HUD isolation, allow composed warp, repeat warp, async compute queue, non-blocking handoff, and late sample lead in in-game HUD overlay and add repeat warp throttle and queue selection
+
 ## v10.0.1.32 (2026-09-03)
 * Fix game thread CPU stall via non-blocking virtual buffer handoff, tune late-latch lead, and add HudIsolation/AllowComposedWarp/LateSampleLead config
 

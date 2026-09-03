@@ -4164,11 +4164,47 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         bool depthOn = config->ReprojDepthEnabled.value_or_default();
         if (ImGui::Checkbox("Depth correct hills##reproj-live", &depthOn))
             config->ReprojDepthEnabled = depthOn;
-        ShowHelpMarker("Mode 1: depth-reprojects translation for walking/hills. Falls back to rotation when depth missing or <5mm move. Disabled until validated -> rotation-only.");
+        ShowHelpMarker("Mode 1: depth-reprojects translation for walking/hills. Falls back to rotation when depth "
+                       "missing or <5mm move. Disabled until validated -> rotation-only.");
         float bob = config->ReprojBobDampen.value_or_default();
         if (ImGui::SliderFloat("Bob dampen Z##reproj-live", &bob, 0.0f, 1.0f, "%.2f"))
             config->ReprojBobDampen = std::clamp(bob, 0.0f, 1.0f);
-        ShowHelpMarker("Attenuates head-bob vertical (world Z) translation. 0.35 default, 1.0=off, 0.0=freeze vertical.");
+        ShowHelpMarker(
+            "Attenuates head-bob vertical (world Z) translation. 0.35 default, 1.0=off, 0.0=freeze vertical.");
+
+        bool hudIso = config->ReprojHudIsolation.value_or_default();
+        if (ImGui::Checkbox("HUD Isolation (KCD2)##reproj-live", &hudIso))
+            config->ReprojHudIsolation = hudIso;
+        ShowHelpMarker("Separates Scaleform HUD from 3D world to composite UI cleanly after warp.");
+
+        bool allowComposed = config->ReprojAllowComposedWarp.value_or_default();
+        if (ImGui::Checkbox("Allow Composed Warp##reproj-live", &allowComposed))
+            config->ReprojAllowComposedWarp = allowComposed;
+        ShowHelpMarker(
+            "Permits timewarping the full frame even when HUD cannot be isolated (HUD is warped with camera).");
+
+        bool repeatWarp = config->ReprojRepeatWarp.value_or_default();
+        if (ImGui::Checkbox("Warp Repeated Slots##reproj-live", &repeatWarp))
+            config->ReprojRepeatWarp = repeatWarp;
+        ShowHelpMarker("When disabled, only warps on new anchors and uses fast blits for repeated slots, saving GPU "
+                       "time for the game.");
+
+        bool computeQueue = config->ReprojAsyncComputeWarp.value_or_default();
+        if (ImGui::Checkbox("Async Compute Queue##reproj-live", &computeQueue))
+            config->ReprojAsyncComputeWarp = computeQueue;
+        ShowHelpMarker("When enabled, runs warps on dedicated COMPUTE queue. Disable on Proton if cross-queue "
+                       "contention drops game FPS.");
+
+        bool nonBlockHandoff = config->ReprojNonBlockingHandoff.value_or_default();
+        if (ImGui::Checkbox("Non-blocking handoff##reproj-live", &nonBlockHandoff))
+            config->ReprojNonBlockingHandoff = nonBlockHandoff;
+        ShowHelpMarker("Releases virtual backbuffer immediately without GPU wait when HUD isolation is active. "
+                       "Prevents game thread stalls.");
+
+        float lateLead = config->ReprojLateSampleLead.value_or_default();
+        if (ImGui::SliderFloat("Late sample lead##reproj-live", &lateLead, 1.0f, 8.0f, "%.1f ms"))
+            config->ReprojLateSampleLead = std::clamp(lateLead, 1.0f, 8.0f);
+        ShowHelpMarker("Lead time before deadline to release compute warp. 4.0 ms default.");
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {

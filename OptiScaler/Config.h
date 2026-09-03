@@ -632,6 +632,8 @@ class Config
     CustomOptional<bool> ReprojNonBlockingHandoff {
         true
     }; // release virtual backbuffer without GPU wait when HUD isolation active
+    CustomOptional<bool> ReprojRepeatWarp { true };       // warp on repeated display slots vs fast display blit
+    CustomOptional<bool> ReprojAsyncComputeWarp { true }; // use dedicated COMPUTE queue vs DIRECT queue on Proton
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033
