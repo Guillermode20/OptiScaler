@@ -714,6 +714,14 @@ void AReproj_Dx12::PresenterMain()
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
+                if (!captureReady)
+                {
+                    // H1 diagnosis: the newest anchor's capture copies had not
+                    // finished when selection ran, so this slot's warp waits on
+                    // cross-queue capture completion and can slip past vblank.
+                    std::scoped_lock metricsLock(_metricsMutex);
+                    ++_metricsCaptureNotReady;
+                }
                 for (int i = 0; i < BUFFER_COUNT; ++i)
                     if (i != activePacketIndex && _packets[i].state.load() == PacketState::Ready &&
                         _packets[i].frameId < activeFrame)

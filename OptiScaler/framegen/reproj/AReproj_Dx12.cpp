@@ -1842,6 +1842,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.missedDisplaySlots = _metricsMissedDisplaySlots;
     _runtimeMetrics.droppedAnchors = _metricsSkippedAnchorSamples;
     _runtimeMetrics.computeCaptures = _metricsComputeCaptures;
+    _runtimeMetrics.captureNotReady = _metricsCaptureNotReady;
     if (_presentIntervalCount > 0)
     {
         std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
@@ -1854,12 +1855,13 @@ void AReproj_Dx12::LogMetricsIfDue()
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} ({}, block={:.2f}ms)",
+             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} ({}, block={:.2f}ms pace={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
-             _metricsSkippedAnchorSamples, _metricsComputeCaptures, presenter, _runtimeMetrics.gamePresentBlockMs);
+             _metricsSkippedAnchorSamples, _metricsComputeCaptures, _metricsCaptureNotReady, presenter,
+             _runtimeMetrics.gamePresentBlockMs, _runtimeMetrics.gamePresentPaceMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
     _metricsWarpFrames = 0;
@@ -1875,6 +1877,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsLateInputApplied = 0;
     _metricsHudComposites = 0;
     _metricsComputeCaptures = 0;
+    _metricsCaptureNotReady = 0;
     _metricsLateInputMaxDegrees = 0.0f;
 }
 
@@ -2107,10 +2110,15 @@ bool AReproj_Dx12::Present()
             }
             // Pace only after handing this virtual buffer back so the sleep
             // never delays its GPU ownership transition.
+            const auto paceStart = Util::MillisecondsNow();
             FrameLimit::paceReprojectionSource(true);
+            const auto paceEnd = Util::MillisecondsNow();
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
-            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
+            // block= covers real game-thread work only; the pacing sleep is
+            // reported separately in pace= so queue-pin costs stay visible.
+            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(paceStart - presentStart);
+            _runtimeMetrics.gamePresentPaceMs = static_cast<float>(paceEnd - paceStart);
             return advanced;
         }
 
@@ -2141,7 +2149,10 @@ bool AReproj_Dx12::Present()
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
             ++_metricsSkippedAnchorSamples;
+            // No pacing happened on this dropped-publication path, so pace= is
+            // reset rather than left carrying the previous frame's sleep time.
             _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
+            _runtimeMetrics.gamePresentPaceMs = 0.0f;
             return true;
         }
 
@@ -2162,10 +2173,16 @@ bool AReproj_Dx12::Present()
             // even when anchor sampling is non-blocking; otherwise an uncapped
             // KCD2 render queue starves the 120 Hz presenter behind 15-27 ms of
             // work. NonBlockingAnchorSampling controls capture frequency only.
+            const auto paceStart = Util::MillisecondsNow();
             FrameLimit::paceReprojectionSource(true);
+            const auto paceEnd = Util::MillisecondsNow();
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
-            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStart);
+            // block= covers real game-thread work only (capture submit, the
+            // game-queue capture-fence pin, publication); the pacing sleep is
+            // reported separately in pace= so the pin cost stays visible.
+            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(paceStart - presentStart);
+            _runtimeMetrics.gamePresentPaceMs = static_cast<float>(paceEnd - paceStart);
             return true;
         }
 
@@ -2329,6 +2346,7 @@ void AReproj_Dx12::Activate()
         _metricsLateInputApplied = 0;
         _metricsHudComposites = 0;
         _metricsComputeCaptures = 0;
+        _metricsCaptureNotReady = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _runtimeMetrics = {};
     }

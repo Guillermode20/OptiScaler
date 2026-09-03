@@ -36,7 +36,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool rotationOnly = false;
         bool hudWarped = true;
         bool asyncPresenter = false;
-        float gamePresentBlockMs = 0.0f;
+        float gamePresentBlockMs = 0.0f; // game-thread Present() work, pacing sleep excluded
+        float gamePresentPaceMs = 0.0f;  // SourceFramerateLimit pacing sleep after the last published anchor
         float meanPresentIntervalMs = 0.0f;
         float p95PresentIntervalMs = 0.0f;
         float dispatchLeadMs = 3.0f;
@@ -45,6 +46,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         uint32_t missedDisplaySlots = 0;
         uint32_t droppedAnchors = 0;
         uint32_t computeCaptures = 0;
+        uint32_t captureNotReady = 0;
     };
 
   private:
@@ -214,6 +216,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsLateInputApplied = 0;
     uint32_t _metricsHudComposites = 0;
     uint32_t _metricsComputeCaptures = 0;
+    uint32_t _metricsCaptureNotReady = 0;
     float _metricsLateInputMaxDegrees = 0.0f;
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
