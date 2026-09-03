@@ -1150,8 +1150,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             color = hudlessResource;
             colorState = hudlessState;
             packet.hasUi = true;
-            usingKcd2Isolation =
-                hudless == nullptr && ui == nullptr && hudlessResource == kcd2Hudless && uiResource == kcd2Ui;
+            usingKcd2Isolation = !hudless && !ui && hudlessResource == kcd2Hudless && uiResource == kcd2Ui;
         }
     }
 
