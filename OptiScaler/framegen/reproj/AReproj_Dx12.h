@@ -263,6 +263,11 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::atomic<float> _trackedMouseSensitivityX { 0.00015f };
     std::atomic<float> _trackedMouseSensitivityY { 0.00015f };
     std::atomic<bool> _hasTrackedMouseSensitivity { false };
+    double _kcd2CalibrationYawRadians = 0.0;
+    double _kcd2CalibrationPitchRadians = 0.0;
+    uint64_t _kcd2CalibrationMouseX = 0;
+    uint64_t _kcd2CalibrationMouseY = 0;
+    uint32_t _kcd2CalibrationSamples = 0;
 
   protected:
     void ReleaseObjects() override final;

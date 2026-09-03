@@ -524,25 +524,6 @@ void ResTrack_Dx12::hkCreateShaderResourceView(ID3D12Device* This, ID3D12Resourc
                                                D3D12_SHADER_RESOURCE_VIEW_DESC* pDesc,
                                                D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
-    // Crash breadcrumb: vkd3d AV'd inside buffer-SRV creation on KCD2 async.
-    {
-        static std::atomic<uint32_t> srvCount { 0 };
-        auto n = srvCount.fetch_add(1);
-        if (n < 64 || (n % 1024) == 0)
-        {
-            bool isScBuffer = false;
-            for (size_t i = 0; i < State::Instance().scBuffers.size(); i++)
-                if (State::Instance().scBuffers[i] == pResource)
-                {
-                    isScBuffer = true;
-                    break;
-                }
-            UINT dim = pDesc ? pDesc->ViewDimension : 0xFFFFFFFFu;
-            LOG_INFO("Reproj diag: CreateSRV #{}, res={:X} (scBuffer:{}), desc={:X}, dim={}", n + 1,
-                     (size_t) pResource, isScBuffer, (size_t) pDesc, (UINT) dim);
-        }
-    }
-
     // KCD2 under VKD3D can submit a low-address placeholder (observed as 0x3)
     // while rebuilding its swapchain SRVs. It is not a valid COM resource pointer;
     // forwarding it into VKD3D (including as nullptr) causes an immediate startup
@@ -1191,7 +1172,8 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
 
         if (anyRedirected)
         {
-            o_OMSetRenderTargets(This, NumRenderTargetDescriptors, replacementRtvs.data(), FALSE, pDepthStencilDescriptor);
+            o_OMSetRenderTargets(This, NumRenderTargetDescriptors, replacementRtvs.data(), FALSE,
+                                 pDepthStencilDescriptor);
             return;
         }
     }
@@ -1330,8 +1312,8 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
         }
     }
 
-    o_OMSetRenderTargets(This, NumRenderTargetDescriptors,
-                         replaced ? replacementRtvs.data() : pRenderTargetDescriptors, FALSE, pDepthStencilDescriptor);
+    o_OMSetRenderTargets(This, NumRenderTargetDescriptors, replaced ? replacementRtvs.data() : pRenderTargetDescriptors,
+                         FALSE, pDepthStencilDescriptor);
 }
 
 #pragma endregion

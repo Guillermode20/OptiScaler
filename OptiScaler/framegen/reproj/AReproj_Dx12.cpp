@@ -791,9 +791,11 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         pBaseUp = &lateBaseUp;
         pBaseForward = &lateBaseForward;
 
-        const auto mouseAtLatest = OptiInput::GetRawMouseMotionAt(latestCamera.timestampMs);
-        deltaX = static_cast<double>(current.TotalX - mouseAtLatest.TotalX);
-        deltaY = static_cast<double>(current.TotalY - mouseAtLatest.TotalY);
+        // The KCD2 camera hook snapshots raw-input totals alongside the pose.
+        // This is an exact producer-side baseline; do not infer it from a
+        // timestamped history on the presenter thread.
+        deltaX = static_cast<double>(current.TotalX - latestCamera.mouseTotalX);
+        deltaY = static_cast<double>(current.TotalY - latestCamera.mouseTotalY);
     }
     else
     {
@@ -1136,6 +1138,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     ID3D12Resource* color = gameBackBuffer;
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
+    bool usingKcd2Isolation = false;
 
     if (hudlessResource && uiResource && hudlessReady && uiReady)
     {
@@ -1147,6 +1150,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             color = hudlessResource;
             colorState = hudlessState;
             packet.hasUi = true;
+            usingKcd2Isolation =
+                hudless == nullptr && ui == nullptr && hudlessResource == kcd2Hudless && uiResource == kcd2Ui;
         }
     }
 
@@ -1305,44 +1310,57 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
 
         if (kcd2PoseIntervalMs > 1.0 && kcd2PoseIntervalMs < 100.0)
         {
+            Kcd2Camera::Snapshot calibrationCurrent {};
+            Kcd2Camera::Snapshot calibrationPrevious {};
+            const bool haveCalibrationPair = Kcd2Camera::ReadSnapshots(calibrationCurrent, calibrationPrevious) &&
+                                             calibrationCurrent.timestampMs == kcd2CameraTimestamp;
             float kcd2Yaw = 0.0f;
             float kcd2Pitch = 0.0f;
-            DecomposeCameraPairRotation(packet.constants.cameraForward, packet.constants.prevCameraForward,
-                                        packet.constants.prevCameraRight, packet.constants.prevCameraUp, &kcd2Yaw,
-                                        &kcd2Pitch);
-            const double prevPoseTime = kcd2CameraTimestamp - kcd2PoseIntervalMs;
-            const auto mouseNow = OptiInput::GetRawMouseMotionAt(kcd2CameraTimestamp);
-            const auto mousePrev = OptiInput::GetRawMouseMotionAt(prevPoseTime);
-            const double dX = static_cast<double>(mouseNow.TotalX - mousePrev.TotalX);
-            const double dY = static_cast<double>(mouseNow.TotalY - mousePrev.TotalY);
+            if (haveCalibrationPair)
+                DecomposeCameraPairRotation(calibrationCurrent.forward, calibrationPrevious.forward,
+                                            calibrationPrevious.right, calibrationPrevious.up, &kcd2Yaw, &kcd2Pitch);
+            const double dX =
+                haveCalibrationPair
+                    ? static_cast<double>(calibrationCurrent.mouseTotalX - calibrationPrevious.mouseTotalX)
+                    : 0.0;
+            const double dY =
+                haveCalibrationPair
+                    ? static_cast<double>(calibrationCurrent.mouseTotalY - calibrationPrevious.mouseTotalY)
+                    : 0.0;
 
-            if (std::abs(dX) >= 4.0 && std::abs(kcd2Yaw) > 1e-4 && (dX * kcd2Yaw > 0.0))
+            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && std::abs(dX) >= 4.0 &&
+                std::abs(kcd2Yaw) > 1e-4 && (dX * kcd2Yaw > 0.0))
             {
-                const float measuredSensX = static_cast<float>(std::abs(kcd2Yaw) / std::abs(dX));
-                if (measuredSensX > 1e-5f && measuredSensX < 0.005f)
-                {
-                    if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed))
-                    {
-                        _trackedMouseSensitivityX.store(measuredSensX, std::memory_order_relaxed);
-                        _trackedMouseSensitivityY.store(measuredSensX, std::memory_order_relaxed);
-                        _hasTrackedMouseSensitivity.store(true, std::memory_order_relaxed);
-                        LOG_INFO("Reproj: KCD2 mouse sens calibrated: sensX={:.7f} (dX={:.1f}, yaw={:.5f} rad)",
-                                 measuredSensX, dX, kcd2Yaw);
-                    }
-                    else
-                    {
-                        const float oldX = _trackedMouseSensitivityX.load(std::memory_order_relaxed);
-                        _trackedMouseSensitivityX.store(oldX * 0.9f + measuredSensX * 0.1f, std::memory_order_relaxed);
-                    }
-                }
+                _kcd2CalibrationYawRadians += std::abs(kcd2Yaw);
+                _kcd2CalibrationMouseX += static_cast<uint64_t>(std::abs(dX));
             }
-            if (std::abs(dY) >= 4.0 && std::abs(kcd2Pitch) > 1e-4 && (-dY * kcd2Pitch > 0.0))
+            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && std::abs(dY) >= 4.0 &&
+                std::abs(kcd2Pitch) > 1e-4 && (-dY * kcd2Pitch > 0.0))
             {
-                const float measuredSensY = static_cast<float>(std::abs(kcd2Pitch) / std::abs(dY));
-                if (measuredSensY > 1e-5f && measuredSensY < 0.005f)
+                _kcd2CalibrationPitchRadians += std::abs(kcd2Pitch);
+                _kcd2CalibrationMouseY += static_cast<uint64_t>(std::abs(dY));
+            }
+            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && haveCalibrationPair &&
+                (std::abs(dX) >= 4.0 || std::abs(dY) >= 4.0))
+                ++_kcd2CalibrationSamples;
+
+            // Lock once from an aggregate fit.  The old per-frame EMA could move
+            // sensitivity by 4x in the middle of a pan, which is itself a visible
+            // reprojection discontinuity.
+            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && _kcd2CalibrationSamples >= 8 &&
+                _kcd2CalibrationMouseX >= 64)
+            {
+                const auto measuredX = static_cast<float>(_kcd2CalibrationYawRadians / _kcd2CalibrationMouseX);
+                const auto measuredY = _kcd2CalibrationMouseY >= 64
+                                           ? static_cast<float>(_kcd2CalibrationPitchRadians / _kcd2CalibrationMouseY)
+                                           : measuredX;
+                if (measuredX > 1e-5f && measuredX < 0.001f && measuredY > 1e-5f && measuredY < 0.001f)
                 {
-                    const float oldY = _trackedMouseSensitivityY.load(std::memory_order_relaxed);
-                    _trackedMouseSensitivityY.store(oldY * 0.9f + measuredSensY * 0.1f, std::memory_order_relaxed);
+                    _trackedMouseSensitivityX.store(measuredX, std::memory_order_relaxed);
+                    _trackedMouseSensitivityY.store(measuredY, std::memory_order_relaxed);
+                    _hasTrackedMouseSensitivity.store(true, std::memory_order_relaxed);
+                    LOG_INFO("Reproj: KCD2 mouse sensitivity locked: sensX={:.7f} sensY={:.7f} samples={}", measuredX,
+                             measuredY, _kcd2CalibrationSamples);
                 }
             }
         }
@@ -1397,8 +1415,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     Kcd2Camera::Snapshot currentCamera {};
     Kcd2Camera::Snapshot previousCamera {};
-    packet.sourceCutGeneration =
-        Kcd2Camera::ReadSnapshots(currentCamera, previousCamera) ? currentCamera.cutGeneration : 0;
+    const bool haveKcd2Snapshots =
+        Kcd2Camera::ReadSnapshots(currentCamera, previousCamera) && currentCamera.timestampMs == kcd2CameraTimestamp;
+    packet.sourceCutGeneration = haveKcd2Snapshots ? currentCamera.cutGeneration : 0;
     // Rate-limited raw CCamera projection dump: lets a live session confirm the near/far field
     // mapping (stock CryEngine layout assumed) against in-game view distance before depth mode
     // is enabled. Values also land in telemetry slots via packet.constants.cameraNear/Far.
@@ -1428,13 +1447,17 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // publication-time totals discarded all motion between camera update and
     // Present on every source frame, making the first output after each 60 Hz
     // anchor unsteered and preserving a visible 60 Hz input cadence.
-    const auto mouse =
-        sourceTimestamp > 0.0 ? OptiInput::GetRawMouseMotionAt(sourceTimestamp) : OptiInput::GetRawMouseMotion();
+    const auto mouse = haveKcd2Snapshots
+                           ? OptiInput::RawMouseMotion { currentCamera.mouseTotalX, currentCamera.mouseTotalY,
+                                                         currentCamera.mouseTimestampMs }
+                           : (sourceTimestamp > 0.0 ? OptiInput::GetRawMouseMotionAt(sourceTimestamp)
+                                                    : OptiInput::GetRawMouseMotion());
     packet.sourceMouseX = mouse.TotalX;
     packet.sourceMouseY = mouse.TotalY;
     packet.sourceMouseTimestamp = mouse.TimestampMs;
     packet.inputLatchReady = true;
-    UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
+    if (kcd2CameraTimestamp <= 0.0)
+        UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
     // Never warp a composed frame. Timewarp is valid only when a camera pose,
     // HUD-less world, and separately composited UI are all available.
     packet.warpAllowed = warpAllowed && packet.hasCamera && packet.hasUi;
@@ -1457,6 +1480,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         // The composed fallback reads the virtual buffer and keeps that stricter fence.
         packet.handoffFence = packet.hasUi ? _captureInputFence : _captureFence;
         packet.handoffFenceValue = packet.hasUi ? gameReadyFenceValue : packet.captureFenceValue;
+        if (submitted && usingKcd2Isolation)
+            Kcd2HudIsolation::MarkFrameCaptured(gameBackBuffer, kcd2Hudless, kcd2Ui, _captureFence,
+                                                packet.captureFenceValue);
         if (submitted)
         {
             std::scoped_lock lock(_metricsMutex);
@@ -1743,21 +1769,15 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
             return false;
     }
 
-    // Cross-queue ordering without a CPU stall: the backbuffer was written by the
-    // compute queue but presented from the DIRECT queue. Retirement (packet + allocator
-    // reuse) is already fenced — SubmitComputeCommandList signaled _scFence and the
-    // next use of this slot waits on it — so Present only needs GPU-side ordering.
-    // Enqueue a queue-level wait instead of blocking this thread on completion: the
-    // old trailing WaitForComputeAllocator stalled every slot ~2-4 ms and serialized
-    // the presenter against the warp it just submitted.
+    // Present belongs to the swapchain's creation queue (the game's DIRECT
+    // queue), but poisoning that queue with a 120 Hz wait serializes all later
+    // KCD2 rendering behind presenter work.  Wait on the presenter thread for
+    // the independent compute submission instead.  The late latch already
+    // releases the short warp 3.5 ms before the slot, so this wait normally
+    // observes an already-completed fence and never enters the game queue.
     if (useCompute && _computeFence != nullptr)
     {
-        // The real swapchain was created on the game's DIRECT queue, not on
-        // _presentQueue. Queue the dependency on the actual presenting queue;
-        // a wait on _presentQueue alone does not order Present() and can produce
-        // an occasional old/half-written frame after focus changes.
-        if (_gameCommandQueue == nullptr ||
-            FAILED(_gameCommandQueue->Wait(_computeFence, _computeAllocatorFenceValues[outputIndex])))
+        if (!WaitForComputeAllocator(outputIndex))
             return false;
     }
     return true;
@@ -2476,6 +2496,17 @@ void AReproj_Dx12::Activate()
     _cachedRefreshHz = 0.0;
     _lastRefreshQueryMs = 0.0;
     _lastRealFrameTimestamp = 0.0;
+    _lastCapturedMouseTimestamp = 0.0;
+    _lastCapturedMouseX = 0;
+    _lastCapturedMouseY = 0;
+    _trackedMouseSensitivityX.store(0.00015f, std::memory_order_relaxed);
+    _trackedMouseSensitivityY.store(0.00015f, std::memory_order_relaxed);
+    _hasTrackedMouseSensitivity.store(false, std::memory_order_relaxed);
+    _kcd2CalibrationYawRadians = 0.0;
+    _kcd2CalibrationPitchRadians = 0.0;
+    _kcd2CalibrationMouseX = 0;
+    _kcd2CalibrationMouseY = 0;
+    _kcd2CalibrationSamples = 0;
     if (_renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());

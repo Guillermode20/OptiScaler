@@ -970,14 +970,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDXGISwapChain4::GetBuffer(UINT Buffer, REFIID 
         {
             if (Buffer >= _reprojectionBuffers.size())
             {
-                LOG_INFO("Reproj diag: GetBuffer out of range idx={} count={}", Buffer, _reprojectionBuffers.size());
+                LOG_WARN("Reproj: GetBuffer out of range idx={} count={}", Buffer, _reprojectionBuffers.size());
                 return DXGI_ERROR_INVALID_CALL;
             }
-            // Crash breadcrumb: game re-acquiring buffers post-resize
-            static std::atomic<uint32_t> getCount { 0 };
-            auto n = getCount.fetch_add(1);
-            if (n < 24 || (n % 512) == 0)
-                LOG_INFO("Reproj diag: GetBuffer[{}] call #{}", Buffer, n + 1);
             return _reprojectionBuffers[Buffer].resource->QueryInterface(riid, ppSurface);
         }
     }

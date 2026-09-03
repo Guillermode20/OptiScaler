@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.30 (2026-09-03)
+* Decouple async timewarp from the game queue and fence KCD2 pose/HUD capture
+
 ## v10.0.1.29 (2026-09-03)
 * Release isolated-HUD virtual buffers before packet COPY completion
 

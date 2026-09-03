@@ -19,6 +19,9 @@ struct FrameSlot
     D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON;
     ID3D12DescriptorHeap* rtvHeap = nullptr;
     D3D12_CPU_DESCRIPTOR_HANDLE uiRtv {};
+    ID3D12Fence* captureFence = nullptr;
+    UINT64 captureFenceValue = 0;
+    uint64_t frameSerial = 0;
     bool snapshotTakenThisScope = false;
     bool hasValidData = false;
 };
@@ -26,8 +29,8 @@ struct FrameSlot
 std::array<FrameSlot, 8> g_slots {};
 std::mutex g_mutex;
 
-void ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res,
-                     D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+void ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES before,
+                     D3D12_RESOURCE_STATES after)
 {
     if (before == after || res == nullptr || cmdList == nullptr)
         return;
@@ -45,12 +48,27 @@ void ReleaseSlot(FrameSlot& slot)
     SAFE_RELEASE(slot.hudlessTexture);
     SAFE_RELEASE(slot.uiTexture);
     SAFE_RELEASE(slot.rtvHeap);
+    SAFE_RELEASE(slot.captureFence);
     slot.backBuffer = nullptr;
     slot.hudlessState = D3D12_RESOURCE_STATE_COMMON;
     slot.uiState = D3D12_RESOURCE_STATE_COMMON;
     slot.uiRtv = {};
+    slot.captureFenceValue = 0;
+    slot.frameSerial = 0;
     slot.snapshotTakenThisScope = false;
     slot.hasValidData = false;
+}
+
+bool IsReusable(FrameSlot& slot)
+{
+    if (slot.captureFence == nullptr || slot.captureFenceValue == 0)
+        return true;
+    const auto completed = slot.captureFence->GetCompletedValue();
+    if (completed != UINT64_MAX && completed < slot.captureFenceValue)
+        return false;
+    SAFE_RELEASE(slot.captureFence);
+    slot.captureFenceValue = 0;
+    return completed != UINT64_MAX;
 }
 
 FrameSlot* FindOrCreateSlot(ID3D12Device* device, ID3D12Resource* backBuffer)
@@ -58,26 +76,33 @@ FrameSlot* FindOrCreateSlot(ID3D12Device* device, ID3D12Resource* backBuffer)
     if (backBuffer == nullptr)
         return nullptr;
 
-    FrameSlot* matching = nullptr;
-    FrameSlot* empty = nullptr;
+    FrameSlot* matchingScope = nullptr;
+    FrameSlot* matchingReusable = nullptr;
+    FrameSlot* reusable = nullptr;
 
     for (auto& slot : g_slots)
     {
-        if (slot.backBuffer == backBuffer)
+        if (slot.backBuffer == backBuffer && slot.snapshotTakenThisScope)
         {
-            matching = &slot;
+            matchingScope = &slot;
             break;
         }
-        if (slot.backBuffer == nullptr && empty == nullptr)
-            empty = &slot;
+        if (!IsReusable(slot))
+            continue;
+        if (slot.backBuffer == backBuffer && matchingReusable == nullptr)
+            matchingReusable = &slot;
+        if (reusable == nullptr || (slot.backBuffer == nullptr && reusable->backBuffer != nullptr) ||
+            slot.frameSerial < reusable->frameSerial)
+            reusable = &slot;
     }
 
-    FrameSlot* slot = matching ? matching : empty;
+    FrameSlot* slot = matchingScope ? matchingScope : (matchingReusable ? matchingReusable : reusable);
+    // All isolation generations are still being copied. Fail closed for this
+    // frame instead of overwriting a resource that the COPY queue is reading.
     if (slot == nullptr)
-    {
-        slot = &g_slots[0];
+        return nullptr;
+    if (slot->backBuffer != nullptr && slot->backBuffer != backBuffer)
         ReleaseSlot(*slot);
-    }
 
     const auto desc = backBuffer->GetDesc();
 
@@ -98,12 +123,12 @@ FrameSlot* FindOrCreateSlot(ID3D12Device* device, ID3D12Resource* backBuffer)
         D3D12_RESOURCE_DESC hudlessDesc = desc;
         hudlessDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
-        HRESULT hr = device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &hudlessDesc,
-                                                     D3D12_RESOURCE_STATE_COMMON, nullptr,
-                                                     IID_PPV_ARGS(&slot->hudlessTexture));
+        HRESULT hr =
+            device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &hudlessDesc, D3D12_RESOURCE_STATE_COMMON,
+                                            nullptr, IID_PPV_ARGS(&slot->hudlessTexture));
         if (FAILED(hr))
         {
-            LOG_ERROR("KCD2 HUD: failed to create hudless texture: {:X}", (UINT64)hr);
+            LOG_ERROR("KCD2 HUD: failed to create hudless texture: {:X}", (UINT64) hr);
             return nullptr;
         }
         slot->hudlessTexture->SetName(L"Kcd2Hud_HudlessWorld");
@@ -117,7 +142,7 @@ FrameSlot* FindOrCreateSlot(ID3D12Device* device, ID3D12Resource* backBuffer)
                                              IID_PPV_ARGS(&slot->uiTexture));
         if (FAILED(hr))
         {
-            LOG_ERROR("KCD2 HUD: failed to create UI texture: {:X}", (UINT64)hr);
+            LOG_ERROR("KCD2 HUD: failed to create UI texture: {:X}", (UINT64) hr);
             SAFE_RELEASE(slot->hudlessTexture);
             return nullptr;
         }
@@ -130,7 +155,7 @@ FrameSlot* FindOrCreateSlot(ID3D12Device* device, ID3D12Resource* backBuffer)
         hr = device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&slot->rtvHeap));
         if (FAILED(hr))
         {
-            LOG_ERROR("KCD2 HUD: failed to create RTV heap: {:X}", (UINT64)hr);
+            LOG_ERROR("KCD2 HUD: failed to create RTV heap: {:X}", (UINT64) hr);
             SAFE_RELEASE(slot->hudlessTexture);
             SAFE_RELEASE(slot->uiTexture);
             return nullptr;
@@ -141,8 +166,8 @@ FrameSlot* FindOrCreateSlot(ID3D12Device* device, ID3D12Resource* backBuffer)
         rtvDesc.Format = desc.Format;
         rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
         device->CreateRenderTargetView(slot->uiTexture, &rtvDesc, slot->uiRtv);
-        LOG_INFO("KCD2 HUD: allocated isolation buffers for backbuffer {:X} ({}x{} format {})",
-                 (size_t)backBuffer, desc.Width, desc.Height, (UINT)desc.Format);
+        LOG_INFO("KCD2 HUD: allocated isolation buffers for backbuffer {:X} ({}x{} format {})", (size_t) backBuffer,
+                 desc.Width, desc.Height, (UINT) desc.Format);
     }
 
     return slot;
@@ -151,7 +176,14 @@ FrameSlot* FindOrCreateSlot(ID3D12Device* device, ID3D12Resource* backBuffer)
 
 void ArmForFrame(int frameIndex)
 {
-    (void)frameIndex;
+    (void) frameIndex;
+    std::scoped_lock lock(g_mutex);
+    // Discovery is frame-local. Packet copies keep their own resource
+    // references, so hiding older generations here cannot invalidate work in
+    // flight and prevents a frame with no Scaleform redirect from reusing
+    // stale world/UI content.
+    for (auto& slot : g_slots)
+        slot.hasValidData = false;
 }
 
 bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
@@ -175,7 +207,16 @@ bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
     std::scoped_lock lock(g_mutex);
     auto* slot = FindOrCreateSlot(device, source);
     if (slot == nullptr || slot->uiTexture == nullptr || slot->hudlessTexture == nullptr)
+    {
+        // Do not let Present consume an older isolation generation as if it
+        // belonged to this frame. Existing packet copies own their resources
+        // independently; clearing discoverability here is safe and makes the
+        // current composed frame fail closed.
+        for (auto& candidate : g_slots)
+            if (candidate.backBuffer == source)
+                candidate.hasValidData = false;
         return false;
+    }
 
     if (!slot->snapshotTakenThisScope)
     {
@@ -197,6 +238,8 @@ bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
 
         slot->snapshotTakenThisScope = true;
         slot->hasValidData = true;
+        static uint64_t nextFrameSerial = 0;
+        slot->frameSerial = ++nextFrameSerial;
     }
 
     *replacementRtv = slot->uiRtv;
@@ -206,7 +249,7 @@ bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
 bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source, int frameIndex,
                  D3D12_CPU_DESCRIPTOR_HANDLE* replacementRtv)
 {
-    (void)frameIndex;
+    (void) frameIndex;
     return TryRedirect(commandList, source, replacementRtv);
 }
 
@@ -225,23 +268,25 @@ ID3D12Resource* GetHudlessColor(ID3D12Resource* backBuffer, D3D12_RESOURCE_STATE
         return nullptr;
 
     std::scoped_lock lock(g_mutex);
+    FrameSlot* newest = nullptr;
     for (auto& slot : g_slots)
     {
-        if (slot.backBuffer == backBuffer && slot.hasValidData && slot.hudlessTexture != nullptr)
-        {
-            if (state != nullptr)
-                *state = slot.hudlessState;
-            return slot.hudlessTexture;
-        }
+        if (slot.backBuffer == backBuffer && slot.hasValidData && slot.hudlessTexture != nullptr &&
+            (newest == nullptr || slot.frameSerial > newest->frameSerial))
+            newest = &slot;
     }
-    return nullptr;
+    if (newest == nullptr)
+        return nullptr;
+    if (state != nullptr)
+        *state = newest->hudlessState;
+    return newest->hudlessTexture;
 }
 
 ID3D12Resource* GetHudlessColor(int frameIndex, D3D12_RESOURCE_STATES* state)
 {
     if (state != nullptr)
         *state = D3D12_RESOURCE_STATE_COMMON;
-    if (frameIndex < 0 || frameIndex >= (int)g_slots.size())
+    if (frameIndex < 0 || frameIndex >= (int) g_slots.size())
         return nullptr;
 
     std::scoped_lock lock(g_mutex);
@@ -263,23 +308,25 @@ ID3D12Resource* GetUIColor(ID3D12Resource* backBuffer, D3D12_RESOURCE_STATES* st
         return nullptr;
 
     std::scoped_lock lock(g_mutex);
+    FrameSlot* newest = nullptr;
     for (auto& slot : g_slots)
     {
-        if (slot.backBuffer == backBuffer && slot.hasValidData && slot.uiTexture != nullptr)
-        {
-            if (state != nullptr)
-                *state = slot.uiState;
-            return slot.uiTexture;
-        }
+        if (slot.backBuffer == backBuffer && slot.hasValidData && slot.uiTexture != nullptr &&
+            (newest == nullptr || slot.frameSerial > newest->frameSerial))
+            newest = &slot;
     }
-    return nullptr;
+    if (newest == nullptr)
+        return nullptr;
+    if (state != nullptr)
+        *state = newest->uiState;
+    return newest->uiTexture;
 }
 
 ID3D12Resource* GetUIColor(int frameIndex, D3D12_RESOURCE_STATES* state)
 {
     if (state != nullptr)
         *state = D3D12_RESOURCE_STATE_COMMON;
-    if (frameIndex < 0 || frameIndex >= (int)g_slots.size())
+    if (frameIndex < 0 || frameIndex >= (int) g_slots.size())
         return nullptr;
 
     std::scoped_lock lock(g_mutex);
@@ -293,6 +340,31 @@ ID3D12Resource* GetUIColor(int frameIndex, D3D12_RESOURCE_STATES* state)
     return nullptr;
 }
 
+void MarkFrameCaptured(ID3D12Resource* backBuffer, ID3D12Resource* hudless, ID3D12Resource* ui, ID3D12Fence* fence,
+                       UINT64 fenceValue)
+{
+    if (backBuffer == nullptr || hudless == nullptr || ui == nullptr || fence == nullptr || fenceValue == 0)
+        return;
+
+    std::scoped_lock lock(g_mutex);
+    FrameSlot* captured = nullptr;
+    for (auto& slot : g_slots)
+    {
+        if (slot.backBuffer == backBuffer && slot.hudlessTexture == hudless && slot.uiTexture == ui)
+        {
+            captured = &slot;
+            break;
+        }
+    }
+    if (captured == nullptr)
+        return;
+
+    SAFE_RELEASE(captured->captureFence);
+    fence->AddRef();
+    captured->captureFence = fence;
+    captured->captureFenceValue = fenceValue;
+}
+
 void Reset()
 {
     std::scoped_lock lock(g_mutex);
@@ -300,4 +372,3 @@ void Reset()
         ReleaseSlot(slot);
 }
 } // namespace Kcd2HudIsolation
-

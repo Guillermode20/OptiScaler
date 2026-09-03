@@ -6,6 +6,7 @@
 #include "Config.h"
 #include "shaders/reprojection/RP_Common.h"
 #include "menu/menu_common.h"
+#include "menu/input/input_system.h"
 #include "scanner/scanner.h"
 #include <detours/detours.h>
 
@@ -48,6 +49,9 @@ struct Pose
     static constexpr int PROJECTION_FLOAT_COUNT = 20;
     float projectionRaw[PROJECTION_FLOAT_COUNT] {};
     double timestampMs = 0.0;
+    int64_t mouseTotalX = 0;
+    int64_t mouseTotalY = 0;
+    double mouseTimestampMs = 0.0;
     uintptr_t cameraIdentity = 0;
     uint64_t sequence = 0;
     uint64_t cutGeneration = 0;
@@ -160,6 +164,14 @@ void PublishPose(uintptr_t camera)
         std::memcpy(pose.projectionRaw, reinterpret_cast<const float*>(camera + 0x30),
                     sizeof(float) * Pose::PROJECTION_FLOAT_COUNT);
         pose.timestampMs = Util::MillisecondsNow();
+        // Capture the input accumulator in the same callback as the camera
+        // basis.  Reconstructing this baseline later from a timestamped input
+        // history made the late latch sensitive to scheduler/clock phase and
+        // periodically double-counted or omitted mouse motion.
+        const auto mouse = OptiInput::GetRawMouseMotion();
+        pose.mouseTotalX = mouse.TotalX;
+        pose.mouseTotalY = mouse.TotalY;
+        pose.mouseTimestampMs = mouse.TimestampMs;
         pose.cameraIdentity = cview;
         if (!IsFiniteBasis(pose))
             return;
@@ -277,6 +289,9 @@ bool ReadSnapshots(Snapshot& current, Snapshot& previous)
         target.nearPlane = source.projectionRaw[9];
         target.farPlane = source.projectionRaw[15];
         target.timestampMs = source.timestampMs;
+        target.mouseTotalX = source.mouseTotalX;
+        target.mouseTotalY = source.mouseTotalY;
+        target.mouseTimestampMs = source.mouseTimestampMs;
         target.cameraIdentity = source.cameraIdentity;
         target.sequence = source.sequence;
         target.cutGeneration = source.cutGeneration;

@@ -242,11 +242,30 @@ class ReprojectionTests(unittest.TestCase):
             "bool AReproj_Dx12::DispatchWarp", 1)[0]
         self.assertIn("deferredLateLatch = useCompute && _lateLatchFence != nullptr", dispatch)
         self.assertIn("WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS)", dispatch)
-        self.assertIn("_gameCommandQueue->Wait(_computeFence", dispatch)
-        self.assertNotIn("useCompute && !WaitForComputeAllocator(outputIndex)", dispatch)
+        self.assertNotIn("_gameCommandQueue->Wait(_computeFence", dispatch)
+        self.assertIn("WaitForComputeAllocator(outputIndex)", dispatch)
         self.assertGreaterEqual(dispatch.count("PrepareRotationConstants("), 2)
         self.assertNotIn("PrepareRotationConstants(constants);", dispatch)
         self.assertNotIn("PrepareRotationConstants(lateConstants);", dispatch)
+
+    def test_kcd2_late_input_uses_camera_callback_baseline(self):
+        root = Path(__file__).resolve().parents[2]
+        camera = (root / "OptiScaler/framegen/reproj/Kcd2Camera.cpp").read_text(encoding="utf-8")
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        late_input = reproj.split("bool AReproj_Dx12::ApplyLateInput", 1)[1].split(
+            "void AReproj_Dx12::UpdateMouseSensitivity", 1)[0]
+        self.assertIn("pose.mouseTotalX = mouse.TotalX", camera)
+        self.assertIn("current.TotalX - latestCamera.mouseTotalX", late_input)
+        self.assertNotIn("GetRawMouseMotionAt(latestCamera.timestampMs)", late_input)
+
+    def test_kcd2_isolation_generations_are_fenced_until_capture_completes(self):
+        root = Path(__file__).resolve().parents[2]
+        isolation = (root / "OptiScaler/framegen/reproj/Kcd2HudIsolation.cpp").read_text(encoding="utf-8")
+        capture = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8").split(
+            "bool AReproj_Dx12::CaptureFramePacket", 1)[1].split("bool AReproj_Dx12::DisplayPacket", 1)[0]
+        self.assertIn("completed < slot.captureFenceValue", isolation)
+        self.assertIn("return nullptr", isolation)
+        self.assertIn("Kcd2HudIsolation::MarkFrameCaptured", capture)
 
     def test_goal_telemetry_survives_without_per_frame_reproj_info_spam(self):
         root = Path(__file__).resolve().parents[2]

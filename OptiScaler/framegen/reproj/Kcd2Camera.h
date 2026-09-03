@@ -22,6 +22,9 @@ struct Snapshot
     float nearPlane = 0.0f;
     float farPlane = 0.0f;
     double timestampMs = 0.0;
+    std::int64_t mouseTotalX = 0;
+    std::int64_t mouseTotalY = 0;
+    double mouseTimestampMs = 0.0;
     std::uintptr_t cameraIdentity = 0;
     std::uint64_t sequence = 0;
     std::uint64_t cutGeneration = 0;
