@@ -166,7 +166,7 @@ When the game stops publishing anchors for more than ~2.5 source periods (stream
 
 ### Current status
 
-- v10.0.1-pre21 (2026-09-03): hitch hold (above) + latch-path diagnostics. KCD2 castle walk: steady state is healthy (source 85–105, display ~118–121, missed 0–4, lateCam steering, lateAge ~5 ms) but streaming hitches show source dips, present misses (interval p95 ~15 ms), fallback rise, poseAge 40+ ms. NOTE: `sensX` has never auto-calibrated this session (stuck at the 0.00015 default) — open question whether the true sensitivity differs; lateCam residuals would then be systematically misscaled. KCD2 runs uncapped (cap=60 regressed feel); do not re-impose without a live A/B.
+- v10.0.1-pre21 (2026-09-03): hitch hold + latch-path diagnostics. KCD2 castle walk: steady state is healthy (source 85–105, display ~118–121, missed 0–4, lateCam steering, lateAge ~5 ms) but walking/loading judder persists. `hold` stays 0 (publishes never stall: 74–104/s — the game thread is fine, the GPU queue runs deep, so captures complete 1–3 frames late: poseAge 25–46 ms, capWait 25–39 even when healthy). Working model: stale anchors + walking translation that a rotation-only warp cannot represent + snaps on anchor update. `sensX` finally calibrated but wanders ±4% (0.00047–0.00051, never settles) — side-show, not the cause (residual tails are small). Remaining real fixes are Phase-4 capture latency and/or depth warp for translation (both big), or less game GPU load for fresher anchors. KCD2 runs uncapped (cap=60 regressed feel); do not re-impose without a live A/B.
 
 ## D3D12 base-class gotchas
 
