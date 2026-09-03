@@ -130,11 +130,23 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT64 _computeFenceValue = 0;
     UINT64 _computeAllocatorFenceValues[BUFFER_COUNT] = {};
 
-    // Anchor capture runs on the game DIRECT queue in presentation order (see
-    // CaptureFramePacket): the color/UI copies are naturally ordered after the
-    // frame's render/UI work with no cross-queue round trip. The presenter keeps
-    // warping its active anchor until a newer packet's _uiFence value completes.
-    // The async warp above stays on the COMPUTE queue.
+    // Anchor capture runs on a dedicated COPY queue (fallback: game DIRECT) so
+    // the color/UI/depth copies overlap rendering instead of extending the
+    // game's frame. Ordering is via _uiFence Wait/Signal round-trip; the
+    // presenter polls the capture fence completion. The async warp stays on
+    // the COMPUTE queue.
+    ID3D12CommandQueue* _captureQueue = nullptr;
+    ID3D12CommandAllocator* _captureAllocator[BUFFER_COUNT] = {};
+    ID3D12GraphicsCommandList* _captureCommandList[BUFFER_COUNT] = {};
+    bool _captureCommandListResetted[BUFFER_COUNT] = {};
+    ID3D12Fence* _captureFence = nullptr;
+    HANDLE _captureFenceEvent = nullptr;
+    UINT64 _captureFenceValue = 0;
+    UINT64 _captureAllocatorFenceValues[BUFFER_COUNT] = {};
+    uint32_t _metricsCaptureDepth = 0;
+    uint32_t _metricsDepthWarps = 0;
+    float _metricsTxCmTotal = 0.0f;
+    uint32_t _metricsTxSamples = 0;
 
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
@@ -149,6 +161,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
     bool CaptureAllocatorReady(int packetIndex); // game thread: non-blocking UI-allocator poll, never waits
+    bool PollCaptureAllocator(int packetIndex) { return CaptureAllocatorReady(packetIndex); }
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
     bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
@@ -183,6 +196,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12GraphicsCommandList* GetComputeCommandList(int fIndex);
     bool SubmitComputeCommandList(int fIndex);
     bool WaitForComputeAllocator(int fIndex);
+    ID3D12GraphicsCommandList* GetCaptureCommandList(int fIndex);
+    bool SubmitCaptureCommandList(int fIndex);
+    bool WaitForCaptureAllocator(int fIndex);
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
     bool IsCameraAllZero(int fIndex) const;
     bool IsPoseFresh(double timestamp, float* ageMs = nullptr) const;

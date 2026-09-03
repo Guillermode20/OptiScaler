@@ -188,6 +188,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojMouseSensitivityX.set_from_config(readFloat("AsyncTimewarp", "MouseSensitivityX"));
             ReprojMouseSensitivityY.set_from_config(readFloat("AsyncTimewarp", "MouseSensitivityY"));
             ReprojSmoothing.set_from_config(readFloat("AsyncTimewarp", "Smoothing"));
+            ReprojDepthEnabled.set_from_config(readBool("AsyncTimewarp", "DepthEnabled"));
+            ReprojBobDampen.set_from_config(readFloat("AsyncTimewarp", "BobDampen"));
+            ReprojDepthScale.set_from_config(readFloat("AsyncTimewarp", "DepthScale"));
         }
 
         // OptiFG

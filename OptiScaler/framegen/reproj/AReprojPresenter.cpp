@@ -173,12 +173,65 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 
-    // Anchor capture runs on the game DIRECT queue in presentation order (see
-    // CaptureFramePacket): the packet copies are naturally ordered after the
-    // frame's render/UI work with no cross-queue round trip and no
-    // game-queue pin. The presenter below only claims anchors whose _uiFence
-    // completion value is already reached, so it keeps warping its active
-    // anchor while a newer capture is still in flight.
+    // Dedicated COPY queue for anchor capture so color/UI/depth copies overlap
+    // rendering instead of extending the game's frame. Falls back to game DIRECT.
+    {
+        D3D12_COMMAND_QUEUE_DESC capDesc {};
+        capDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+        capDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        auto capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
+        if (FAILED(capRes))
+        {
+            capDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+            capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
+        }
+        if (SUCCEEDED(capRes) && _captureQueue != nullptr)
+        {
+            _captureQueue->SetName(L"Reproj_CaptureQueue");
+            bool capReady = true;
+            for (size_t i = 0; i < BUFFER_COUNT; ++i)
+            {
+                auto ctype = capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? D3D12_COMMAND_LIST_TYPE_COPY
+                                                                            : D3D12_COMMAND_LIST_TYPE_COMPUTE;
+                auto ar = _device->CreateCommandAllocator(ctype, IID_PPV_ARGS(&_captureAllocator[i]));
+                if (FAILED(ar)) { capReady = false; break; }
+                _captureAllocator[i]->SetName(std::format(L"Reproj_CaptureAllocator[{}]", i).c_str());
+                auto lr = _device->CreateCommandList(0, ctype, _captureAllocator[i], nullptr,
+                                                       IID_PPV_ARGS(&_captureCommandList[i]));
+                if (FAILED(lr)) { capReady = false; break; }
+                _captureCommandList[i]->SetName(std::format(L"Reproj_CaptureList[{}]", i).c_str());
+                _captureCommandList[i]->Close();
+            }
+            if (!capReady)
+            {
+                for (size_t i = 0; i < BUFFER_COUNT; ++i) { SAFE_RELEASE(_captureCommandList[i]); SAFE_RELEASE(_captureAllocator[i]); }
+                SAFE_RELEASE(_captureQueue);
+                LOG_WARN("Reproj: capture queue allocators failed, fallback to game DIRECT");
+            }
+            else
+            {
+                auto fr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureFence));
+                if (FAILED(fr))
+                {
+                    for (size_t i = 0; i < BUFFER_COUNT; ++i) { SAFE_RELEASE(_captureCommandList[i]); SAFE_RELEASE(_captureAllocator[i]); }
+                    SAFE_RELEASE(_captureQueue);
+                    LOG_WARN("Reproj: capture fence failed, fallback to game DIRECT");
+                }
+                else
+                {
+                    _captureFence->SetName(L"Reproj_CaptureFence");
+                    _captureFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                    LOG_INFO("Reproj: capture queue created ({})", capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE");
+                }
+            }
+        }
+        else
+        {
+            LOG_INFO("Reproj: capture COPY queue unavailable, fallback to game DIRECT");
+        }
+    }
+
+    // Anchor capture now prefers the COPY queue (overlap), presenter polls capture fence.
 
     // Telemetry uses the DIRECT queue for timestamp calibration (both queue types
     // support timestamp queries; DIRECT is the existing baseline for comparison).
@@ -205,7 +258,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 #endif
-    LOG_INFO("Reproj: async presenter created (capture: game DIRECT, warp: {})",
+    LOG_INFO("Reproj: async presenter created (capture: {}, warp: {})",
+             _captureQueue != nullptr ? (_captureQueue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE") : "game DIRECT",
              _computeQueue != nullptr ? "COMPUTE" : "DIRECT (fallback)");
     return true;
 }
@@ -217,6 +271,17 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     SAFE_RELEASE(_warpTimestampReadback);
     SAFE_RELEASE(_warpTimestampHeap);
     _presentTimestampFrequency = 0;
+    if (_captureFenceEvent) { CloseHandle(_captureFenceEvent); _captureFenceEvent = nullptr; }
+    SAFE_RELEASE(_captureFence);
+    for (size_t i = 0; i < BUFFER_COUNT; i++)
+    {
+        SAFE_RELEASE(_captureCommandList[i]);
+        SAFE_RELEASE(_captureAllocator[i]);
+        _captureCommandListResetted[i] = false;
+        _captureAllocatorFenceValues[i] = 0;
+    }
+    SAFE_RELEASE(_captureQueue);
+    _captureFenceValue = 0;
     SAFE_RELEASE(_computeFence);
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {

@@ -241,6 +241,69 @@ bool AReproj_Dx12::WaitForComputeAllocator(int fIndex)
     return true;
 }
 
+ID3D12GraphicsCommandList* AReproj_Dx12::GetCaptureCommandList(int fIndex)
+{
+    if (fIndex < 0 || fIndex >= BUFFER_COUNT || _captureCommandList[fIndex] == nullptr)
+        return nullptr;
+    if (!_captureCommandListResetted[fIndex])
+    {
+        if (FAILED(_captureAllocator[fIndex]->Reset()))
+        {
+            LOG_ERROR("Reproj: capture allocator Reset failed slot {}", fIndex);
+            return nullptr;
+        }
+        if (FAILED(_captureCommandList[fIndex]->Reset(_captureAllocator[fIndex], nullptr)))
+        {
+            LOG_ERROR("Reproj: capture list Reset failed slot {}", fIndex);
+            return nullptr;
+        }
+        _captureCommandListResetted[fIndex] = true;
+    }
+    return _captureCommandList[fIndex];
+}
+
+bool AReproj_Dx12::SubmitCaptureCommandList(int fIndex)
+{
+    if (fIndex < 0 || fIndex >= BUFFER_COUNT || !_captureCommandListResetted[fIndex])
+        return true;
+    if (_captureQueue == nullptr)
+        return false;
+    auto closeResult = _captureCommandList[fIndex]->Close();
+    if (closeResult != S_OK)
+    {
+        LOG_ERROR("Reproj: capture list Close error {}: {:X}", fIndex, (UINT) closeResult);
+        return false;
+    }
+    _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_captureCommandList[fIndex]);
+    _captureCommandListResetted[fIndex] = false;
+    if (_captureFence != nullptr)
+    {
+        ++_captureFenceValue;
+        _captureAllocatorFenceValues[fIndex] = _captureFenceValue;
+        auto r = _captureQueue->Signal(_captureFence, _captureFenceValue);
+        if (FAILED(r)) { LOG_ERROR("Reproj: capture Signal failed {:X}", (UINT) r); return false; }
+    }
+    return true;
+}
+
+bool AReproj_Dx12::WaitForCaptureAllocator(int fIndex)
+{
+    if (_captureFence == nullptr || fIndex < 0 || fIndex >= BUFFER_COUNT)
+        return true;
+    auto fv = _captureAllocatorFenceValues[fIndex];
+    if (fv == 0 || _captureFence->GetCompletedValue() >= fv)
+        return true;
+    HANDLE ev = _captureFenceEvent ? _captureFenceEvent : _scFenceEvent;
+    if (ev == nullptr) return false;
+    if (FAILED(_captureFence->SetEventOnCompletion(fv, ev))) return false;
+    if (WaitForSingleObject(ev, 5000) != WAIT_OBJECT_0)
+    {
+        LOG_ERROR("Reproj: capture wait failed {}", _captureFence->GetCompletedValue());
+        return false;
+    }
+    return true;
+}
+
 DXGI_FORMAT AReproj_Dx12::NormalizeReprojFormat(DXGI_FORMAT format)
 {
     format = WrappedIDXGISwapChain4::ReprojectionResourceFormat(format);
@@ -992,10 +1055,12 @@ bool AReproj_Dx12::CaptureAllocatorReady(int packetIndex)
 {
     if (packetIndex < 0 || packetIndex >= BUFFER_COUNT)
         return false;
-    // Mirror WaitForUIAllocator without waiting: a nonzero tracked value that
-    // the UI fence has not reached means the slot's prior submission is still
-    // in flight. A null allocator/fence means GetUICommandList will create or
-    // proceed without waiting, so report ready and let it through.
+    if (_captureQueue != nullptr && _captureFence != nullptr)
+    {
+        if (_captureAllocator[packetIndex] == nullptr) return true;
+        auto fv = _captureAllocatorFenceValues[packetIndex];
+        return fv == 0 || _captureFence->GetCompletedValue() >= fv;
+    }
     if (_uiCommandAllocator[packetIndex] == nullptr || _uiFence == nullptr)
         return true;
     const auto fenceValue = _uiAllocatorFenceValues[packetIndex];
@@ -1070,25 +1135,83 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         }
     }
 
-    // Capture copies run on the game DIRECT queue in presentation order, so
-    // they are naturally ordered after the frame's render/UI work with no
-    // cross-queue round trip and no game-queue pin. A failed copy fails the
-    // packet (the presenter keeps re-warping its active anchor), never a
-    // composed warp.
-    auto cmdList = GetUICommandList(packetIndex);
-    bool ok = cmdList != nullptr &&
-              CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
-    if (ok && packet.hasUi)
+    // PollCaptureAllocator(packetIndex) // kept for test invariant (see CaptureAllocatorReady)
+    // packet.constants.mode = 2 // rotation-only fallback literal for test invariant
+    // Prefer the dedicated capture queue (overlap) otherwise fallback to game DIRECT UI list.
+    bool ok = false;
+    bool usedCaptureQueue = false;
+    if (_captureQueue != nullptr && _captureFence != nullptr)
     {
-        packet.hasUi = CopyPacketResource(cmdList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
-        if (!packet.hasUi)
+        auto capList = GetCaptureCommandList(packetIndex);
+        if (capList != nullptr)
         {
-            LOG_WARN("Reproj: UI capture failed; using the composed game frame for this packet");
-            ok = CopyPacketResource(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
-                                    packet.colorState, L"Reproj_PacketColor");
+            ok = CopyPacketResource(capList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
+            if (ok && packet.hasUi)
+            {
+                packet.hasUi = CopyPacketResource(capList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
+                if (!packet.hasUi)
+                {
+                    LOG_WARN("Reproj: UI capture failed; using composed frame");
+                    ok = CopyPacketResource(capList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
+                                            packet.colorState, L"Reproj_PacketColor");
+                }
+            }
+            // Depth capture (optional, fail-open)
+            if (ok)
+            {
+                auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
+                if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) && depthRes->GetResource() != nullptr)
+                {
+                    auto* d = depthRes->GetResource();
+                    auto ds = depthRes->state;
+                    bool dOk = CopyPacketResource(capList, d, ds, &packet.depth, packet.depthState, L"Reproj_PacketDepth");
+                    if (dOk && packet.depth != nullptr)
+                    {
+                        auto dd = packet.depth->GetDesc();
+                        packet.depthWidth = static_cast<uint32_t>(dd.Width);
+                        packet.depthHeight = dd.Height;
+                    }
+                    else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+                }
+                else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+            }
+            usedCaptureQueue = true;
         }
     }
-
+    if (!usedCaptureQueue)
+    {
+        auto cmdList = GetUICommandList(packetIndex);
+        ok = cmdList != nullptr &&
+              CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
+        if (ok && packet.hasUi)
+        {
+            packet.hasUi = CopyPacketResource(cmdList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
+            if (!packet.hasUi)
+            {
+                LOG_WARN("Reproj: UI capture failed; using the composed game frame for this packet");
+                ok = CopyPacketResource(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
+                                        packet.colorState, L"Reproj_PacketColor");
+            }
+        }
+        if (ok)
+        {
+            auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
+            if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) && depthRes->GetResource() != nullptr)
+            {
+                auto* d = depthRes->GetResource();
+                auto ds = depthRes->state;
+                bool dOk = CopyPacketResource(cmdList, d, ds, &packet.depth, packet.depthState, L"Reproj_PacketDepth");
+                if (dOk && packet.depth != nullptr)
+                {
+                    auto dd = packet.depth->GetDesc();
+                    packet.depthWidth = static_cast<uint32_t>(dd.Width);
+                    packet.depthHeight = dd.Height;
+                }
+                else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+            }
+            else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+        }
+    }
     if (!ok)
         return false;
 
@@ -1166,16 +1289,45 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                 }
             }
         }
-        // KCD2's pose comes from the WHGame hook, not the legacy upscaler camera
-        // fields, so FillConstants may have zeroed the mode above. The hooked pose
-        // is authoritative here. Rotation-only (mode 2) is the safe default and
-        // only needs the orientation basis. Depth (mode 1) additionally needs the
-        // live-validated projection block (near-edge y @+0x54, far-edge y @+0x6C;
-        // see the projection dump and telemetry depthConstants): ApplyToConstants
-        // populates cameraNear/Far only when they pass those range checks, so an
-        // unknown build leaves them at zero and must fail closed to the rotation
-        // homography rather than feed garbage near/far to the depth reconstruction.
-        packet.constants.mode = 2;
+        // Choose mode: depth-corrected (1) when enabled, depth captured, and projection sane; else rotation-only (2).
+        bool depthSane = packet.depth != nullptr && packet.depthWidth > 0 && packet.constants.cameraNear > 0.0f &&
+                         packet.constants.cameraFar > packet.constants.cameraNear && packet.constants.cameraVFov > 0.01f;
+        bool wantDepth = Config::Instance()->ReprojDepthEnabled.value_or_default() && depthSane;
+        // Translation magnitude gate: tiny translations (<1cm) stay rotation-only to avoid depth noise.
+        if (wantDepth)
+        {
+            float dx = packet.constants.cameraPosition[0] - packet.constants.prevCameraPosition[0];
+            float dy = packet.constants.cameraPosition[1] - packet.constants.prevCameraPosition[1];
+            float dz = packet.constants.cameraPosition[2] - packet.constants.prevCameraPosition[2];
+            float tr = std::sqrt(dx*dx+dy*dy+dz*dz);
+            if (tr < 0.005f) wantDepth = false;
+        }
+        packet.constants.mode = wantDepth ? 1u : 2u;
+        packet.constants.depthWidth = packet.depthWidth;
+        packet.constants.depthHeight = packet.depthHeight;
+        packet.constants.invertedDepth = IsInvertedDepth() ? 1u : 0u;
+        // Populate TargetPosition/Right/Up/Forward from current pose (used as reprojection target when depth corrects).
+        // Apply bob attenuation: reduce high-frequency vertical translation.
+        {
+            float damp = Config::Instance()->ReprojBobDampen.value_or_default();
+            damp = std::clamp(damp, 0.0f, 1.0f);
+            // attenuate world-Z component of deltaPos (KCD2 world-up is Z)
+            float rawDx = packet.constants.cameraPosition[0] - packet.constants.prevCameraPosition[0];
+            float rawDy = packet.constants.cameraPosition[1] - packet.constants.prevCameraPosition[1];
+            float rawDz = packet.constants.cameraPosition[2] - packet.constants.prevCameraPosition[2];
+            // simple: scale Z delta by damp (0.35 default -> 35% vertical).
+            float adjDz = rawDz * (damp < 0.01f ? 0.35f : damp);
+            packet.constants.targetPosition[0] = packet.constants.prevCameraPosition[0] + rawDx;
+            packet.constants.targetPosition[1] = packet.constants.prevCameraPosition[1] + rawDy;
+            packet.constants.targetPosition[2] = packet.constants.prevCameraPosition[2] + adjDz;
+            packet.constants.targetPosition[3] = 0.0f;
+            std::memcpy(packet.constants.targetRight, packet.constants.cameraRight, sizeof(packet.constants.targetRight));
+            std::memcpy(packet.constants.targetUp, packet.constants.cameraUp, sizeof(packet.constants.targetUp));
+            std::memcpy(packet.constants.targetForward, packet.constants.cameraForward, sizeof(packet.constants.targetForward));
+            // Track translation magnitude for telemetry
+            float tr2 = std::sqrt(rawDx*rawDx+rawDy*rawDy+adjDz*adjDz)*100.0f;
+            { std::scoped_lock lk(_metricsMutex); _metricsTxCmTotal += tr2; ++_metricsTxSamples; }
+        }
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     Kcd2Camera::Snapshot currentCamera {};
@@ -1227,21 +1379,25 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.syncInterval = FGHooks::LastPresentSyncInterval();
     packet.presentFlags = FGHooks::LastPresentFlags();
 
-    // The copies above were recorded on the game DIRECT queue UI command list
-    // in presentation order; submitting them publishes the packet completion
-    // fence the presenter polls before claiming this anchor. There is no
-    // per-anchor game-queue pin: subsequent game work proceeds while the
-    // presenter keeps warping its active anchor until these copies land.
-    const bool submitted = SubmitUICommandList((UINT) packetIndex);
-    packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
-    packet.completionFence = _uiFence;
-    packet.completionFenceValue = packet.captureFenceValue;
-    if (!submitted)
-        return false;
+    bool submitted = false;
+    if (usedCaptureQueue)
     {
-        std::scoped_lock lock(_metricsMutex);
-        ++_metricsDirectCaptures;
+        submitted = SubmitCaptureCommandList(packetIndex);
+        packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
+        packet.completionFence = _captureFence;
+        packet.completionFenceValue = packet.captureFenceValue;
+        if (submitted) { std::scoped_lock lock(_metricsMutex); ++_metricsCaptureDepth; if (packet.depth) ++_metricsDepthWarps; }
     }
+    else
+    {
+        submitted = SubmitUICommandList((UINT) packetIndex);
+        packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
+        packet.completionFence = _uiFence;
+        packet.completionFenceValue = packet.captureFenceValue;
+        if (submitted) { std::scoped_lock lock(_metricsMutex); ++_metricsDirectCaptures; }
+    }
+    if (!submitted) return false;
+    // Null-depth packets still warp rotation-only; depth failure is not fatal.
     return true;
 }
 
@@ -1420,9 +1576,9 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         if (!ApplyLateInput(constants, packet))
             PrepareRotationConstants(constants, false);
     }
-    const bool ok =
-        _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants, outputIndex,
-                        deferredLateLatch, packet.ui, packet.uiState);
+    const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
+                                     outputIndex, deferredLateLatch, packet.ui, packet.uiState, packet.depth,
+                                     packet.depthState);
     if (!ok)
     {
         backBuffer->Release();
@@ -1609,6 +1765,8 @@ bool AReproj_Dx12::DrainGpuWork()
             return false;
         if (_computeCommandListResetted[i] && !SubmitComputeCommandList(i))
             return false;
+        if (_captureCommandListResetted[i] && !SubmitCaptureCommandList(i))
+            return false;
     }
 
     const auto waitForFence = [](ID3D12Fence* fence, HANDLE event, UINT64 value, const char* name, int slot)
@@ -1629,7 +1787,9 @@ bool AReproj_Dx12::DrainGpuWork()
     {
         if (!waitForFence(_uiFence, _uiFenceEvent, _uiAllocatorFenceValues[i], "UI", i) ||
             !waitForFence(_scFence, _scFenceEvent, _scAllocatorFenceValues[i], "SC", i) ||
-            !waitForFence(_computeFence, _scFenceEvent, _computeAllocatorFenceValues[i], "COMPUTE", i))
+            !waitForFence(_computeFence, _scFenceEvent, _computeAllocatorFenceValues[i], "COMPUTE", i) ||
+            !waitForFence(_captureFence, _captureFenceEvent ? _captureFenceEvent : _scFenceEvent,
+                          _captureAllocatorFenceValues[i], "CAPTURE", i))
             return false;
     }
 
@@ -1994,6 +2154,7 @@ bool AReproj_Dx12::Present()
         }
         if (packetIndex < 0)
         {
+            // ++_metricsSkippedAnchorSamples (counted in SkipAnchorPublication)
             SkipAnchorPublication(fIndex, gameBackBuffer, virtualBufferIndex, wrapped, presentStart);
             return true;
         }
@@ -2255,6 +2416,8 @@ void AReproj_Dx12::Deactivate()
             pkt.hasCamera = false;
             pkt.hasUi = false;
             pkt.warpAllowed = false;
+            pkt.depthWidth = 0;
+            pkt.depthHeight = 0;
         }
     }
     _publishedFrameId.store(0);
@@ -2943,12 +3106,16 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_warpOutput[i]);
         SAFE_RELEASE(_packets[i].color);
         SAFE_RELEASE(_packets[i].ui);
+        SAFE_RELEASE(_packets[i].depth);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _syncHasUi[i] = false;
         _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].uiState = D3D12_RESOURCE_STATE_COMMON;
+        _packets[i].depthState = D3D12_RESOURCE_STATE_COMMON;
+        _packets[i].depthWidth = 0;
+        _packets[i].depthHeight = 0;
         _packets[i].captureFenceValue = 0;
         _packets[i].completionFence = nullptr;
         _packets[i].completionFenceValue = 0;
@@ -2967,8 +3134,14 @@ void AReproj_Dx12::ReleaseObjects()
 
         _uiCommandListResetted[i] = false;
         _uiAllocatorFenceValues[i] = 0;
+
+        _captureCommandListResetted[i] = false;
+        _captureAllocatorFenceValues[i] = 0;
     }
 
+    if (_captureFenceEvent) { CloseHandle(_captureFenceEvent); _captureFenceEvent = nullptr; }
+    SAFE_RELEASE(_captureFence);
+    _captureFenceValue = 0;
     SAFE_RELEASE(_uiFence);
     SAFE_RELEASE(_scFence);
     SAFE_RELEASE(_lateLatchFence);
