@@ -773,13 +773,43 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
     if (constants.mode != 2)
         return;
 
-    StoreReprojVec3(constants.prevCameraRight,
-                    ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward));
-    StoreReprojVec3(constants.prevCameraUp,
-                    ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward));
-    StoreReprojVec3(constants.prevCameraForward,
-                    ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward));
-    constants.cameraVFov = std::tan(constants.cameraVFov * 0.5f);
+    const auto sourceX = ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward);
+    const auto sourceY = ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward);
+    const auto sourceZ = ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward);
+    const float tanHalfFov = std::tan(constants.cameraVFov * 0.5f);
+    const float focalX = constants.cameraAspect * tanHalfFov;
+    const float focalY = tanHalfFov;
+
+    // Bake the complete output-pixel -> source-UV projective transform once on the CPU.
+    // The old shader rebuilt the camera ray, performed three basis transforms,
+    // and applied the projection for every output pixel. PrevCameraRight/Up/
+    // Forward are shader-private after this point, so reuse them as homogeneous
+    // UV rows (u numerator, v numerator, denominator).
+    ReprojVec3 uvNumeratorX { 0.5f, 0.0f, 0.5f };
+    ReprojVec3 uvNumeratorY { 0.0f, -0.5f, 0.5f };
+    ReprojVec3 denominator { 0.0f, 0.0f, 1.0f };
+    if (std::isfinite(focalX) && std::isfinite(focalY) && std::abs(focalX) > 1.0e-6f && std::abs(focalY) > 1.0e-6f)
+    {
+        const ReprojVec3 sx { sourceX.x * focalX, sourceX.y * focalY, sourceX.z };
+        const ReprojVec3 sy { sourceY.x * focalX, sourceY.y * focalY, sourceY.z };
+        denominator = { sourceZ.x * focalX, sourceZ.y * focalY, sourceZ.z };
+        uvNumeratorX = CombineReprojVec3(denominator, 0.5f, sx, 0.5f / focalX);
+        uvNumeratorY = CombineReprojVec3(denominator, 0.5f, sy, -0.5f / focalY);
+    }
+
+    // Fold pixel-center -> NDC into the same matrix. The compute shader can now
+    // transform its integer dispatch coordinate directly, with no per-pixel
+    // division by DisplaySize or UV/NDC reconstruction.
+    const auto pixelRow = [&](ReprojVec3 ndcRow)
+    {
+        if (constants.displayWidth == 0 || constants.displayHeight == 0)
+            return ReprojVec3 { 0.0f, 0.0f, ndcRow.z };
+        return ReprojVec3 { ndcRow.x * (2.0f / constants.displayWidth), ndcRow.y * (-2.0f / constants.displayHeight),
+                            -ndcRow.x + ndcRow.y + ndcRow.z };
+    };
+    StoreReprojVec3(constants.prevCameraRight, pixelRow(uvNumeratorX));
+    StoreReprojVec3(constants.prevCameraUp, pixelRow(uvNumeratorY));
+    StoreReprojVec3(constants.prevCameraForward, pixelRow(denominator));
 }
 
 } // namespace
@@ -1117,10 +1147,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     auto cmdList = useComputeCapture ? GetCaptureCommandList(packetIndex) : GetUICommandList(packetIndex);
     bool ok = cmdList != nullptr &&
               CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
-    // Rotation-only timewarp does not consume motion vectors.
-
-    packet.hasDepth = false;
-
     if (ok && packet.hasUi)
     {
         packet.hasUi = CopyPacketResource(cmdList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
@@ -1153,9 +1179,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.rawFrameDelta = saneFrameDelta;
     _lastRealFrameTimestamp = now;
     packet.renderTimestamp = now;
-    packet.virtualContentTimestamp = now;
-    packet.kind = ContentFrameKind::Real;
-    packet.interpolationFraction = 1.0f;
     FillConstants(sourceIndex, packet.constants);
     // 0 = no isolated UI, 1 = premultiplied alpha, 2 = straight alpha.
     packet.constants.hudlessSource =
@@ -1253,7 +1276,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     const double sourceTimestamp =
         cameraTimestamp > 0.0 ? cameraTimestamp : now - std::clamp(packet.frameDelta, 0.0, 150.0);
     packet.hasCamera = packet.constants.mode != 0;
-    if (!packet.hasDepth && !packet.hasCamera)
+    if (!packet.hasCamera)
         packet.constants.mode = 0;
     OptiInput::RefreshMouseMotion();
     // The late-latch baseline must match the input that produced the captured
@@ -1274,7 +1297,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
     packet.sourcePoseTimestamp = sourceTimestamp;
-    packet.virtualContentTimestamp = sourceTimestamp;
     packet.syncInterval = FGHooks::LastPresentSyncInterval();
     packet.presentFlags = FGHooks::LastPresentFlags();
 
@@ -1496,10 +1518,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         if (!ApplyLateInput(constants, packet))
             PrepareRotationConstants(constants, false);
     }
-    const bool useDepth = packet.hasDepth;
-    const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, packet.velocity, packet.velocityState,
-                                    useDepth ? packet.depth : nullptr, packet.depthState, _warpOutput[outputIndex],
-                                    constants, outputIndex, deferredLateLatch, packet.ui, packet.uiState);
+    const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
+                                    outputIndex, deferredLateLatch, packet.ui, packet.uiState);
     if (!ok)
     {
         backBuffer->Release();
@@ -1603,16 +1623,6 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     if (_warp == nullptr || !_warp->IsInit())
         return false;
 
-    auto config = Config::Instance();
-
-    auto depth = GetResource(FG_ResourceType::Depth, fIndex);
-    auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
-    if (!velocity)
-    {
-        LOG_WARN("Reproj: no motion vectors for frame {}, skipping fake frame", _frameCount);
-        return false;
-    }
-
     IDXGISwapChain3* sc = (IDXGISwapChain3*) _swapChain;
     auto bbIndex = sc->GetCurrentBackBufferIndex();
     ID3D12Resource* bb = nullptr;
@@ -1648,19 +1658,12 @@ bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
     cb.timeStep = timeStep;
     cb.hudlessSource = _syncHasUi[fIndex] ? 1u : 0u;
 
-    // v2 needs depth + a valid camera pair; otherwise fall back to the MV warp
-    bool hasDepth = false;
-    if (!hasDepth)
-        cb.mode = 0;
-
     // Rotation-only reprojection: extrapolate the last rendered camera pair to
     // the display slot. No prediction machinery; the async path additionally
     // composes fresh raw-mouse motion via ApplyLateInput.
     PrepareRotationConstants(cb);
 
-    bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], velocity->GetResource(),
-                              velocity->state, hasDepth ? depth->GetResource() : nullptr,
-                              hasDepth ? depth->state : D3D12_RESOURCE_STATE_COMMON, _warpOutput[fIndex], cb);
+    bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], _warpOutput[fIndex], cb);
 
     if (!ok)
     {
@@ -1746,56 +1749,6 @@ void AReproj_Dx12::RecordRealFrame()
     std::scoped_lock lock(_metricsMutex);
     ++_metricsRealFrames;
     LogMetricsIfDue();
-}
-
-bool AReproj_Dx12::ShouldCaptureAnchor(double nowMs)
-{
-    (void) nowMs;
-    return true;
-#if 0
-    auto* config = Config::Instance();
-    float sourceCapHz = config->ReprojSourceFramerateLimit.value_or_default();
-    if (!(std::isfinite(sourceCapHz) && sourceCapHz > 0.0f))
-        sourceCapHz = config->FramerateLimit.value_or_default();
-    if (std::isfinite(sourceCapHz) && sourceCapHz > 0.0f)
-    {
-        // A capped source already has one authoritative deadline grid. An
-        // independent sampler at the same nominal rate aliases harmless phase
-        // jitter into periodic 30-33 ms anchor gaps. Publish every paced frame.
-        _nextAnchorSampleMs = 0.0;
-        _anchorSampleHz = 0.0f;
-        return true;
-    }
-    if (!config->ReprojNonBlockingAnchorSampling.value_or_default())
-    {
-        _nextAnchorSampleMs = 0.0;
-        _anchorSampleHz = 0.0f;
-        return true;
-    }
-
-    float requestedHz = config->ReprojAnchorSampleHz.value_or_default();
-    if (!(std::isfinite(requestedHz) && requestedHz > 0.0f))
-        requestedHz = config->ReprojSourceFramerateLimit.value_or_default();
-    if (!(std::isfinite(requestedHz) && requestedHz > 0.0f))
-        requestedHz = static_cast<float>(TargetRefreshHz() * 0.5);
-    const float sampleHz = std::clamp(requestedHz, 1.0f, 1000.0f);
-    const double periodMs = 1000.0 / sampleHz;
-
-    // A changed setting or a resume after a long game stall starts a clean grid.
-    if (_nextAnchorSampleMs <= 0.0 || std::abs(_anchorSampleHz - sampleHz) > 0.01f ||
-        nowMs > _nextAnchorSampleMs + periodMs * 4.0)
-    {
-        _nextAnchorSampleMs = nowMs + periodMs;
-        _anchorSampleHz = sampleHz;
-        return true;
-    }
-    if (nowMs < _nextAnchorSampleMs)
-        return false;
-
-    const auto missedPeriods = std::floor((nowMs - _nextAnchorSampleMs) / periodMs);
-    _nextAnchorSampleMs += (missedPeriods + 1.0) * periodMs;
-    return true;
-#endif
 }
 
 void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs)
@@ -2353,8 +2306,6 @@ void AReproj_Dx12::Activate()
     _cachedRefreshHz = 0.0;
     _lastRefreshQueryMs = 0.0;
     _lastRealFrameTimestamp = 0.0;
-    _nextAnchorSampleMs = 0.0;
-    _anchorSampleHz = 0.0f;
     if (_renderUI == nullptr)
         _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
                                                Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
@@ -2394,7 +2345,6 @@ void AReproj_Dx12::Deactivate()
             pkt.completionFenceValue = 0;
             pkt.retirementFenceValue = 0;
             pkt.frameId = 0;
-            pkt.hasDepth = false;
             pkt.hasCamera = false;
             pkt.hasUi = false;
             pkt.warpAllowed = false;
@@ -3085,16 +3035,12 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_uiColor[i]);
         SAFE_RELEASE(_warpOutput[i]);
         SAFE_RELEASE(_packets[i].color);
-        SAFE_RELEASE(_packets[i].depth);
-        SAFE_RELEASE(_packets[i].velocity);
         SAFE_RELEASE(_packets[i].ui);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _syncHasUi[i] = false;
         _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
-        _packets[i].depthState = D3D12_RESOURCE_STATE_COMMON;
-        _packets[i].velocityState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].uiState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].captureFenceValue = 0;
         _packets[i].completionFence = nullptr;

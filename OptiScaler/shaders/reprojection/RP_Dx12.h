@@ -12,7 +12,7 @@
 
 // Rotation-only async camera warp pass. The isolated UI is composited in the
 // same compute dispatch so the presenter never has to cross back to DIRECT.
-// Root signature: 3 SRVs, 1 UAV, 1 CBV, 1 static bilinear-clamp sampler.
+// Root signature: 2 SRVs, 1 UAV, 1 CBV, 1 static bilinear-clamp sampler.
 class RP_Dx12 : public Shader_Dx12
 {
   private:
@@ -25,14 +25,11 @@ class RP_Dx12 : public Shader_Dx12
 
   public:
     // Warps `lastColor` forward to the fake-frame time and writes `output`.
-    // `depth` is optional: when null (or constants.mode == 0) the MV-only PSO runs.
     // Inputs are transitioned to NON_PIXEL_SHADER_RESOURCE; `output` is transitioned
     // from COPY_SOURCE to UNORDERED_ACCESS (the caller returns it to COPY_SOURCE).
     bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor, D3D12_RESOURCE_STATES lastColorState,
-                  ID3D12Resource* velocity, D3D12_RESOURCE_STATES velocityState, ID3D12Resource* depth,
-                  D3D12_RESOURCE_STATES depthState, ID3D12Resource* output, RP_Constants& constants,
-                  int constantSlot = -1, bool deferConstants = false, ID3D12Resource* ui = nullptr,
-                  D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON);
+                  ID3D12Resource* output, RP_Constants& constants, int constantSlot = -1, bool deferConstants = false,
+                  ID3D12Resource* ui = nullptr, D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON);
 
     // Completes a deferred dispatch after the command list has been queued
     // behind a CPU-signaled fence. Each slot is immutable until its SC fence

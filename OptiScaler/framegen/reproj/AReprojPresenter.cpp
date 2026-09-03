@@ -814,20 +814,12 @@ void AReproj_Dx12::PresenterMain()
             // Record the actual constants submitted to the shader.  Packet resource
             // availability alone cannot distinguish the stable rotation-only path
             // from full depth/camera reprojection.
-            if (!packet.warpAllowed)
-                tSlot->effectiveMode = ReprojEffectiveMode::Unwarped;
-            else if (selectedContent->constants.mode == 2)
-                tSlot->effectiveMode = ReprojEffectiveMode::RotationOnly;
-            else if (selectedContent->constants.mode == 1 && packet.hasDepth && packet.hasCamera)
-                tSlot->effectiveMode = ReprojEffectiveMode::DepthCamera;
-            else
-                tSlot->effectiveMode = ReprojEffectiveMode::MotionVector;
-            tSlot->velocityAvailable = packet.velocity != nullptr;
-            tSlot->depthAvailable = packet.hasDepth;
+            tSlot->effectiveMode = packet.warpAllowed ? ReprojEffectiveMode::RotationOnly
+                                                       : ReprojEffectiveMode::Unwarped;
+            tSlot->velocityAvailable = false;
+            tSlot->depthAvailable = false;
             tSlot->cameraBasisAvailable = packet.hasCamera;
-            tSlot->depthConstantsValid = packet.hasDepth && selectedContent->constants.cameraNear > 0 &&
-                                         selectedContent->constants.cameraFar > selectedContent->constants.cameraNear &&
-                                         selectedContent->constants.cameraVFov > 0;
+            tSlot->depthConstantsValid = false;
             tSlot->cameraProjectionValid =
                 selectedContent->constants.cameraVFov > 0.01f && selectedContent->constants.cameraAspect > 0.01f;
             tSlot->hudlessSource = packet.hasUi;
@@ -865,11 +857,11 @@ void AReproj_Dx12::PresenterMain()
 
         if (tSlot)
         {
-            tSlot->contentKind = static_cast<uint8_t>(selectedContent->kind);
-            tSlot->contentFraction = selectedContent->interpolationFraction;
-            tSlot->contentAgeMs =
-                static_cast<float>(std::max(0.0, targetDisplayMs - selectedContent->virtualContentTimestamp));
-            tSlot->fgDurationMs = static_cast<float>(selectedContent->fgDurationMs);
+            tSlot->contentKind = 0;
+            tSlot->contentFraction = 1.0f;
+            tSlot->contentAgeMs = static_cast<float>(
+                std::max(0.0, targetDisplayMs - selectedContent->sourcePoseTimestamp));
+            tSlot->fgDurationMs = 0.0f;
             tSlot->targetScanoutTimestampMs = targetDisplayMs + refreshPeriodMs * 0.5;
         }
 

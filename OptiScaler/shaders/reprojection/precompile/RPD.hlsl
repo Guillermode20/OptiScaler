@@ -41,24 +41,36 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     if (any(dtid.xy >= DisplaySize))
         return;
 
-    float2 uv = (dtid.xy + 0.5f) / float2(DisplaySize);
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float3 targetRay = float3(ndc.x * CameraAspect * CameraVFov, ndc.y * CameraVFov, 1.0f);
-    float3 sourceRay = float3(dot(PrevCameraRight.xyz, targetRay), dot(PrevCameraUp.xyz, targetRay),
-                              dot(PrevCameraForward.xyz, targetRay));
-
-    float2 sourceNdc = float2(sourceRay.x / (sourceRay.z * CameraAspect * CameraVFov),
-                              sourceRay.y / (sourceRay.z * CameraVFov));
-    float2 sourceUv = float2(sourceNdc.x * 0.5f + 0.5f, 0.5f - sourceNdc.y * 0.5f);
-    bool covered = sourceRay.z > 0.0f && all(sourceUv >= 0.0f) && all(sourceUv <= 1.0f);
+    // PrevCamera* contains a CPU-baked homogeneous output-pixel -> source-UV
+    // transform. This replaces per-pixel UV/NDC and camera-ray reconstruction.
+    float3 position = float3(float2(dtid.xy) + 0.5f, 1.0f);
+    float3 sourceH = float3(dot(PrevCameraRight.xyz, position), dot(PrevCameraUp.xyz, position),
+                            dot(PrevCameraForward.xyz, position));
+    bool inFront = sourceH.z > 1.0e-6f;
+    float2 sourceUv = inFront ? sourceH.xy * rcp(sourceH.z) : float2(-1.0f, -1.0f);
+    bool covered = inFront && all(sourceUv >= 0.0f) && all(sourceUv <= 1.0f);
     float2 edgePixels = min(sourceUv, 1.0f - sourceUv) * float2(DisplaySize);
     float coverage = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
 
-    // Preserve exact source/UI texels whenever no sub-pixel reconstruction is
-    // needed. Only the displaced world lookup uses bilinear filtering.
-    float4 original = LastColor.Load(int3(dtid.xy, 0));
-    float4 warped = LastColor.SampleLevel(Bilinear, clamp(sourceUv, 0.0f, 1.0f), 0);
-    float3 world = lerp(original.rgb, warped.rgb, coverage);
+    // The original-frame fetch is needed only for the narrow disoccluded edge.
+    // Interior pixels now issue one filtered world sample instead of both a load
+    // and a sample; fully uncovered pixels avoid the filtered sample entirely.
+    float3 world;
+    [branch]
+    if (coverage > 0.0f)
+    {
+        float3 warped = LastColor.SampleLevel(Bilinear, sourceUv, 0).rgb;
+        if (coverage < 1.0f)
+        {
+            float3 original = LastColor.Load(int3(dtid.xy, 0)).rgb;
+            warped = lerp(original, warped, coverage);
+        }
+        world = warped;
+    }
+    else
+    {
+        world = LastColor.Load(int3(dtid.xy, 0)).rgb;
+    }
     if (HudlessSource != 0)
     {
         float4 ui = UI.Load(int3(dtid.xy, 0));

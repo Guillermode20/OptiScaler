@@ -83,7 +83,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         int64_t sourceMouseY = 0;
         double sourceMouseTimestamp = 0.0;
         bool inputLatchReady = false;
-        bool hasDepth = false;
         bool hasCamera = false;
         bool hasUi = false;
         bool warpAllowed = false;
@@ -153,7 +152,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool VirtualAnchorReady() const;
     HRESULT PresentVirtualFrameSync(int fIndex, ID3D12Resource* source, UINT virtualBufferIndex, UINT syncInterval,
                                     UINT flags, bool allowWarps);
-    bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] + MV (+depth) -> current backbuffer
+    bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] rotation warp -> current backbuffer
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
     bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
@@ -165,7 +164,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void FillConstants(int fIndex, RP_Constants& constants);
     bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet);
     void UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp);
-    bool ShouldCaptureAnchor(double nowMs);
     int AcquirePacket();
     void RetirePackets();
     uint32_t PacketQueueDepth() const;
@@ -229,8 +227,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _cachedRefreshHz = 0.0;
     double _lastRefreshQueryMs = 0.0;
     double _lastRealFrameTimestamp = 0.0;
-    double _nextAnchorSampleMs = 0.0;
-    float _anchorSampleHz = 0.0f;
     uint32_t _metricsSkippedAnchorSamples = 0;
     double _realPeriodEmaMs = 0.0;         // smoothed source-frame period used for warp scaling
     double _measuredRefreshPeriodMs = 0.0; // scanout period measured from DXGI_FRAME_STATISTICS

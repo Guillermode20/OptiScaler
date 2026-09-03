@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.18 (2026-09-03)
+* Optimize rotation timewarp shader and remove obsolete depth/MV resources
+
 ## v10.0.1.17 (2026-09-03)
 * Reproj diagnostics: capWait counter + block/pace split for H1 capture-latency test
 
