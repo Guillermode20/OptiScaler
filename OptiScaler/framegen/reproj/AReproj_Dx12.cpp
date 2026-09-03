@@ -1668,14 +1668,14 @@ void AReproj_Dx12::LogMetricsIfDue()
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} latch={}/{}/{} lateAge={:.1f}ms "
-             "sensX={:.7f} ({}, block={:.2f}ms pace={:.2f}ms)",
+             "sensX={:.7f} hold={} ({}, block={:.2f}ms pace={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
              _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, _metricsLateCamHits,
              _metricsPacketBaseHits, _metricsLateFallbacks, lateCamAge,
-             _trackedMouseSensitivityX.load(std::memory_order_relaxed), presenter,
+             _trackedMouseSensitivityX.load(std::memory_order_relaxed), _metricsHitchHolds, presenter,
              _runtimeMetrics.gamePresentBlockMs, _runtimeMetrics.gamePresentPaceMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
@@ -1698,6 +1698,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsHudComposites = 0;
     _metricsDirectCaptures = 0;
     _metricsCaptureNotReady = 0;
+    _metricsHitchHolds = 0;
     _metricsLateInputMaxDegrees = 0.0f;
 }
 
@@ -2172,6 +2173,7 @@ void AReproj_Dx12::Activate()
         _metricsHudComposites = 0;
         _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;
+        _metricsHitchHolds = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _runtimeMetrics = {};
     }

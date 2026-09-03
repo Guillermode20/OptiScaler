@@ -131,8 +131,8 @@ Hardcoded constants agents must know: warp timestep clamp `2.5`; late-latch lead
 
 ### Reading the once-per-second log line
 
-`Reproj: source=… display=… (new=… repeat=…) missed=… interval=mean/p95 lead=… poseAge=… queue=… late=applied/sampled maxDeg=… hud=… dropAnchor=… capC=… capWait=… latch=lateCam/packetBase/fallback lateAge=…ms sensX=… (async virtual swapchain|safe sync, block=… pace=…)`.
-Healthy at 60 Hz source / 120 Hz display: source 59–60, display ≥ 117, `missed` < 2/s after warm-up, roughly equal `new`/`repeat`, `dropAnchor=0`, low `block` (`pace` is the intentional cap sleep, reported separately), `late` applied and nonzero during motion, `hud` tracking displayed outputs. `capC` = DIRECT captures; `capWait` = slots that reused the active anchor because the newest capture was unfinished (nonzero is fine as long as the warp queue never stalls). `latch=` splits applied steering into late-camera-pose / packet-baseline / velocity-fallback slots; `lateAge` is the mean age of the late pose at use; `sensX` is the auto-tracked radians/count (sanity: stable, ~1–3e-4).
+`Reproj: source=… display=… (new=… repeat=…) missed=… interval=mean/p95 lead=… poseAge=… queue=… late=applied/sampled maxDeg=… hud=… dropAnchor=… capC=… capWait=… latch=lateCam/packetBase/fallback lateAge=…ms sensX=… hold=… (async virtual swapchain|safe sync, block=… pace=…)`.
+Healthy at 60 Hz source / 120 Hz display: source 59–60, display ≥ 117, `missed` < 2/s after warm-up, roughly equal `new`/`repeat`, `dropAnchor=0`, low `block` (`pace` is the intentional cap sleep, reported separately), `late` applied and nonzero during motion, `hud` tracking displayed outputs. `capC` = DIRECT captures; `capWait` = slots that reused the active anchor because the newest capture was unfinished (nonzero is fine as long as the warp queue never stalls). `latch=` splits applied steering into late-camera-pose / packet-baseline / velocity-fallback slots; `lateAge` is the mean age of the late pose at use; `sensX` is the auto-tracked radians/count (sanity: stable, ~1–3e-4). `hold` counts slots frozen at timeStep 0 during a publish stall (see Hitch hold below); steady-state it must be 0.
 
 ### Invariants (do not break)
 
@@ -160,9 +160,13 @@ Healthy at 60 Hz source / 120 Hz display: source 59–60, display ≥ 117, `miss
 
 `HybridFsrGenerator` (+ FSR generated-content sequence, `FGOutput::HybridTimewarp`), `Kcd2Input`, `ReprojInputPredictor`, `TargetPoseResolver`, velocity clamps, adaptive/queue-aware dispatch lead, depth/MV warp selection, hybrid/sync-generated/subsampling/smoothing-besides-EMA/debug modes, queue/late-latch toggles, per-slot telemetry and its INI/menu controls (`Telemetry`, `TelemetryMissDump`, and the whole `#if 0` experimental menu block: `Strength`, `TimeStep`, `MaxWarpFrames`, `NonBlockingAnchorSampling`, `AnchorSampleHz`, `PresentCompletionClock`, `MaxPoseAgeMs`).
 
+### Hitch hold
+
+When the game stops publishing anchors for more than ~2.5 source periods (streaming stall), velocity extrapolation would dead-reckon far past the last known pose and snap back on resume. Those slots instead hold the anchor's own pose (`timeStep = 0`); late-latch mouse paths ignore the timestep, so aiming stays live through the freeze. Gated on *publish* freshness (freshest READY `renderTimestamp`), never on anchor age: fresh publishes with lagging captures keep normal extrapolation. `hold=` on the log line proves engagement; it must be 0 in steady state.
+
 ### Current status
 
-- v10.0.1-pre19 (2026-09-03, `plans/async_capture_queue_decoupling.md`): capture moved to the game DIRECT queue with no per-anchor pin; presenter claims only completed anchors. KCD2 live test: large improvement over the ~90/90 FPS lockstep, but occasional residual judder — not yet perfectly smooth. NOTE: capping the source (`SourceFramerateLimit=60`) felt like a slight regression vs uncapped on this setup, so KCD2 currently runs uncapped; do not re-impose the cap without a live A/B. Next diagnosis needs fresh `Reproj:` log lines from the same 2560x1440 spot (source/display/missed/interval p95/capWait/block/pace).
+- v10.0.1-pre21 (2026-09-03): hitch hold (above) + latch-path diagnostics. KCD2 castle walk: steady state is healthy (source 85–105, display ~118–121, missed 0–4, lateCam steering, lateAge ~5 ms) but streaming hitches show source dips, present misses (interval p95 ~15 ms), fallback rise, poseAge 40+ ms. NOTE: `sensX` has never auto-calibrated this session (stuck at the 0.00015 default) — open question whether the true sensitivity differs; lateCam residuals would then be systematically misscaled. KCD2 runs uncapped (cap=60 regressed feel); do not re-impose without a live A/B.
 
 ## D3D12 base-class gotchas
 

@@ -623,6 +623,10 @@ void AReproj_Dx12::PresenterMain()
         // the active anchor but no newer completed packet was claimed below,
         // this slot deliberately reuses the active anchor (counted as capWait).
         UINT64 newestReadyFrame = activeFrame;
+        // Freshest publish time over all READY packets, complete or not. A
+        // fresh publish with an incomplete capture is capture latency (keep
+        // extrapolating); no fresh publish at all is a source hitch (hold).
+        double newestReadyRenderMs = 0.0;
         uint32_t readyCount = 0;
         for (int i = 0; i < BUFFER_COUNT; ++i)
         {
@@ -631,6 +635,7 @@ void AReproj_Dx12::PresenterMain()
                 ++readyCount;
                 // New anchors remain queued until the next display slot rather
                 // than replacing the current real content with a burst.
+                newestReadyRenderMs = std::max(newestReadyRenderMs, _packets[i].renderTimestamp);
                 if (_packets[i].frameId > newestReadyFrame)
                     newestReadyFrame = _packets[i].frameId;
                 // Only completed anchors are eligible. The presenter must never
@@ -743,7 +748,22 @@ void AReproj_Dx12::PresenterMain()
         // the absolute extrapolation cap. No velocity limiting.
         const auto unclampedStep =
             static_cast<float>(anchorAgeMs / realPeriodMs);
-        auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
+        // Hitch hold: the game stopped publishing (streaming stall), so velocity
+        // extrapolation would dead-reckon far past the last known pose and snap
+        // back when publishing resumes. Hold the anchor's own pose instead.
+        // The late-latch mouse paths ignore timeStep, so aiming stays live
+        // through the hold. Gated on PUBLISH freshness, not anchor age: fresh
+        // publishes with lagging captures keep normal extrapolation.
+        const double publishAgeMs = std::max(0.0, targetDisplayMs - newestReadyRenderMs);
+        constexpr float HITCH_HOLD_PERIODS = 2.5f;
+        const bool hitchHold = newestReadyRenderMs > 0.0 &&
+                               publishAgeMs > HITCH_HOLD_PERIODS * realPeriodMs;
+        auto timeStep = hitchHold ? 0.0f : std::clamp(unclampedStep, 0.0f, maxTimeStep);
+        if (hitchHold)
+        {
+            std::scoped_lock metricsLock(_metricsMutex);
+            ++_metricsHitchHolds;
+        }
 
         if (tSlot)
         {

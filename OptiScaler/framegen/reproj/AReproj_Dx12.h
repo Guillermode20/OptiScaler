@@ -211,6 +211,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsHudComposites = 0;
     uint32_t _metricsDirectCaptures = 0;
     uint32_t _metricsCaptureNotReady = 0;
+    uint32_t _metricsHitchHolds = 0; // slots held at timeStep 0 during a publish stall
     float _metricsLateInputMaxDegrees = 0.0f;
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;

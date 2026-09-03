@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.21 (2026-09-03)
+* Hitch hold: freeze fallback extrapolation when publishes stall over 2.5 source periods (streaming), aim stays live via late latch; hold counter on log line
+
 ## v10.0.1.20 (2026-09-03)
 * Latch path diagnostics: per-second late-camera/packet-base/fallback counts, late pose age, tracked sensitivity
 
