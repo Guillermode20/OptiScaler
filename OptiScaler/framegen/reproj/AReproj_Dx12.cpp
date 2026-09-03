@@ -1100,12 +1100,15 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
         _presenterState.store(PresenterState::Failed);
     RecordWarpFrame(false, true, 0.0f);
     SAFE_RELEASE(gameBackBuffer);
+    const auto paceStart = Util::MillisecondsNow();
+    FrameLimit::paceReprojectionSource(true);
+    const auto paceEnd = Util::MillisecondsNow();
     std::scoped_lock metricsLock(_metricsMutex);
     ++_metricsSkippedAnchorSamples;
-    // No pacing happened on this dropped-publication path, so pace= is
-    // reset rather than left carrying the previous frame's sleep time.
     _metricsGamePresentBlockMaxMs =
-        std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(Util::MillisecondsNow() - presentStartMs));
+        std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStartMs));
+    _metricsGamePresentPaceMaxMs =
+        std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
 }
 
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
