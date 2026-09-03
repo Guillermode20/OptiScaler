@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.35 (2026-09-03)
+* Fix startup crash (NULL packet.color deref) in the capture-worker path
+
 ## v10.0.1.34 (2026-09-03)
 * Reproj: move COPY-queue capture submission off the game thread (capture worker) so per-frame VKD3D queue ops stop eating the 60 Hz source budget
 

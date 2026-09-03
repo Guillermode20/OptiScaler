@@ -1325,7 +1325,10 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // 0 = no isolated UI, 1 = premultiplied alpha, 2 = straight alpha.
     packet.constants.hudlessSource =
         packet.hasUi ? (Config::Instance()->FGUIPremultipliedAlpha.value_or_default() ? 1u : 2u) : 0u;
-    const auto colorDesc = packet.color->GetDesc();
+    // The capture-worker path fills packet.color asynchronously, so derive the
+    // fallback aspect from the pinned source the worker copies from instead of
+    // the still-empty copy target (identical resource and resolution).
+    const auto colorDesc = color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
     double kcd2PoseIntervalMs = 0.0;
     // Keep the HUD trace lazy: WHGame.dll is loaded after OptiScaler in KCD2. This is read-only
