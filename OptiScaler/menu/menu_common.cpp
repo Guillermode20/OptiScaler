@@ -4203,7 +4203,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                        "Prevents game thread stalls.");
 
         float lateLead = config->ReprojLateSampleLead.value_or_default();
-        const bool adaptiveLead = !(lateLead > 0.5f);
+        bool adaptiveLead = !(lateLead > 0.5f);
         if (ImGui::Checkbox("Adaptive late sample##reproj-live", &adaptiveLead))
             config->ReprojLateSampleLead = adaptiveLead ? 0.0f : 4.0f;
         ShowHelpMarker("auto = hunt the mouse sample as late as the warp allows (default). Uncheck to pin a fixed lead.");
