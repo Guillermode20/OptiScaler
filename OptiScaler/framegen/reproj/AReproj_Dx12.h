@@ -77,6 +77,19 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         ID3D12Fence* handoffFence = nullptr; // non-owning; protects virtual-buffer reuse
         UINT64 handoffFenceValue = 0;
         UINT64 retirementFenceValue = 0;
+        // Capture-worker handoff (COPY-queue path only). The game thread fills
+        // the sources the worker must copy from, reserves the capture fence
+        // value, and enqueues the packet; the worker records and submits so the
+        // per-frame VKD3D queue ops leave the game's present thread. The source
+        // lifetimes are pinned: isolation textures via MarkFrameCaptured, the
+        // composed game backbuffer via the handoff fence.
+        ID3D12Resource* captureSrcColor = nullptr;
+        D3D12_RESOURCE_STATES captureSrcColorState = D3D12_RESOURCE_STATE_COMMON;
+        ID3D12Resource* captureSrcUi = nullptr;
+        D3D12_RESOURCE_STATES captureSrcUiState = D3D12_RESOURCE_STATE_COMMON;
+        ID3D12Resource* captureSrcComposed = nullptr; // game backbuffer for the UI-fallback re-copy
+        UINT64 captureInputFenceValue = 0;
+        bool captureViaWorker = false;
         double frameDelta = 0.0;
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
         UINT syncInterval = 0;
@@ -148,6 +161,17 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     HANDLE _captureFenceEvent = nullptr;
     UINT64 _captureFenceValue = 0;
     UINT64 _captureAllocatorFenceValues[BUFFER_COUNT] = {};
+
+    // Capture worker: performs the COPY-queue Wait/Execute/Signal + allocator
+    // resets off the game's present thread. On Wine/VKD3D those queue ops cost
+    // several ms per frame; running them inline was the dominant part of the
+    // measured 4-12 ms gamePresentBlockMs and starved the 60 Hz source cap.
+    std::thread _captureThread;
+    std::mutex _captureWorkMutex;
+    std::condition_variable _captureWorkCv;
+    int _captureWorkPending[BUFFER_COUNT] = {};
+    int _captureWorkCount = 0;
+    bool _captureWorkStop = false;
     uint32_t _metricsCaptureDepth = 0;
     uint32_t _metricsDepthWarps = 0;
     float _metricsTxCmTotal = 0.0f;
@@ -167,6 +191,11 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             bool warpAllowed);
     bool CaptureAllocatorReady(int packetIndex); // game thread: non-blocking UI-allocator poll, never waits
     bool PollCaptureAllocator(int packetIndex) { return CaptureAllocatorReady(packetIndex); }
+    void CaptureWorkerMain();
+    void StopCaptureWorker();
+    void ProcessCapturePacket(int packetIndex);
+    void FailCapturePacket(int packetIndex);
+    bool EnqueueCapture(int packetIndex);
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
     bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,

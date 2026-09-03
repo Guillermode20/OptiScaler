@@ -296,6 +296,18 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     SAFE_RELEASE(_warpTimestampReadback);
     SAFE_RELEASE(_warpTimestampHeap);
     _presentTimestampFrequency = 0;
+    // Safety net: DestroyAsyncPresenter can be reached without StopAsyncPresenter
+    // (CreateAsyncPresenter failure paths); never release the COPY queue objects
+    // under a still-running capture worker.
+    if (_captureThread.joinable())
+    {
+        {
+            std::scoped_lock lock(_captureWorkMutex);
+            _captureWorkStop = true;
+            _captureWorkCv.notify_all();
+        }
+        _captureThread.join();
+    }
     if (_captureFenceEvent)
     {
         CloseHandle(_captureFenceEvent);
@@ -351,6 +363,18 @@ bool AReproj_Dx12::StartAsyncPresenter()
         _presentIntervalCursor = 0;
         std::fill(_presentIntervals, _presentIntervals + _countof(_presentIntervals), 0.0);
     }
+    // Capture worker: performs the COPY-queue Wait/Execute/Signal + allocator
+    // resets off the game's present thread (measured 4-12 ms of block= per frame
+    // on Wine/VKD3D otherwise). Drains pending packets and exits on stop.
+    if (_captureQueue != nullptr)
+    {
+        {
+            std::scoped_lock lock(_captureWorkMutex);
+            _captureWorkStop = false;
+            _captureWorkCount = 0;
+        }
+        _captureThread = std::thread(&AReproj_Dx12::CaptureWorkerMain, this);
+    }
     _presenterState.store(PresenterState::Running);
     _presentThread = std::thread(&AReproj_Dx12::PresenterMain, this);
 
@@ -378,6 +402,10 @@ bool AReproj_Dx12::StartAsyncPresenter()
 void AReproj_Dx12::StopAsyncPresenter()
 {
     OptiInput::StopRawInputPump();
+    // Join the capture worker BEFORE draining/releasing GPU objects: it may be
+    // mid-submit on the COPY queue, and pending packets must be processed (or
+    // at least fence-completed) so no handoff wait is left dangling.
+    StopCaptureWorker();
 
     if (!_presentThread.joinable())
         return;

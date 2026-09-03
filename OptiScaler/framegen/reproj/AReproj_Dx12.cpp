@@ -1168,52 +1168,88 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // Prefer the dedicated capture queue (overlap) otherwise fallback to game DIRECT UI list.
     bool ok = false;
     bool usedCaptureQueue = false;
+    bool captureViaWorker = false;
     UINT64 gameReadyFenceValue = 0;
     packet.handoffFence = nullptr;
     packet.handoffFenceValue = 0;
+    packet.completionFence = nullptr;
+    packet.completionFenceValue = 0;
+    packet.captureFenceValue = 0;
     if (_captureQueue != nullptr && _captureFence != nullptr)
     {
-        // The source was rendered by the game's DIRECT queue. Explicitly hand
-        // ownership to the capture queue; without this wait, alt-tab/loads can
-        // expose a partially-rendered backbuffer to the copy engine.
-        gameReadyFenceValue = ++_captureInputFenceValue;
-        if (_gameCommandQueue == nullptr || _captureInputFence == nullptr ||
-            FAILED(_gameCommandQueue->Signal(_captureInputFence, gameReadyFenceValue)) ||
-            FAILED(_captureQueue->Wait(_captureInputFence, gameReadyFenceValue)))
-            return false;
-
-        auto capList = GetCaptureCommandList(packetIndex);
-        if (capList != nullptr)
+        // Prefer the dedicated capture queue (overlap). When the copy sources
+        // are pinned for the frame — KCD2 isolation textures (fenced via
+        // MarkFrameCaptured) or the composed game backbuffer (fenced via the
+        // handoff fence) — the submit moves to the capture worker so the
+        // per-frame COPY-queue ops leave the game's present thread. The generic
+        // upscaler-resource path (DRG-style) and depth capture stay inline;
+        // their source lifetimes are not pinned the same way.
+        const bool workerSafe = !wantDepthCapture && (usingKcd2Isolation || color == gameBackBuffer);
+        captureViaWorker = workerSafe;
+        if (workerSafe)
         {
-            ok =
-                CopyPacketResource(capList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
-            if (ok && packet.hasUi)
+            packet.captureSrcColor = color;
+            packet.captureSrcColorState = colorState;
+            packet.captureSrcUi = uiResource;
+            packet.captureSrcUiState = uiState;
+            packet.captureSrcComposed = gameBackBuffer;
+            packet.captureInputFenceValue = ++_captureInputFenceValue;
+            packet.captureFenceValue = ++_captureFenceValue;
+            if (_gameCommandQueue == nullptr || _captureInputFence == nullptr ||
+                FAILED(_gameCommandQueue->Signal(_captureInputFence, packet.captureInputFenceValue)))
+                return false;
+            usedCaptureQueue = true;
+            ok = true;
+        }
+        else
+        {
+            // The source was rendered by the game's DIRECT queue. Explicitly hand
+            // ownership to the capture queue; without this wait, alt-tab/loads can
+            // expose a partially-rendered backbuffer to the copy engine.
+            gameReadyFenceValue = ++_captureInputFenceValue;
+            if (_gameCommandQueue == nullptr || _captureInputFence == nullptr ||
+                FAILED(_gameCommandQueue->Signal(_captureInputFence, gameReadyFenceValue)) ||
+                FAILED(_captureQueue->Wait(_captureInputFence, gameReadyFenceValue)))
+                return false;
+
+            auto capList = GetCaptureCommandList(packetIndex);
+            if (capList != nullptr)
             {
-                packet.hasUi =
-                    CopyPacketResource(capList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
-                if (!packet.hasUi)
+                ok = CopyPacketResource(capList, color, colorState, &packet.color, packet.colorState,
+                                        L"Reproj_PacketColor");
+                if (ok && packet.hasUi)
                 {
-                    LOG_WARN("Reproj: UI capture failed; using composed frame");
-                    ok = CopyPacketResource(capList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
-                                            packet.colorState, L"Reproj_PacketColor");
-                }
-            }
-            // Depth capture (optional, fail-open) — skipped unless depth mode is enabled.
-            if (ok && wantDepthCapture)
-            {
-                auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
-                if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) &&
-                    depthRes->GetResource() != nullptr)
-                {
-                    auto* d = depthRes->GetResource();
-                    auto ds = depthRes->state;
-                    bool dOk =
-                        CopyPacketResource(capList, d, ds, &packet.depth, packet.depthState, L"Reproj_PacketDepth");
-                    if (dOk && packet.depth != nullptr)
+                    packet.hasUi = CopyPacketResource(capList, uiResource, uiState, &packet.ui, packet.uiState,
+                                                      L"Reproj_PacketUI");
+                    if (!packet.hasUi)
                     {
-                        auto dd = packet.depth->GetDesc();
-                        packet.depthWidth = static_cast<uint32_t>(dd.Width);
-                        packet.depthHeight = dd.Height;
+                        LOG_WARN("Reproj: UI capture failed; using composed frame");
+                        ok = CopyPacketResource(capList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
+                                                packet.colorState, L"Reproj_PacketColor");
+                    }
+                }
+                // Depth capture (optional, fail-open) — skipped unless depth mode is enabled.
+                if (ok && wantDepthCapture)
+                {
+                    auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
+                    if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) &&
+                        depthRes->GetResource() != nullptr)
+                    {
+                        auto* d = depthRes->GetResource();
+                        auto ds = depthRes->state;
+                        bool dOk = CopyPacketResource(capList, d, ds, &packet.depth, packet.depthState,
+                                                      L"Reproj_PacketDepth");
+                        if (dOk && packet.depth != nullptr)
+                        {
+                            auto dd = packet.depth->GetDesc();
+                            packet.depthWidth = static_cast<uint32_t>(dd.Width);
+                            packet.depthHeight = dd.Height;
+                        }
+                        else
+                        {
+                            SAFE_RELEASE(packet.depth);
+                            packet.depthWidth = packet.depthHeight = 0;
+                        }
                     }
                     else
                     {
@@ -1221,13 +1257,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                         packet.depthWidth = packet.depthHeight = 0;
                     }
                 }
-                else
-                {
-                    SAFE_RELEASE(packet.depth);
-                    packet.depthWidth = packet.depthHeight = 0;
-                }
+                usedCaptureQueue = true;
             }
-            usedCaptureQueue = true;
         }
     }
     if (!usedCaptureQueue)
@@ -1471,8 +1502,20 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     bool submitted = false;
     if (usedCaptureQueue)
     {
-        submitted = SubmitCaptureCommandList(packetIndex);
-        packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
+        if (captureViaWorker)
+        {
+            // The worker records + submits and signals the reserved value; the
+            // game thread only enqueues so the COPY-queue ops leave its frame.
+            submitted = EnqueueCapture(packetIndex);
+            if (submitted && usingKcd2Isolation)
+                Kcd2HudIsolation::MarkFrameCaptured(gameBackBuffer, kcd2Hudless, kcd2Ui, _captureFence,
+                                                    packet.captureFenceValue);
+        }
+        else
+        {
+            submitted = SubmitCaptureCommandList(packetIndex);
+            packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
+        }
         packet.completionFence = _captureFence;
         packet.completionFenceValue = packet.captureFenceValue;
         // With separate HUD-less world/UI resources the COPY queue never reads
@@ -1489,9 +1532,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             packet.handoffFence = _captureFence;
             packet.handoffFenceValue = packet.captureFenceValue;
         }
-        if (submitted && usingKcd2Isolation)
-            Kcd2HudIsolation::MarkFrameCaptured(gameBackBuffer, kcd2Hudless, kcd2Ui, _captureFence,
-                                                packet.captureFenceValue);
         if (submitted)
         {
             std::scoped_lock lock(_metricsMutex);
@@ -1516,9 +1556,154 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         }
     }
     if (!submitted)
+    {
+        // The worker path reserves a capture fence value that will never be
+        // signaled if the enqueue failed; complete it CPU-side so RetirePackets
+        // can recycle the packet without waiting on a submission that never ran.
+        if (captureViaWorker && _captureFence != nullptr && packet.captureFenceValue != 0)
+            _captureFence->Signal(packet.captureFenceValue);
         return false;
-    // Null-depth packets still warp rotation-only; depth failure is not fatal.
+    }
     return true;
+}
+
+bool AReproj_Dx12::EnqueueCapture(int packetIndex)
+{
+    std::scoped_lock lock(_captureWorkMutex);
+    if (_captureWorkStop || _captureWorkCount >= BUFFER_COUNT)
+        return false;
+    _captureWorkPending[_captureWorkCount++] = packetIndex;
+    _captureWorkCv.notify_one();
+    return true;
+}
+
+void AReproj_Dx12::CaptureWorkerMain()
+{
+    for (;;)
+    {
+        int packetIndex = -1;
+        {
+            std::unique_lock lock(_captureWorkMutex);
+            _captureWorkCv.wait(lock, [&] { return _captureWorkStop || _captureWorkCount > 0; });
+            if (_captureWorkCount == 0)
+            {
+                if (_captureWorkStop)
+                    break;
+                continue;
+            }
+            packetIndex = _captureWorkPending[0];
+            for (int i = 1; i < _captureWorkCount; ++i)
+                _captureWorkPending[i - 1] = _captureWorkPending[i];
+            --_captureWorkCount;
+        }
+        ProcessCapturePacket(packetIndex);
+    }
+}
+
+void AReproj_Dx12::FailCapturePacket(int packetIndex)
+{
+    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT)
+        return;
+    auto& packet = _packets[packetIndex];
+    // Complete the reserved value CPU-side so RetirePackets can recycle the
+    // packet without waiting on a submission that never happened.
+    if (_captureFence != nullptr && packet.captureFenceValue != 0)
+        _captureFence->Signal(packet.captureFenceValue);
+    PacketState expected = PacketState::Capturing;
+    if (packet.state.compare_exchange_strong(expected, PacketState::Retired))
+        _presentCv.notify_all();
+}
+
+void AReproj_Dx12::ProcessCapturePacket(int packetIndex)
+{
+    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT)
+        return;
+    auto& packet = _packets[packetIndex];
+
+    if (_captureQueue == nullptr || _captureInputFence == nullptr || _captureFence == nullptr)
+    {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+
+    // Order the copies after the game's render CL for this anchor: the game
+    // thread enqueued the input-fence signal on its DIRECT queue at present.
+    if (FAILED(_captureQueue->Wait(_captureInputFence, packet.captureInputFenceValue)))
+    {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+
+    // Recycle this packet's capture allocator. This is the worker thread, so a
+    // bounded wait here never eats the game's frame budget.
+    if (!WaitForCaptureAllocator(packetIndex))
+    {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+
+    auto* capList = GetCaptureCommandList(packetIndex);
+    if (capList == nullptr)
+    {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+
+    bool ok = CopyPacketResource(capList, packet.captureSrcColor, packet.captureSrcColorState, &packet.color,
+                                 packet.colorState, L"Reproj_PacketColor");
+    if (ok && packet.hasUi)
+    {
+        packet.hasUi = CopyPacketResource(capList, packet.captureSrcUi, packet.captureSrcUiState, &packet.ui,
+                                          packet.uiState, L"Reproj_PacketUI");
+        if (!packet.hasUi)
+        {
+            LOG_WARN("Reproj: UI capture failed; using composed frame");
+            ok = CopyPacketResource(capList, packet.captureSrcComposed, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
+                                    packet.colorState, L"Reproj_PacketColor");
+        }
+    }
+    if (!ok)
+    {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+
+    if (FAILED(capList->Close()))
+    {
+        LOG_ERROR("Reproj: capture list Close error slot {}", packetIndex);
+        FailCapturePacket(packetIndex);
+        return;
+    }
+    _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &capList);
+    _captureCommandListResetted[packetIndex] = false;
+    _captureAllocatorFenceValues[packetIndex] = packet.captureFenceValue;
+    if (FAILED(_captureQueue->Signal(_captureFence, packet.captureFenceValue)))
+    {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+
+    // Publish Capturing -> Ready. The game thread may have abandoned the packet
+    // (failed-publication downgrade); the CAS keeps this from resurrecting it,
+    // while the capture itself stays submitted so any pending handoff wait
+    // still observes the reserved fence value.
+    PacketState expected = PacketState::Capturing;
+    if (packet.state.compare_exchange_strong(expected, PacketState::Ready))
+    {
+        _readyFrameId.store(packet.frameId);
+        _presentCv.notify_all();
+    }
+}
+
+void AReproj_Dx12::StopCaptureWorker()
+{
+    {
+        std::scoped_lock lock(_captureWorkMutex);
+        _captureWorkStop = true;
+        _captureWorkCv.notify_all();
+    }
+    if (_captureThread.joinable())
+        _captureThread.join();
 }
 
 bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telemetryQueryStart)

@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.34 (2026-09-03)
+* Reproj: move COPY-queue capture submission off the game thread (capture worker) so per-frame VKD3D queue ops stop eating the 60 Hz source budget
+
 ## v10.0.1.33 (2026-09-03)
 * Expose HUD isolation, allow composed warp, repeat warp, async compute queue, non-blocking handoff, and late sample lead in in-game HUD overlay and add repeat warp throttle and queue selection
 
