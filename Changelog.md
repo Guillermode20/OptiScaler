@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.19 (2026-09-03)
+* Async capture/presenter queue decoupling: capture copies run on the game DIRECT queue with no per-anchor game pin, presenter claims only completed anchors and re-warps its active anchor otherwise
+
 ## v10.0.1.18 (2026-09-03)
 * Optimize rotation timewarp shader and remove obsolete depth/MV resources
 

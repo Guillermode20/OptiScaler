@@ -173,51 +173,12 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 
-    // Capture copies (color/UI) run on the COMPUTE queue so they overlap game
-    // rendering instead of extending the game's frame. Partial failure only
-    // disables the compute capture path — CaptureFramePacket falls back to
-    // the DIRECT UI command list per frame — while the compute warp above is
-    // unaffected. The presenter gates each warp on the packet completion
-    // fence, and the game queue pins slot lifetime (see
-    // SubmitCaptureCommandList), so no new ordering hazards are introduced.
-    if (_computeQueue != nullptr)
-    {
-        bool captureReady = true;
-        if (FAILED(_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureFence))))
-        {
-            LOG_WARN("Reproj: capture fence creation failed; capture stays on the DIRECT queue");
-            captureReady = false;
-        }
-        else
-        {
-            _captureFence->SetName(L"Reproj_CaptureFence");
-            for (size_t i = 0; captureReady && i < BUFFER_COUNT; i++)
-            {
-                if (FAILED(_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                                           IID_PPV_ARGS(&_captureAllocator[i]))))
-                {
-                    LOG_WARN("Reproj: capture allocator[{}] creation failed; capture stays on the DIRECT queue", i);
-                    captureReady = false;
-                    break;
-                }
-                _captureAllocator[i]->SetName(std::format(L"Reproj_CaptureAllocator[{}]", i).c_str());
-
-                if (FAILED(_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, _captureAllocator[i], nullptr,
-                                                      IID_PPV_ARGS(&_captureCommandList[i]))))
-                {
-                    LOG_WARN("Reproj: capture command list[{}] creation failed; capture stays on the DIRECT queue", i);
-                    captureReady = false;
-                    break;
-                }
-                _captureCommandList[i]->SetName(std::format(L"Reproj_CaptureCmdList[{}]", i).c_str());
-                _captureCommandList[i]->Close();
-            }
-        }
-        if (!captureReady)
-            DestroyCaptureResources();
-        else
-            LOG_INFO("Reproj: capture copies use the COMPUTE queue");
-    }
+    // Anchor capture runs on the game DIRECT queue in presentation order (see
+    // CaptureFramePacket): the packet copies are naturally ordered after the
+    // frame's render/UI work with no cross-queue round trip and no
+    // game-queue pin. The presenter below only claims anchors whose _uiFence
+    // completion value is already reached, so it keeps warping its active
+    // anchor while a newer capture is still in flight.
 
     // Telemetry uses the DIRECT queue for timestamp calibration (both queue types
     // support timestamp queries; DIRECT is the existing baseline for comparison).
@@ -244,7 +205,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 #endif
-    LOG_INFO("Reproj: async presenter created (SC: DIRECT, warp: {})",
+    LOG_INFO("Reproj: async presenter created (capture: game DIRECT, warp: {})",
              _computeQueue != nullptr ? "COMPUTE" : "DIRECT (fallback)");
     return true;
 }
@@ -256,7 +217,6 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     SAFE_RELEASE(_warpTimestampReadback);
     SAFE_RELEASE(_warpTimestampHeap);
     _presentTimestampFrequency = 0;
-    DestroyCaptureResources();
     SAFE_RELEASE(_computeFence);
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
@@ -659,6 +619,10 @@ void AReproj_Dx12::PresenterMain()
 
         int newestPacketIndex = -1;
         UINT64 newestFrame = activeFrame;
+        // Highest READY frameId regardless of readiness: if it is newer than
+        // the active anchor but no newer completed packet was claimed below,
+        // this slot deliberately reuses the active anchor (counted as capWait).
+        UINT64 newestReadyFrame = activeFrame;
         uint32_t readyCount = 0;
         for (int i = 0; i < BUFFER_COUNT; ++i)
         {
@@ -667,7 +631,18 @@ void AReproj_Dx12::PresenterMain()
                 ++readyCount;
                 // New anchors remain queued until the next display slot rather
                 // than replacing the current real content with a burst.
-                if (_packets[i].frameId > newestFrame)
+                if (_packets[i].frameId > newestReadyFrame)
+                    newestReadyFrame = _packets[i].frameId;
+                // Only completed anchors are eligible. The presenter must never
+                // block its warp queue behind an unfinished capture: an
+                // incomplete packet stays READY and is reconsidered next slot.
+                auto& cand = _packets[i];
+                auto* captureFence = cand.completionFence != nullptr ? cand.completionFence : _uiFence;
+                const auto captureValue =
+                    cand.completionFence != nullptr ? cand.completionFenceValue : cand.captureFenceValue;
+                const bool complete = captureValue == 0 || captureFence == nullptr ||
+                                      captureFence->GetCompletedValue() >= captureValue;
+                if (complete && _packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
                     newestPacketIndex = i;
@@ -676,58 +651,40 @@ void AReproj_Dx12::PresenterMain()
         }
 
         bool newAnchor = false;
-        bool captureReady = true;
+        // A claimed packet is complete by construction above. On reuse,
+        // captureReady is false when a newer anchor existed but was skipped
+        // as incomplete.
+        bool captureReady = newestReadyFrame <= activeFrame;
         if (newestPacketIndex >= 0)
         {
-            // Check capture fence ready at selection. The fence follows the
-            // queue the copies ran on (_uiFence for DIRECT, _captureFence
-            // for COMPUTE); both are exposed via the packet completion fence.
-            auto& cand = _packets[newestPacketIndex];
-            auto* captureFence = cand.completionFence != nullptr ? cand.completionFence : _uiFence;
-            const auto captureValue =
-                cand.completionFence != nullptr ? cand.completionFenceValue : cand.captureFenceValue;
-            if (captureValue != 0 && captureFence != nullptr)
-                captureReady = captureFence->GetCompletedValue() >= captureValue;
+            captureReady = true;
             auto expected = PacketState::Ready;
             if (_packets[newestPacketIndex].state.compare_exchange_strong(expected, PacketState::Presenting))
             {
+                // No presenter-queue wait for capture here: the CPU check above
+                // already confirmed completion, and packet resources are
+                // immutable until retirement, so the warp queue needs no
+                // additional ordering against the game DIRECT queue.
                 auto& newest = _packets[newestPacketIndex];
-                // Gate the warp on the same queue that will execute it so the
-                // captured frame data is ready before the compute/DIRECT warp runs.
-                auto* warpQueue = _computeQueue != nullptr ? _computeQueue : _presentQueue;
-                auto* waitFence = newest.completionFence != nullptr ? newest.completionFence : _uiFence;
-                const auto waitValue =
-                    newest.completionFence != nullptr ? newest.completionFenceValue : newest.captureFenceValue;
-                if (waitValue != 0 && waitFence != nullptr && FAILED(warpQueue->Wait(waitFence, waitValue)))
-                {
-                    newest.state.store(PacketState::Retired);
-                    _presenterState.store(PresenterState::Failed);
-                    if (tSlot)
-                    {
-                        tSlot->outcome = ReprojSlotOutcome::FenceFailed;
-                        _telemetry.FinalizeSlot(tSlot);
-                    }
-                    break;
-                }
                 if (activePacketIndex >= 0)
                     _packets[activePacketIndex].state.store(PacketState::Retired);
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
-                if (!captureReady)
-                {
-                    // H1 diagnosis: the newest anchor's capture copies had not
-                    // finished when selection ran, so this slot's warp waits on
-                    // cross-queue capture completion and can slip past vblank.
-                    std::scoped_lock metricsLock(_metricsMutex);
-                    ++_metricsCaptureNotReady;
-                }
                 for (int i = 0; i < BUFFER_COUNT; ++i)
                     if (i != activePacketIndex && _packets[i].state.load() == PacketState::Ready &&
                         _packets[i].frameId < activeFrame)
                         _packets[i].state.store(PacketState::Retired);
                 _presentCv.notify_all();
             }
+        }
+        else if (newestReadyFrame > activeFrame)
+        {
+            // The newest anchor's DIRECT capture copies had not finished when
+            // selection ran, so this slot re-warped the active anchor instead
+            // of stalling the warp queue behind unfinished work.
+            std::scoped_lock metricsLock(_metricsMutex);
+            ++_metricsCaptureNotReady;
         }
 
         if (tSlot)

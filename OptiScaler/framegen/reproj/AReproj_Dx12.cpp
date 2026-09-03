@@ -241,123 +241,6 @@ bool AReproj_Dx12::WaitForComputeAllocator(int fIndex)
     return true;
 }
 
-bool AReproj_Dx12::PollCaptureAllocator(int packetIndex) const
-{
-    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT || _computeQueue == nullptr || _captureFence == nullptr ||
-        _captureAllocator[packetIndex] == nullptr || _captureCommandList[packetIndex] == nullptr)
-        return false;
-
-    const auto fenceValue = _captureAllocatorFenceValues[packetIndex];
-    if (fenceValue != 0 && _captureFence->GetCompletedValue() < fenceValue)
-        return false;
-
-    return true;
-}
-
-ID3D12GraphicsCommandList* AReproj_Dx12::GetCaptureCommandList(int packetIndex)
-{
-    if (!PollCaptureAllocator(packetIndex))
-        return nullptr;
-
-    // Never leave a stale recording behind: the allocator is idle per the
-    // poll above, so unconditionally start fresh.
-    _captureCommandListResetted[packetIndex] = false;
-    if (FAILED(_captureAllocator[packetIndex]->Reset()))
-    {
-        LOG_ERROR("Reproj: capture allocator Reset failed slot {}", packetIndex);
-        return nullptr;
-    }
-    if (FAILED(_captureCommandList[packetIndex]->Reset(_captureAllocator[packetIndex], nullptr)))
-    {
-        LOG_ERROR("Reproj: capture command list Reset failed slot {}", packetIndex);
-        return nullptr;
-    }
-    _captureCommandListResetted[packetIndex] = true;
-    return _captureCommandList[packetIndex];
-}
-
-bool AReproj_Dx12::SubmitCaptureCommandList(int packetIndex, UINT64 uiFenceValue)
-{
-    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT || !_captureCommandListResetted[packetIndex])
-        return true;
-
-    if (_computeQueue == nullptr || _captureFence == nullptr || _uiFence == nullptr || _gameCommandQueue == nullptr)
-    {
-        LOG_ERROR("Reproj: capture submit with null queue/fence");
-        return false;
-    }
-
-    if (FAILED(_captureCommandList[packetIndex]->Close()))
-    {
-        LOG_ERROR("Reproj: capture command list Close error slot {}", packetIndex);
-        return false;
-    }
-
-    // The copies must not begin before the game's frame actually published.
-    // uiFenceValue comes from the empty UI publish that SubmitUICommandList
-    // just signaled on the game queue, ordered after all game work.
-    if (uiFenceValue != 0 && FAILED(_computeQueue->Wait(_uiFence, uiFenceValue)))
-    {
-        LOG_ERROR("Reproj: compute queue capture wait failed slot {}", packetIndex);
-        return false;
-    }
-
-    _computeQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_captureCommandList[packetIndex]);
-    _captureCommandListResetted[packetIndex] = false;
-
-    const auto capValue = ++_captureFenceValue;
-    if (FAILED(_computeQueue->Signal(_captureFence, capValue)))
-    {
-        LOG_ERROR("Reproj: capture fence Signal failed slot {}", packetIndex);
-        return false;
-    }
-    _captureAllocatorFenceValues[packetIndex] = capValue;
-
-    // Pin isolation-slot lifetime: the NEXT frame's TryRedirect rewrites the
-    // slot textures with no cross-queue ordering, so no later game-queue work
-    // may run until these copies land. With SourceFramerateLimit the game
-    // thread sleeps right after present, hiding this wait; uncapped it costs
-    // ~copy time — still less than executing the copies inline.
-    if (FAILED(_gameCommandQueue->Wait(_captureFence, capValue)))
-    {
-        LOG_ERROR("Reproj: game queue capture pin failed slot {}", packetIndex);
-        return false;
-    }
-    return true;
-}
-
-void AReproj_Dx12::DiscardCaptureCommandList(int packetIndex)
-{
-    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT || !_captureCommandListResetted[packetIndex] ||
-        _captureAllocator[packetIndex] == nullptr || _captureCommandList[packetIndex] == nullptr)
-        return;
-
-    // Only reset when no submitted work is in flight on this allocator. The
-    // game thread is the sole submitter and PollCaptureAllocator verified
-    // completion at Get time, with nothing submitted since.
-    const auto fenceValue = _captureAllocatorFenceValues[packetIndex];
-    if (fenceValue != 0 && _captureFence != nullptr && _captureFence->GetCompletedValue() < fenceValue)
-        return;
-
-    _captureAllocator[packetIndex]->Reset();
-    _captureCommandList[packetIndex]->Reset(_captureAllocator[packetIndex], nullptr);
-    _captureCommandList[packetIndex]->Close();
-    _captureCommandListResetted[packetIndex] = false;
-}
-
-void AReproj_Dx12::DestroyCaptureResources()
-{
-    SAFE_RELEASE(_captureFence);
-    for (size_t i = 0; i < BUFFER_COUNT; i++)
-    {
-        SAFE_RELEASE(_captureCommandList[i]);
-        SAFE_RELEASE(_captureAllocator[i]);
-        _captureCommandListResetted[i] = false;
-        _captureAllocatorFenceValues[i] = 0;
-    }
-    _captureFenceValue = 0;
-}
-
 DXGI_FORMAT AReproj_Dx12::NormalizeReprojFormat(DXGI_FORMAT format)
 {
     format = WrappedIDXGISwapChain4::ReprojectionResourceFormat(format);
@@ -1068,8 +951,9 @@ void AReproj_Dx12::RetirePackets()
         if (packet.state.load() != PacketState::Retired)
             continue;
 
-        // Capture completion follows the queue the copies ran on: _uiFence
-        // for the DIRECT UI path, _captureFence for the COMPUTE path.
+        // Capture completion is tracked on the packet completion fence, which
+        // CaptureFramePacket sets to the game DIRECT queue _uiFence value its
+        // copies were submitted with.
         auto* captureFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
         const bool captureDone = packet.captureFenceValue == 0 || captureFence == nullptr ||
                                  captureFence->GetCompletedValue() >= packet.captureFenceValue;
@@ -1137,14 +1021,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         }
     }
 
-    // Capture queue selection: the COMPUTE queue overlaps the color/UI copies
-    // with game rendering; the game queue only publishes its frame fence.
-    // Poll-only — a busy capture allocator falls back to the DIRECT UI path
-    // for this frame rather than stalling the game thread. Failure handling
-    // below is identical on both paths: a failed copy fails the packet (the
-    // presenter keeps re-warping its active anchor), never a composed warp.
-    const bool useComputeCapture = PollCaptureAllocator(packetIndex);
-    auto cmdList = useComputeCapture ? GetCaptureCommandList(packetIndex) : GetUICommandList(packetIndex);
+    // Capture copies run on the game DIRECT queue in presentation order, so
+    // they are naturally ordered after the frame's render/UI work with no
+    // cross-queue round trip and no game-queue pin. A failed copy fails the
+    // packet (the presenter keeps re-warping its active anchor), never a
+    // composed warp.
+    auto cmdList = GetUICommandList(packetIndex);
     bool ok = cmdList != nullptr &&
               CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
     if (ok && packet.hasUi)
@@ -1159,11 +1041,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     }
 
     if (!ok)
-    {
-        if (useComputeCapture)
-            DiscardCaptureCommandList(packetIndex);
         return false;
-    }
 
     const auto now = Util::MillisecondsNow();
     const auto rawFrameDelta =
@@ -1300,46 +1178,21 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.syncInterval = FGHooks::LastPresentSyncInterval();
     packet.presentFlags = FGHooks::LastPresentFlags();
 
-    if (useComputeCapture)
-    {
-        // Publish an (empty) UI command list first: its signal is the
-        // game-queue fence value the compute copies wait on, ordered after
-        // all game work submitted so far (world render, TryRedirect snapshot,
-        // Scaleform UI). The game queue itself executes no copy here.
-        auto* uiCmdList = GetUICommandList(packetIndex);
-        if (uiCmdList == nullptr || !SubmitUICommandList((UINT) packetIndex))
-        {
-            DiscardCaptureCommandList(packetIndex);
-            return false;
-        }
-        const auto uiValue = _uiAllocatorFenceValues[packetIndex];
-        if (!SubmitCaptureCommandList(packetIndex, uiValue))
-        {
-            DiscardCaptureCommandList(packetIndex);
-            return false;
-        }
-        const auto capValue = _captureAllocatorFenceValues[packetIndex];
-        if (capValue == 0)
-        {
-            DiscardCaptureCommandList(packetIndex);
-            return false;
-        }
-        packet.captureFenceValue = capValue;
-        packet.completionFence = _captureFence;
-        packet.completionFenceValue = capValue;
-        {
-            std::scoped_lock lock(_metricsMutex);
-            ++_metricsComputeCaptures;
-        }
-        return true;
-    }
-
+    // The copies above were recorded on the game DIRECT queue UI command list
+    // in presentation order; submitting them publishes the packet completion
+    // fence the presenter polls before claiming this anchor. There is no
+    // per-anchor game-queue pin: subsequent game work proceeds while the
+    // presenter keeps warping its active anchor until these copies land.
     const bool submitted = SubmitUICommandList((UINT) packetIndex);
     packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
     packet.completionFence = _uiFence;
     packet.completionFenceValue = packet.captureFenceValue;
     if (!submitted)
         return false;
+    {
+        std::scoped_lock lock(_metricsMutex);
+        ++_metricsDirectCaptures;
+    }
     return true;
 }
 
@@ -1726,19 +1579,8 @@ bool AReproj_Dx12::DrainGpuWork()
     {
         if (!waitForFence(_uiFence, _uiFenceEvent, _uiAllocatorFenceValues[i], "UI", i) ||
             !waitForFence(_scFence, _scFenceEvent, _scAllocatorFenceValues[i], "SC", i) ||
-            !waitForFence(_computeFence, _scFenceEvent, _computeAllocatorFenceValues[i], "COMPUTE", i) ||
-            !waitForFence(_captureFence, _scFenceEvent, _captureAllocatorFenceValues[i], "CAPTURE", i))
+            !waitForFence(_computeFence, _scFenceEvent, _computeAllocatorFenceValues[i], "COMPUTE", i))
             return false;
-    }
-
-    // Every submitted allocator is idle now: drop any capture list that was
-    // recorded but never submitted, so its allocator stays reusable.
-    // (CaptureFramePacket always submits or discards in the same call; this
-    // only covers hard-failure paths that skipped both.)
-    for (int i = 0; i < BUFFER_COUNT; ++i)
-    {
-        if (_captureCommandListResetted[i])
-            DiscardCaptureCommandList(i);
     }
 
     return true;
@@ -1794,7 +1636,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.repeatedAnchorDisplays = _metricsRepeatedAnchorDisplays;
     _runtimeMetrics.missedDisplaySlots = _metricsMissedDisplaySlots;
     _runtimeMetrics.droppedAnchors = _metricsSkippedAnchorSamples;
-    _runtimeMetrics.computeCaptures = _metricsComputeCaptures;
+    _runtimeMetrics.directCaptures = _metricsDirectCaptures;
     _runtimeMetrics.captureNotReady = _metricsCaptureNotReady;
     if (_presentIntervalCount > 0)
     {
@@ -1813,7 +1655,7 @@ void AReproj_Dx12::LogMetricsIfDue()
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
-             _metricsSkippedAnchorSamples, _metricsComputeCaptures, _metricsCaptureNotReady, presenter,
+             _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, presenter,
              _runtimeMetrics.gamePresentBlockMs, _runtimeMetrics.gamePresentPaceMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
@@ -1829,7 +1671,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsLateInputSamples = 0;
     _metricsLateInputApplied = 0;
     _metricsHudComposites = 0;
-    _metricsComputeCaptures = 0;
+    _metricsDirectCaptures = 0;
     _metricsCaptureNotReady = 0;
     _metricsLateInputMaxDegrees = 0.0f;
 }
@@ -2111,8 +1953,9 @@ bool AReproj_Dx12::Present()
 
         auto& packet = _packets[packetIndex];
         const bool captured = CaptureFramePacket(fIndex, packetIndex, gameBackBuffer, virtualBufferIndex, warpAllowed);
-        // The capture fence follows the queue the copies ran on (DIRECT UI or
-        // COMPUTE capture); AdvanceReprojectionBuffer gates buffer reuse on it.
+        // The capture fence is the packet completion fence CaptureFramePacket
+        // submitted its DIRECT copies with; AdvanceReprojectionBuffer gates
+        // buffer reuse on it.
         auto* captureFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
         const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, captureFence,
                                                                                        packet.captureFenceValue));
@@ -2131,9 +1974,8 @@ bool AReproj_Dx12::Present()
             const auto paceEnd = Util::MillisecondsNow();
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
-            // block= covers real game-thread work only (capture submit, the
-            // game-queue capture-fence pin, publication); the pacing sleep is
-            // reported separately in pace= so the pin cost stays visible.
+            // block= covers real game-thread work only (capture submit,
+            // publication); the pacing sleep is reported separately in pace=.
             _runtimeMetrics.gamePresentBlockMs = static_cast<float>(paceStart - presentStart);
             _runtimeMetrics.gamePresentPaceMs = static_cast<float>(paceEnd - paceStart);
             return true;
@@ -2298,7 +2140,7 @@ void AReproj_Dx12::Activate()
         _metricsLateInputSamples = 0;
         _metricsLateInputApplied = 0;
         _metricsHudComposites = 0;
-        _metricsComputeCaptures = 0;
+        _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _runtimeMetrics = {};
@@ -3058,9 +2900,6 @@ void AReproj_Dx12::ReleaseObjects()
         _computeCommandListResetted[i] = false;
         _computeAllocatorFenceValues[i] = 0;
 
-        _captureCommandListResetted[i] = false;
-        _captureAllocatorFenceValues[i] = 0;
-
         _uiCommandListResetted[i] = false;
         _uiAllocatorFenceValues[i] = 0;
     }
@@ -3069,7 +2908,6 @@ void AReproj_Dx12::ReleaseObjects()
     SAFE_RELEASE(_scFence);
     SAFE_RELEASE(_lateLatchFence);
     SAFE_RELEASE(_computeFence);
-    SAFE_RELEASE(_captureFence);
     if (_uiFenceEvent != nullptr)
     {
         CloseHandle(_uiFenceEvent);
