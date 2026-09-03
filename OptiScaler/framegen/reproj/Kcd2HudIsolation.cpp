@@ -5,6 +5,7 @@
 #include "State.h"
 
 #include <array>
+#include <atomic>
 #include <mutex>
 
 namespace Kcd2HudIsolation
@@ -29,6 +30,28 @@ struct FrameSlot
 
 std::array<FrameSlot, 8> g_slots {};
 std::mutex g_mutex;
+
+// Mid-frame world-completion signal (latency pass). The Scaleform CL that
+// contains the world snapshot is submitted before present on per-pass
+// renderers; signaling the world fence the moment that CL is submitted lets
+// the capture worker copy the world while the game still finishes its frame.
+// Safe on single-CL-per-frame renderers too: the signal then fires at
+// present-time submission, which is exactly today's ordering. Markers are
+// cleared per frame (ArmForFrame) so a CL that never submits cannot leave a
+// dangling wait; a marker that fires late only completes an old fence value.
+ID3D12Fence* g_worldFence = nullptr;
+std::atomic<UINT64> g_worldFenceValue { 0 };
+// Retains the value reserved by THIS frame's snapshot even after its marker
+// fires (per-pass renderers submit the Scaleform CL before present), so the
+// capture worker at present still knows which fence value gates the color copy.
+UINT64 g_lastWorldSignalValue = 0;
+struct PendingWorldSignal
+{
+    ID3D12GraphicsCommandList* cl = nullptr;
+    UINT64 value = 0;
+};
+std::array<PendingWorldSignal, 8> g_pendingWorldSignals {};
+int g_pendingWorldSignalCount = 0;
 
 void ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* res, D3D12_RESOURCE_STATES before,
                      D3D12_RESOURCE_STATES after)
@@ -185,6 +208,11 @@ void ArmForFrame(int frameIndex)
     // stale world/UI content.
     for (auto& slot : g_slots)
         slot.hasValidData = false;
+    // Drop any world-signal marker that did not fire during the previous
+    // frame (a recorded CL that was never submitted). The next frame's
+    // CaptureFramePacket then sees value 0 and falls back to the present gate.
+    g_pendingWorldSignalCount = 0;
+    g_lastWorldSignalValue = 0;
 }
 
 bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
@@ -242,6 +270,12 @@ bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
         slot->hasValidData = true;
         static uint64_t nextFrameSerial = 0;
         slot->frameSerial = ++nextFrameSerial;
+
+        // The snapshot copy was recorded into the game's Scaleform CL above.
+        // Reserve a world-fence value and mark that CL so hkExecuteCommandLists
+        // signals the fence the moment the CL is submitted (per-pass renderers:
+        // mid-frame; single-CL-per-frame: at present — safe either way).
+        MarkWorldSnapshotCl(commandList);
     }
 
     *replacementRtv = slot->uiRtv;
@@ -369,10 +403,73 @@ void MarkFrameCaptured(ID3D12Resource* backBuffer, ID3D12Resource* hudless, ID3D
     captured->captureFenceValue = fenceValue;
 }
 
+void SetWorldSignalContext(ID3D12Fence* worldFence)
+{
+    std::scoped_lock lock(g_mutex);
+    g_worldFence = worldFence;
+    g_pendingWorldSignalCount = 0;
+    g_worldFenceValue = 0;
+    g_lastWorldSignalValue = 0;
+}
+
+UINT64 MarkWorldSnapshotCl(ID3D12GraphicsCommandList* commandList)
+{
+    if (g_worldFence == nullptr || commandList == nullptr)
+        return 0;
+    std::scoped_lock lock(g_mutex);
+    const auto value = ++g_worldFenceValue;
+    g_lastWorldSignalValue = value;
+    if (g_pendingWorldSignalCount < static_cast<int>(g_pendingWorldSignals.size()))
+        g_pendingWorldSignals[g_pendingWorldSignalCount++] = { commandList, value };
+    return value;
+}
+
+bool OnWorldSnapshotSubmitted(ID3D12CommandQueue* queue, ID3D12CommandList* const* lists, UINT count)
+{
+    if (g_worldFence == nullptr || queue == nullptr || lists == nullptr || count == 0)
+        return false;
+    std::scoped_lock lock(g_mutex);
+    for (UINT i = 0; i < count; ++i)
+    {
+        for (int j = 0; j < g_pendingWorldSignalCount; ++j)
+        {
+            if (g_pendingWorldSignals[j].cl != lists[i])
+                continue;
+            // Signal on the submitting queue immediately after the CL that
+            // contains the snapshot copy: GPU-side the fence completes once
+            // the world content the copy reads is fully written.
+            queue->Signal(g_worldFence, g_pendingWorldSignals[j].value);
+            for (int k = j; k < g_pendingWorldSignalCount - 1; ++k)
+                g_pendingWorldSignals[k] = g_pendingWorldSignals[k + 1];
+            --g_pendingWorldSignalCount;
+            return true;
+        }
+    }
+    return false;
+}
+
+UINT64 TakeWorldSignalValue(ID3D12Resource* backBuffer)
+{
+    (void) backBuffer;
+    if (g_worldFence == nullptr)
+        return 0;
+    std::scoped_lock lock(g_mutex);
+    // The value reserved by this frame's snapshot (0 = no snapshot this
+    // frame: isolation inactive or the fallback path ran). The worker waits
+    // on the fence reaching it; per-pass renderers have already signaled it
+    // mid-frame, single-CL-per-frame renderers signal it at present-time
+    // submission - exactly today's ordering in that case.
+    return g_lastWorldSignalValue;
+}
+
 void Reset()
 {
     std::scoped_lock lock(g_mutex);
     for (auto& slot : g_slots)
         ReleaseSlot(slot);
+    g_worldFence = nullptr;
+    g_pendingWorldSignalCount = 0;
+    g_worldFenceValue = 0;
+    g_lastWorldSignalValue = 0;
 }
 } // namespace Kcd2HudIsolation

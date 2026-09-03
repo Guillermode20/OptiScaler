@@ -308,7 +308,8 @@ class ReprojectionTests(unittest.TestCase):
         shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
         dispatch = source.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
             "bool AReproj_Dx12::DispatchWarp", 1)[0]
-        self.assertIn("packet.ui, packet.uiState", dispatch)
+        # UI comes from the newest completed UI packet (own or the held previous).
+        self.assertIn("uiPacket.ui, uiPacket.uiState", dispatch)
         self.assertNotIn("_presentQueue->Wait(_computeFence", dispatch)
         self.assertNotIn("_renderUI->Dispatch", dispatch)
         self.assertIn("Texture2D<float4> UI : register(t1)", shader)
@@ -465,6 +466,67 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("packet.handoffFence", present)
         self.assertIn("packet.handoffFenceValue", present)
         self.assertIn("SubmitReprojectionBuffer(virtualBufferIndex, handoffFence", present)
+
+    def test_capture_warp_gate_is_color_copy_with_trailing_ui(self):
+        # Latency pass: the warp gate is the color copy (colorFenceValue,
+        # signaled first, optionally gated on the mid-frame world fence); the
+        # UI copy trails on the present-time input fence. Selection requires
+        # SOME complete UI (own or the held previous anchor's) so a
+        # half-copied UI is never composited.
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
+            "bool AReproj_Dx12::DisplayPacket(", 1)[0]
+        worker = source.split("void AReproj_Dx12::ProcessCapturePacket", 1)[1].split(
+            "void AReproj_Dx12::StopCaptureWorker", 1)[0]
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        self.assertIn("packet.colorFenceValue = ++_captureFenceValue", capture)
+        self.assertIn("packet.worldFenceValue = Kcd2HudIsolation::TakeWorldSignalValue", capture)
+        self.assertIn("captureViaWorker ? packet.colorFenceValue : packet.captureFenceValue", capture)
+        self.assertIn("PHASE 1 - world (color) copy", worker)
+        self.assertIn("PHASE 2 - UI copy", worker)
+        self.assertIn("_captureQueue->Wait(_worldFence, packet.worldFenceValue)", worker)
+        # The composed-backbuffer fallback must stay on the present gate even
+        # when a world fence fired (its final composite is frame-late).
+        self.assertIn("packet.captureSrcColor != packet.captureSrcComposed", worker)
+        self.assertIn("colorComplete", presenter)
+        self.assertIn("ownUiComplete", presenter)
+        self.assertIn("_heldPacketIndex", presenter)
+
+    def test_swap_blend_and_ui_borrow_hold_previous_anchor(self):
+        root = Path(__file__).resolve().parents[2]
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        dispatch = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8").split(
+            "bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split("bool AReproj_Dx12::DispatchWarp", 1)[0]
+        shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
+        common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")
+        self.assertIn("_heldPacketIndex = activePacketIndex", presenter)
+        self.assertIn("prevPacketIndex = _heldPacketIndex", presenter)
+        self.assertIn("uiPacketIndex = _heldPacketIndex", presenter)
+        self.assertIn("constants.strength = blendSwap ? kSwapBlendFactor : 0.0f", dispatch)
+        self.assertIn("Texture2D<float4> PrevColor : register(t3)", shader)
+        self.assertIn("world = lerp(world, prevWarped, Strength)", shader)
+        self.assertIn("Texture2D<float4> PrevColor : register(t3)", common)
+        self.assertIn("_metricsUiBorrows", presenter)
+        log = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        self.assertIn("uiBorrow={}", log)
+
+    def test_midframe_world_fence_is_safe_without_perpass_submission(self):
+        # The world-completion signal rides on the CL-submit hook: on per-pass
+        # renderers it fires mid-frame; on single-CL-per-frame renderers the
+        # signal lands at present-time submission, which is exactly today's
+        # ordering. Markers are cleared per frame so a never-submitted CL
+        # cannot leave a dangling capture wait, and the signal rides the
+        # submitting queue so GPU ordering is guaranteed.
+        root = Path(__file__).resolve().parents[2]
+        isolation = (root / "OptiScaler/framegen/reproj/Kcd2HudIsolation.cpp").read_text(encoding="utf-8")
+        hook = (root / "OptiScaler/resource_tracking/ResTrack_dx12.cpp").read_text(encoding="utf-8")
+        self.assertIn("MarkWorldSnapshotCl(commandList)", isolation)
+        self.assertIn("OnWorldSnapshotSubmitted", hook)
+        self.assertIn("g_pendingWorldSignalCount = 0", isolation)
+        self.assertIn("queue->Signal(g_worldFence, g_pendingWorldSignals[j].value)", isolation)
+        self.assertIn("Kcd2HudIsolation::SetWorldSignalContext(_worldFence)",
+                      (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8"))
 
     def test_phase_fit_selects_input_window_that_explains_camera_motion(self):
         # Model the C++ through-origin least-squares score. Camera response is

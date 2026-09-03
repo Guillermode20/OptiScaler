@@ -34,6 +34,7 @@ cbuffer RP_Constants : register(b0)
 Texture2D<float4> LastColor : register(t0);
 Texture2D<float4> UI : register(t1);
 Texture2D<float> Depth : register(t2);
+Texture2D<float4> PrevColor : register(t3);
 RWTexture2D<float4> Output : register(u0);
 SamplerState Bilinear : register(s0);
 
@@ -67,6 +68,22 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     else
     {
         world = LastColor.Load(int3(dtid.xy, 0)).rgb;
+    }
+
+    // Swap-smooth blend: the first warp of a new anchor lerps the held
+    // previous anchor's warped color so the 60 Hz content swap does not snap.
+    // Strength carries the blend factor (unused by the rotation-only path;
+    // 0 disables). PrevColor mirrors LastColor's warp/edge handling.
+    if (Strength > 0.0f)
+    {
+        float3 prevWarped = PrevColor.Load(int3(dtid.xy, 0)).rgb;
+        if (coverage > 0.0f)
+        {
+            prevWarped = PrevColor.SampleLevel(Bilinear, sourceUv, 0).rgb;
+            if (coverage < 1.0f)
+                prevWarped = lerp(PrevColor.Load(int3(dtid.xy, 0)).rgb, prevWarped, coverage);
+        }
+        world = lerp(world, prevWarped, Strength);
     }
 
     bool saneDepthCfg = DepthSize.x > 0 && DepthSize.y > 0 && CameraNear > 0.0f && CameraFar > CameraNear &&

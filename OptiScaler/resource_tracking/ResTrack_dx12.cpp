@@ -707,6 +707,7 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
                 fg->SetCommandQueue(found[i], This);
             }
 
+            Kcd2HudIsolation::OnWorldSnapshotSubmitted(This, ppCommandLists, NumCommandLists);
             return;
         }
     }
@@ -714,6 +715,12 @@ void ResTrack_Dx12::hkExecuteCommandLists(ID3D12CommandQueue* This, UINT NumComm
     LOG_TRACK("Done NumCommandLists: {}", NumCommandLists);
 
     o_ExecuteCommandLists(This, NumCommandLists, ppCommandLists);
+
+    // Mid-frame world-completion signal: if one of the submitted CLs contains
+    // the KCD2 world snapshot, signal the world fence so the capture worker can
+    // copy the world while the game still finishes its frame. Safe on
+    // single-CL-per-frame renderers (fires at present-time submission).
+    Kcd2HudIsolation::OnWorldSnapshotSubmitted(This, ppCommandLists, NumCommandLists);
 }
 
 #pragma region Heap hooks

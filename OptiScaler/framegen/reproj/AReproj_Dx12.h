@@ -49,6 +49,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         uint32_t droppedAnchors = 0;
         uint32_t directCaptures = 0;
         uint32_t captureNotReady = 0;
+        uint32_t uiBorrows = 0; // slots that composited the previous anchor's UI
     };
 
   private:
@@ -76,6 +77,14 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     {
         UINT64 frameId = 0;
         UINT64 captureFenceValue = 0;
+        // Latency pass: the capture worker submits the world (color) copy first,
+        // gated on the mid-frame world fence when one fired (0 = fall back to
+        // the present gate), then the UI copy gated on the present-time input
+        // fence. colorFenceValue is the warp gate; captureFenceValue (signaled
+        // last) gates the UI copy and packet recycling. Values are reserved in
+        // order so colorFenceValue < captureFenceValue on the same fence.
+        UINT64 colorFenceValue = 0;
+        UINT64 worldFenceValue = 0;
         ID3D12Fence* handoffFence = nullptr; // non-owning; protects virtual-buffer reuse
         UINT64 handoffFenceValue = 0;
         UINT64 retirementFenceValue = 0;
@@ -114,6 +123,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool _syncHasUi[BUFFER_COUNT] = {};
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
     bool _forceBorderless = false;
+
+    // Swap-smooth blend factor applied to the FIRST warp of each new anchor
+    // (fraction of the held previous anchor's warped color). 0.0 = no blend.
+    static constexpr float kSwapBlendFactor = 0.25f;
 
     ReprojFramePacket _packets[BUFFER_COUNT];
     std::atomic<UINT64> _publishedFrameId { 0 };
@@ -163,6 +176,11 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     HANDLE _captureFenceEvent = nullptr;
     UINT64 _captureFenceValue = 0;
     UINT64 _captureAllocatorFenceValues[BUFFER_COUNT] = {};
+    // Mid-frame world-complete fence: signaled by the ResTrack command-list
+    // hook when the CL containing the KCD2 world snapshot is submitted, so the
+    // capture worker's color copy can start while the game still finishes its
+    // frame. 0 worldFenceValue on a packet = fall back to the present gate.
+    ID3D12Fence* _worldFence = nullptr;
 
     // Capture worker: performs the COPY-queue Wait/Execute/Signal + allocator
     // resets off the game's present thread. On Wine/VKD3D those queue ops cost
@@ -178,6 +196,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsDepthWarps = 0;
     float _metricsTxCmTotal = 0.0f;
     uint32_t _metricsTxSamples = 0;
+    uint32_t _metricsUiBorrows = 0; // slots that composited the held previous anchor's UI
+    int _heldPacketIndex = -1;      // previous anchor held one extra slot for UI borrow + swap blend
 
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
@@ -200,9 +220,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool EnqueueCapture(int packetIndex);
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
-    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
-                            uint32_t telemetryQueryStart = UINT32_MAX);
-    bool DisplayPacket(int packetIndex, bool composeUi, uint32_t telemetryQueryStart = UINT32_MAX);
+    bool DispatchPacketWarp(int packetIndex, int uiPacketIndex, int prevPacketIndex, float timeStep,
+                            double scanoutDeadlineMs = 0.0, uint32_t telemetryQueryStart = UINT32_MAX);
+    bool DisplayPacket(int packetIndex, bool composeUi, int uiPacketIndex = -1,
+                       uint32_t telemetryQueryStart = UINT32_MAX);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);

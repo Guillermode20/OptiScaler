@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.37 (2026-09-03)
+* Reproj latency pass: capture worker now submits the world color copy gated on a mid-frame world fence (signaled when the CL containing the KCD2 world snapshot is submitted), UI copy gated on the present gate; presenter warps on color-ready and composites the newest completed UI (borrowing the previous anchor for the first slot); new-anchor slots blend the previous anchor's warped color (kSwapBlendFactor=0.25) so the 60 Hz content swap does not snap. Expected: capWait/uiBorrow down, poseAge down, first display of each anchor one slot earlier.
+
 ## v10.0.1.36 (2026-09-03)
 * Reproj: adaptive repeat-warp shed — repeated display slots blit instead of warp while the source cannot sustain its frame-rate cap or the game thread stalls behind the GPU, then full 120 Hz warps resume
 

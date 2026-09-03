@@ -13,6 +13,7 @@
 #include <nvapi/fakenvapi.h>
 #include <wrapped/wrapped_swapchain.h>
 #include <menu/input/input_system.h>
+#include <framegen/reproj/Kcd2HudIsolation.h>
 
 bool AReproj_Dx12::CreateAsyncPresenter()
 {
@@ -226,8 +227,10 @@ bool AReproj_Dx12::CreateAsyncPresenter()
             {
                 auto fr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureFence));
                 auto inputFr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureInputFence));
-                if (FAILED(fr) || FAILED(inputFr))
+                auto worldFr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_worldFence));
+                if (FAILED(fr) || FAILED(inputFr) || FAILED(worldFr))
                 {
+                    SAFE_RELEASE(_worldFence);
                     SAFE_RELEASE(_captureFence);
                     SAFE_RELEASE(_captureInputFence);
                     for (size_t i = 0; i < BUFFER_COUNT; ++i)
@@ -242,7 +245,13 @@ bool AReproj_Dx12::CreateAsyncPresenter()
                 {
                     _captureInputFence->SetName(L"Reproj_CaptureInputFence");
                     _captureFence->SetName(L"Reproj_CaptureFence");
+                    _worldFence->SetName(L"Reproj_WorldFence");
                     _captureFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+                    // The ResTrack command-list hook signals this fence when the
+                    // CL containing the KCD2 world snapshot is submitted, so the
+                    // capture worker's color copy starts while the game still
+                    // finishes its frame.
+                    Kcd2HudIsolation::SetWorldSignalContext(_worldFence);
                     LOG_INFO("Reproj: capture queue created ({})",
                              capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE");
                 }
@@ -313,6 +322,8 @@ void AReproj_Dx12::DestroyAsyncPresenter()
         CloseHandle(_captureFenceEvent);
         _captureFenceEvent = nullptr;
     }
+    Kcd2HudIsolation::SetWorldSignalContext(nullptr);
+    SAFE_RELEASE(_worldFence);
     SAFE_RELEASE(_captureInputFence);
     _captureInputFenceValue = 0;
     SAFE_RELEASE(_captureFence);
@@ -590,6 +601,8 @@ void AReproj_Dx12::PresenterMain()
     _lastStallSampleValue = -1.0f;
     _lastShedEvaluateMs = 0.0;
     _shedEngagedAtMs = 0.0;
+    _heldPacketIndex = -1;
+    _metricsUiBorrows = 0;
 
     while (!_stopPresenter.load())
     {
@@ -717,13 +730,28 @@ void AReproj_Dx12::PresenterMain()
                 // Only completed anchors are eligible. The presenter must never
                 // block its warp queue behind an unfinished capture: an
                 // incomplete packet stays READY and is reconsidered next slot.
+                // Latency pass: the warp gate is the color copy (signaled
+                // first); the UI copy trails. Selection requires SOME complete
+                // UI - the packet's own or the current anchor's (borrowed for
+                // the first slot) - so a half-copied UI is never composited.
                 auto& cand = _packets[i];
                 auto* captureFence = cand.completionFence != nullptr ? cand.completionFence : _uiFence;
                 const auto captureValue =
                     cand.completionFence != nullptr ? cand.completionFenceValue : cand.captureFenceValue;
-                const bool complete =
+                const bool colorComplete =
                     captureValue == 0 || captureFence == nullptr || captureFence->GetCompletedValue() >= captureValue;
-                if (complete && _packets[i].frameId > newestFrame)
+                const bool ownUiComplete =
+                    cand.captureFenceValue == 0 || captureFence == nullptr ||
+                    captureFence->GetCompletedValue() >= cand.captureFenceValue;
+                bool uiComplete = ownUiComplete;
+                if (!uiComplete && activePacketIndex >= 0)
+                {
+                    const auto& prev = _packets[activePacketIndex];
+                    auto* prevFence = prev.completionFence != nullptr ? prev.completionFence : _uiFence;
+                    uiComplete = prev.captureFenceValue == 0 || prevFence == nullptr ||
+                                 prevFence->GetCompletedValue() >= prev.captureFenceValue;
+                }
+                if (colorComplete && uiComplete && _packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
                     newestPacketIndex = i;
@@ -731,6 +759,11 @@ void AReproj_Dx12::PresenterMain()
             }
         }
 
+        // The previous anchor stays Presenting until the NEXT new-anchor
+        // switch (or loop exit): its UI (composited while the new anchor's own
+        // UI copy trails) and its color (swap-blend source) are needed by the
+        // first slot of the new anchor. Tracked in _heldPacketIndex so every
+        // early exit path (occlusion, failure, stop) still retires it.
         bool newAnchor = false;
         // A claimed packet is complete by construction above.
         if (newestPacketIndex >= 0)
@@ -743,8 +776,13 @@ void AReproj_Dx12::PresenterMain()
                 // immutable until retirement, so the warp queue needs no
                 // additional ordering against the game DIRECT queue.
                 auto& newest = _packets[newestPacketIndex];
+                if (_heldPacketIndex >= 0)
+                {
+                    _packets[_heldPacketIndex].state.store(PacketState::Retired);
+                    _heldPacketIndex = -1;
+                }
                 if (activePacketIndex >= 0)
-                    _packets[activePacketIndex].state.store(PacketState::Retired);
+                    _heldPacketIndex = activePacketIndex; // held for the borrow/blend
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
@@ -825,9 +863,28 @@ void AReproj_Dx12::PresenterMain()
             !_repeatWarpShed.load(std::memory_order_relaxed);
         const bool shouldWarp =
             packet.warpAllowed && !focusLost && (newContent || repeatWarp);
+        // Latency pass: composite the newest completed UI. The new anchor's own
+        // UI copy trails its color copy by a few ms, so the first display of a
+        // new anchor borrows the held previous anchor's UI (16 ms stale is
+        // invisible on HUD elements). Swap-smooth blend piggybacks on the same
+        // hold: the first warp of a new anchor lerps the previous anchor's
+        // warped color so the 60 Hz content swap does not snap.
+        int uiPacketIndex = activePacketIndex;
+        int prevPacketIndex = -1;
+        if (newContent)
+        {
+            auto* uiFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
+            const bool ownUiReady = packet.captureFenceValue == 0 || uiFence == nullptr ||
+                                    uiFence->GetCompletedValue() >= packet.captureFenceValue;
+            if (!ownUiReady && _heldPacketIndex >= 0)
+                uiPacketIndex = _heldPacketIndex;
+            if (_heldPacketIndex >= 0 && _heldPacketIndex != activePacketIndex)
+                prevPacketIndex = _heldPacketIndex;
+        }
         const bool dispatched = shouldWarp
-                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
-                                    : DisplayPacket(activePacketIndex, true, queryStart);
+                                    ? DispatchPacketWarp(activePacketIndex, uiPacketIndex, prevPacketIndex, timeStep,
+                                                         targetDisplayMs, queryStart)
+                                    : DisplayPacket(activePacketIndex, true, uiPacketIndex, queryStart);
 
         if (!dispatched)
         {
@@ -864,6 +921,12 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
         RecordWarpFrame(true, false, poseAge);
+
+        {
+            std::scoped_lock metricsLock(_metricsMutex);
+            if (uiPacketIndex >= 0 && uiPacketIndex != activePacketIndex)
+                ++_metricsUiBorrows;
+        }
 
         constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;
         constexpr double WATCHDOG_WEDGE_MS = 2000.0;
@@ -902,6 +965,11 @@ void AReproj_Dx12::PresenterMain()
             nextDeadlineMs += refreshPeriodMs;
     }
 
+    if (_heldPacketIndex >= 0)
+    {
+        _packets[_heldPacketIndex].state.store(PacketState::Retired);
+        _heldPacketIndex = -1;
+    }
     if (activePacketIndex >= 0)
         _packets[activePacketIndex].state.store(PacketState::Retired);
 

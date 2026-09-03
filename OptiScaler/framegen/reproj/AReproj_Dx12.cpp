@@ -1179,6 +1179,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.completionFence = nullptr;
     packet.completionFenceValue = 0;
     packet.captureFenceValue = 0;
+    packet.colorFenceValue = 0;
+    packet.worldFenceValue = 0;
     if (_captureQueue != nullptr && _captureFence != nullptr)
     {
         // Prefer the dedicated capture queue (overlap). When the copy sources
@@ -1198,10 +1200,24 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             packet.captureSrcUiState = uiState;
             packet.captureSrcComposed = gameBackBuffer;
             packet.captureInputFenceValue = ++_captureInputFenceValue;
+            // Reserve both capture values in signal order: color (signaled
+            // first, gated on the mid-frame world fence when one fired) then
+            // UI (signaled last, gated on the present-time input fence). The
+            // warp gate is color; the UI copy + packet recycling use UI.
+            packet.colorFenceValue = ++_captureFenceValue;
             packet.captureFenceValue = ++_captureFenceValue;
+            packet.worldFenceValue = Kcd2HudIsolation::TakeWorldSignalValue(gameBackBuffer);
             if (_gameCommandQueue == nullptr || _captureInputFence == nullptr ||
                 FAILED(_gameCommandQueue->Signal(_captureInputFence, packet.captureInputFenceValue)))
                 return false;
+            // Fail-safe world gate: the CL-submit hook signals this value
+            // mid-frame on per-pass renderers; the present-time signal below
+            // guarantees the value completes by present-execution even if the
+            // marked CL never submits (the frame's snapshot CL always executes
+            // before this signal on the same queue, so the color copy can
+            // never read a half-written hudless texture).
+            if (packet.worldFenceValue != 0 && _worldFence != nullptr)
+                _gameCommandQueue->Signal(_worldFence, packet.worldFenceValue);
             usedCaptureQueue = true;
             ok = true;
         }
@@ -1524,7 +1540,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
         }
         packet.completionFence = _captureFence;
-        packet.completionFenceValue = packet.captureFenceValue;
+        // Worker path: the warp gate is the color copy (signaled first), the
+        // UI copy trails on the same fence timeline behind captureFenceValue.
+        // Inline path: color+UI are one submission, so the single value is the
+        // gate (colorFenceValue is 0 there and must not bypass the capture).
+        packet.completionFenceValue =
+            captureViaWorker ? packet.colorFenceValue : packet.captureFenceValue;
         // With separate HUD-less world/UI resources the COPY queue never reads
         // the virtual game backbuffer. When nonBlockingHandoff is enabled,
         // release the virtual backbuffer immediately without GPU wait.
@@ -1633,9 +1654,21 @@ void AReproj_Dx12::ProcessCapturePacket(int packetIndex)
         return;
     }
 
-    // Order the copies after the game's render CL for this anchor: the game
-    // thread enqueued the input-fence signal on its DIRECT queue at present.
-    if (FAILED(_captureQueue->Wait(_captureInputFence, packet.captureInputFenceValue)))
+    // PHASE 1 - world (color) copy. Gated on the mid-frame world fence when a
+    // snapshot CL was marked this frame AND the source is the isolated world
+    // texture (complete at world-end); the composed-backbuffer fallback must
+    // stay gated on the present-time input fence - its final composite is only
+    // complete once the game's frame CLs execute.
+    const bool worldGated = packet.worldFenceValue != 0 && packet.captureSrcColor != packet.captureSrcComposed;
+    if (worldGated)
+    {
+        if (_worldFence == nullptr || FAILED(_captureQueue->Wait(_worldFence, packet.worldFenceValue)))
+        {
+            FailCapturePacket(packetIndex);
+            return;
+        }
+    }
+    else if (FAILED(_captureQueue->Wait(_captureInputFence, packet.captureInputFenceValue)))
     {
         FailCapturePacket(packetIndex);
         return;
@@ -1658,8 +1691,42 @@ void AReproj_Dx12::ProcessCapturePacket(int packetIndex)
 
     bool ok = CopyPacketResource(capList, packet.captureSrcColor, packet.captureSrcColorState, &packet.color,
                                  packet.colorState, L"Reproj_PacketColor");
-    if (ok && packet.hasUi)
+    if (!ok || FAILED(capList->Close()))
     {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+    _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &capList);
+    _captureCommandListResetted[packetIndex] = false;
+    _captureAllocatorFenceValues[packetIndex] = packet.colorFenceValue;
+    if (FAILED(_captureQueue->Signal(_captureFence, packet.colorFenceValue)))
+    {
+        FailCapturePacket(packetIndex);
+        return;
+    }
+
+    // PHASE 2 - UI copy. Gated on the present-time input fence (the isolated UI
+    // is only complete once the game's frame CLs execute). The allocator reuse
+    // wait below doubles as the phase-1 completion wait: the color copy runs on
+    // the same COPY queue and finishes long before the present gate fires.
+    if (packet.hasUi)
+    {
+        if (!WaitForCaptureAllocator(packetIndex))
+        {
+            FailCapturePacket(packetIndex);
+            return;
+        }
+        capList = GetCaptureCommandList(packetIndex);
+        if (capList == nullptr)
+        {
+            FailCapturePacket(packetIndex);
+            return;
+        }
+        if (FAILED(_captureQueue->Wait(_captureInputFence, packet.captureInputFenceValue)))
+        {
+            FailCapturePacket(packetIndex);
+            return;
+        }
         packet.hasUi = CopyPacketResource(capList, packet.captureSrcUi, packet.captureSrcUiState, &packet.ui,
                                           packet.uiState, L"Reproj_PacketUI");
         if (!packet.hasUi)
@@ -1668,26 +1735,19 @@ void AReproj_Dx12::ProcessCapturePacket(int packetIndex)
             ok = CopyPacketResource(capList, packet.captureSrcComposed, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
                                     packet.colorState, L"Reproj_PacketColor");
         }
-    }
-    if (!ok)
-    {
-        FailCapturePacket(packetIndex);
-        return;
-    }
-
-    if (FAILED(capList->Close()))
-    {
-        LOG_ERROR("Reproj: capture list Close error slot {}", packetIndex);
-        FailCapturePacket(packetIndex);
-        return;
-    }
-    _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &capList);
-    _captureCommandListResetted[packetIndex] = false;
-    _captureAllocatorFenceValues[packetIndex] = packet.captureFenceValue;
-    if (FAILED(_captureQueue->Signal(_captureFence, packet.captureFenceValue)))
-    {
-        FailCapturePacket(packetIndex);
-        return;
+        if (!ok || FAILED(capList->Close()))
+        {
+            FailCapturePacket(packetIndex);
+            return;
+        }
+        _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &capList);
+        _captureCommandListResetted[packetIndex] = false;
+        _captureAllocatorFenceValues[packetIndex] = packet.captureFenceValue;
+        if (FAILED(_captureQueue->Signal(_captureFence, packet.captureFenceValue)))
+        {
+            FailCapturePacket(packetIndex);
+            return;
+        }
     }
 
     // Publish Capturing -> Ready. The game thread may have abandoned the packet
@@ -1713,11 +1773,12 @@ void AReproj_Dx12::StopCaptureWorker()
         _captureThread.join();
 }
 
-bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telemetryQueryStart)
+bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIndex, uint32_t telemetryQueryStart)
 {
     auto& packet = _packets[packetIndex];
     if (_swapChain == nullptr || packet.color == nullptr)
         return false;
+    auto& uiPacket = _packets[uiPacketIndex >= 0 && uiPacketIndex < BUFFER_COUNT ? uiPacketIndex : packetIndex];
 
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
@@ -1786,7 +1847,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
     }
     backBuffer->Release();
 
-    const bool composeUiNow = composeUi && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit();
+    const bool composeUiNow = composeUi && uiPacket.hasUi && _renderUI != nullptr && _renderUI->IsInit();
 
     if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
         queryStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
@@ -1797,7 +1858,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
     }
 
     if (composeUiNow)
-        _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
+        _renderUI->Dispatch(realSwapChain, cmdList, uiPacket.ui, uiPacket.uiState);
     if (!SubmitSCCommandList(outputIndex))
         return false;
 
@@ -1813,14 +1874,19 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
     return true;
 }
 
-bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs,
-                                      uint32_t telemetryQueryStart)
+bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int prevPacketIndex, float timeStep,
+                                      double scanoutDeadlineMs, uint32_t telemetryQueryStart)
 {
     auto& packet = _packets[packetIndex];
     auto& content = static_cast<ContentFrame&>(packet);
     if (_swapChain == nullptr || _warp == nullptr || !_warp->IsInit() || content.color == nullptr ||
         !packet.warpAllowed)
         return false;
+    // UI comes from the newest completed UI packet (borrowed from the held
+    // previous anchor when this anchor's own UI copy still trails); the blend
+    // source is the held previous anchor's color.
+    auto& uiPacket = _packets[uiPacketIndex >= 0 && uiPacketIndex < BUFFER_COUNT ? uiPacketIndex : packetIndex];
+    auto& prevPacket = _packets[prevPacketIndex >= 0 && prevPacketIndex < BUFFER_COUNT ? prevPacketIndex : packetIndex];
 
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
@@ -1869,6 +1935,11 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = content.constants;
     constants.timeStep = timeStep;
+    // Swap-smooth blend: the first warp of a new anchor lerps the held
+    // previous anchor's warped color (strength is unused by the rotation-only
+    // mode-2 path, so it carries the blend factor; 0 = no blend).
+    const bool blendSwap = prevPacketIndex >= 0 && prevPacketIndex != packetIndex && prevPacket.color != nullptr;
+    constants.strength = blendSwap ? kSwapBlendFactor : 0.0f;
     // The independent COMPUTE queue can safely wait for a CPU fence without
     // being serialized behind KCD2's DIRECT queue. Sample at scanout instead
     // of four milliseconds early; DIRECT fallback stays immediate.
@@ -1878,9 +1949,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         if (!ApplyLateInput(constants, packet))
             PrepareRotationConstants(constants, false);
     }
-    const bool ok =
-        _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants, outputIndex,
-                        deferredLateLatch, packet.ui, packet.uiState, packet.depth, packet.depthState);
+    const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
+                                    outputIndex, deferredLateLatch, uiPacket.ui, uiPacket.uiState, packet.depth,
+                                    packet.depthState, blendSwap ? prevPacket.color : nullptr,
+                                    blendSwap ? prevPacket.colorState : D3D12_RESOURCE_STATE_COMMON);
     if (!ok)
     {
         backBuffer->Release();
@@ -2156,6 +2228,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.droppedAnchors = _metricsSkippedAnchorSamples;
     _runtimeMetrics.directCaptures = _metricsDirectCaptures;
     _runtimeMetrics.captureNotReady = _metricsCaptureNotReady;
+    _runtimeMetrics.uiBorrows = _metricsUiBorrows;
     _runtimeMetrics.repeatWarpShed = _repeatWarpShed.load(std::memory_order_relaxed);
     _runtimeMetrics.stallEmaMs = static_cast<float>(_stallEmaMs.load(std::memory_order_relaxed));
     // block/pace report the worst game-thread cost in the one-second window.
@@ -2177,14 +2250,14 @@ void AReproj_Dx12::LogMetricsIfDue()
         _metricsLateCamAgeSamples > 0 ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples : 0.0;
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} latch={}/{}/{} lateAge={:.1f}ms "
-             "sensX={:.7f} hold={} shed={} stallEma={:.1f}ms ({}, block={:.2f}ms pace={:.2f}ms)",
+             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} uiBorrow={} latch={}/{}/{} "
+             "lateAge={:.1f}ms sensX={:.7f} hold={} shed={} stallEma={:.1f}ms ({}, block={:.2f}ms pace={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
-             _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, _metricsLateCamHits,
-             _metricsPacketBaseHits, _metricsLateFallbacks, lateCamAge,
+             _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, _metricsUiBorrows,
+             _metricsLateCamHits, _metricsPacketBaseHits, _metricsLateFallbacks, lateCamAge,
              _trackedMouseSensitivityX.load(std::memory_order_relaxed), _metricsHitchHolds,
              _repeatWarpShed.load(std::memory_order_relaxed), _stallEmaMs.load(std::memory_order_relaxed), presenter,
              _runtimeMetrics.gamePresentBlockMs, _runtimeMetrics.gamePresentPaceMs);
@@ -2208,6 +2281,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsLateCamAgeSamples = 0;
     _metricsHudComposites = 0;
     _metricsDirectCaptures = 0;
+    _metricsUiBorrows = 0;
     _metricsCaptureNotReady = 0;
     _metricsHitchHolds = 0;
     _metricsLateInputMaxDegrees = 0.0f;

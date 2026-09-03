@@ -13,7 +13,8 @@
 // Async camera warp pass. The isolated UI is composited in the
 // same compute dispatch so the presenter never has to cross back to DIRECT.
 // Mode 1 samples an anchor depth texture to correct translation parallax.
-// Root signature: 3 SRVs (color, ui, depth), 1 UAV, 1 CBV, 1 static bilinear-clamp sampler.
+// Root signature: 4 SRVs (color, ui, depth, prev color for swap blend),
+// 1 UAV, 1 CBV, 1 static bilinear-clamp sampler.
 class RP_Dx12 : public Shader_Dx12
 {
   private:
@@ -28,10 +29,14 @@ class RP_Dx12 : public Shader_Dx12
     // Warps `lastColor` forward to the fake-frame time and writes `output`.
     // Inputs are transitioned to NON_PIXEL_SHADER_RESOURCE; `output` is transitioned
     // from COPY_SOURCE to UNORDERED_ACCESS (the caller returns it to COPY_SOURCE).
+    // `prevColor` (optional) is the held previous anchor's color: when non-null,
+    // the shader blends it in by constants.strength (the swap-smooth factor).
     bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor, D3D12_RESOURCE_STATES lastColorState,
                   ID3D12Resource* output, RP_Constants& constants, int constantSlot = -1, bool deferConstants = false,
                   ID3D12Resource* ui = nullptr, D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON,
-                  ID3D12Resource* depth = nullptr, D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON);
+                  ID3D12Resource* depth = nullptr, D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON,
+                  ID3D12Resource* prevColor = nullptr,
+                  D3D12_RESOURCE_STATES prevColorState = D3D12_RESOURCE_STATE_COMMON);
 
     // Completes a deferred dispatch after the command list has been queued
     // behind a CPU-signaled fence. Each slot is immutable until its SC fence
