@@ -162,7 +162,7 @@ Healthy at 60 Hz source / 120 Hz display: source 59–60, display ≥ 117, `miss
 
 ### Current status
 
-- v10.0.1-pre19 (2026-09-03, `plans/async_capture_queue_decoupling.md`): capture moved to the game DIRECT queue with no per-anchor pin; presenter claims only completed anchors. KCD2 live test: large improvement over the ~90/90 FPS lockstep, but occasional residual judder — not yet perfectly smooth. Next diagnosis needs fresh `Reproj:` log lines from the same 2560x1440 spot (source/display/missed/interval p95/capWait/block/pace), then decide whether the cost is copy bandwidth (Phase 4 of the plan) or scheduling.
+- v10.0.1-pre19 (2026-09-03, `plans/async_capture_queue_decoupling.md`): capture moved to the game DIRECT queue with no per-anchor pin; presenter claims only completed anchors. KCD2 live test: large improvement over the ~90/90 FPS lockstep, but occasional residual judder — not yet perfectly smooth. NOTE: capping the source (`SourceFramerateLimit=60`) felt like a slight regression vs uncapped on this setup, so KCD2 currently runs uncapped; do not re-impose the cap without a live A/B. Next diagnosis needs fresh `Reproj:` log lines from the same 2560x1440 spot (source/display/missed/interval p95/capWait/block/pace).
 
 ## D3D12 base-class gotchas
 
