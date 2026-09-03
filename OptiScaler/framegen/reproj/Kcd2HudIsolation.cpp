@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Kcd2HudIsolation.h"
+#include "Config.h"
 #include "Logger.h"
 #include "State.h"
 
@@ -189,7 +190,8 @@ void ArmForFrame(int frameIndex)
 bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
                  D3D12_CPU_DESCRIPTOR_HANDLE* replacementRtv)
 {
-    if (commandList == nullptr || source == nullptr || replacementRtv == nullptr)
+    if (!Config::Instance()->ReprojHudIsolation.value_or_default() || commandList == nullptr || source == nullptr ||
+        replacementRtv == nullptr)
         return false;
 
     ID3D12Device* device = nullptr;
@@ -264,7 +266,7 @@ ID3D12Resource* GetHudlessColor(ID3D12Resource* backBuffer, D3D12_RESOURCE_STATE
 {
     if (state != nullptr)
         *state = D3D12_RESOURCE_STATE_COMMON;
-    if (backBuffer == nullptr)
+    if (!Config::Instance()->ReprojHudIsolation.value_or_default() || backBuffer == nullptr)
         return nullptr;
 
     std::scoped_lock lock(g_mutex);
@@ -286,7 +288,8 @@ ID3D12Resource* GetHudlessColor(int frameIndex, D3D12_RESOURCE_STATES* state)
 {
     if (state != nullptr)
         *state = D3D12_RESOURCE_STATE_COMMON;
-    if (frameIndex < 0 || frameIndex >= (int) g_slots.size())
+    if (!Config::Instance()->ReprojHudIsolation.value_or_default() || frameIndex < 0 ||
+        frameIndex >= (int) g_slots.size())
         return nullptr;
 
     std::scoped_lock lock(g_mutex);
@@ -304,7 +307,7 @@ ID3D12Resource* GetUIColor(ID3D12Resource* backBuffer, D3D12_RESOURCE_STATES* st
 {
     if (state != nullptr)
         *state = D3D12_RESOURCE_STATE_COMMON;
-    if (backBuffer == nullptr)
+    if (!Config::Instance()->ReprojHudIsolation.value_or_default() || backBuffer == nullptr)
         return nullptr;
 
     std::scoped_lock lock(g_mutex);
@@ -326,7 +329,8 @@ ID3D12Resource* GetUIColor(int frameIndex, D3D12_RESOURCE_STATES* state)
 {
     if (state != nullptr)
         *state = D3D12_RESOURCE_STATE_COMMON;
-    if (frameIndex < 0 || frameIndex >= (int) g_slots.size())
+    if (!Config::Instance()->ReprojHudIsolation.value_or_default() || frameIndex < 0 ||
+        frameIndex >= (int) g_slots.size())
         return nullptr;
 
     std::scoped_lock lock(g_mutex);

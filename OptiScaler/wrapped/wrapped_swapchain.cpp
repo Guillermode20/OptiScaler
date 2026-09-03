@@ -578,16 +578,23 @@ HRESULT WrappedIDXGISwapChain4::GetReprojectionBuffer(UINT index, REFIID riid, v
 HRESULT WrappedIDXGISwapChain4::SubmitReprojectionBuffer(UINT index, ID3D12Fence* captureFence,
                                                          UINT64 captureFenceValue)
 {
-    if (captureFence == nullptr || captureFenceValue == 0)
-        return E_INVALIDARG;
     std::scoped_lock lock(_reprojectionMutex);
     if (_reprojectionShuttingDown || !_reprojectionVirtualized || index != _reprojectionIndex ||
         index >= _reprojectionBuffers.size() || _reprojectionBuffers[index].state != VirtualBufferState::Rendering)
         return DXGI_ERROR_INVALID_CALL;
     auto& entry = _reprojectionBuffers[index];
-    captureFence->AddRef();
-    entry.captureFence = captureFence;
-    entry.captureFenceValue = captureFenceValue;
+    SAFE_RELEASE(entry.captureFence);
+    if (captureFence != nullptr && captureFenceValue != 0)
+    {
+        captureFence->AddRef();
+        entry.captureFence = captureFence;
+        entry.captureFenceValue = captureFenceValue;
+    }
+    else
+    {
+        entry.captureFence = nullptr;
+        entry.captureFenceValue = 0;
+    }
     entry.state = VirtualBufferState::Capturing;
     return S_OK;
 }

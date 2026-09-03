@@ -242,7 +242,7 @@ class Config
     CustomOptional<bool> LogToNGX { false };
     CustomOptional<bool> OpenConsole { false };
     CustomOptional<bool> DebugWait { false }; // not in ini
-    CustomOptional<int> LogLevel { 2 }; // Information; trace/debug remain opt-in for profiling
+    CustomOptional<int> LogLevel { 2 };       // Information; trace/debug remain opt-in for profiling
     CustomOptional<std::wstring> LogFileName { L"OptiScaler.log" };
     CustomOptional<bool> LogSingleFile { true };
     CustomOptional<bool> LogAsync { false };
@@ -612,14 +612,26 @@ class Config
     // Async timewarp: a 60 Hz rendered world is camera-warped at display cadence,
     // then the unwarped HUD is composited. Keep this surface deliberately small.
     CustomOptional<bool> ReprojEnabled { true };
-    CustomOptional<float> ReprojTargetRefresh { 0.0f };        // 0 = active display refresh
+    CustomOptional<float> ReprojTargetRefresh { 0.0f };         // 0 = active display refresh
     CustomOptional<float> ReprojSourceFramerateLimit { 60.0f }; // pace only the virtualized game thread
-    CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
-    CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
-    CustomOptional<float> ReprojSmoothing { 0.25f };         // EMA filter on camera angular velocity (0=off)
-    CustomOptional<bool> ReprojDepthEnabled { false };         // depth-corrected translation for hills (mode 1) - disabled until depth validated
-    CustomOptional<float> ReprojBobDampen { 0.35f };            // vertical bob attenuation for walking (0-1, 1=off)
-    CustomOptional<float> ReprojDepthScale { 1.0f };            // debug scale for depth warp blend
+    CustomOptional<float> ReprojMouseSensitivityX { 0.0f };     // 0 = auto-tracked from rendered frames
+    CustomOptional<float> ReprojMouseSensitivityY { 0.0f };     // 0 = auto-tracked from rendered frames
+    CustomOptional<float> ReprojSmoothing { 0.25f };            // EMA filter on camera angular velocity (0=off)
+    CustomOptional<bool> ReprojDepthEnabled {
+        false
+    }; // depth-corrected translation for hills (mode 1) - disabled until depth validated
+    CustomOptional<float> ReprojBobDampen { 0.35f };  // vertical bob attenuation for walking (0-1, 1=off)
+    CustomOptional<float> ReprojDepthScale { 1.0f };  // debug scale for depth warp blend
+    CustomOptional<bool> ReprojHudIsolation { true }; // separate Scaleform HUD from 3D world (KCD2)
+    CustomOptional<bool> ReprojAllowComposedWarp {
+        false
+    }; // allow timewarping composed frame if HUD isolation is off/unavailable
+    CustomOptional<float> ReprojLateSampleLead {
+        4.0f
+    }; // ms before present deadline to release late-latch compute warp
+    CustomOptional<bool> ReprojNonBlockingHandoff {
+        true
+    }; // release virtual backbuffer without GPU wait when HUD isolation active
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

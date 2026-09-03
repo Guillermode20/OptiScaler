@@ -1457,15 +1457,17 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.inputLatchReady = true;
     if (kcd2CameraTimestamp <= 0.0)
         UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
-    // Never warp a composed frame. Timewarp is valid only when a camera pose,
-    // HUD-less world, and separately composited UI are all available.
-    packet.warpAllowed = warpAllowed && packet.hasCamera && packet.hasUi;
+    // Never warp a composed frame unless explicitly enabled in config.
+    // Timewarp is intended for when a camera pose, HUD-less world, and separately composited UI are all available.
+    const bool allowComposed = Config::Instance()->ReprojAllowComposedWarp.value_or_default();
+    packet.warpAllowed = warpAllowed && packet.hasCamera && (packet.hasUi || allowComposed);
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
     packet.sourcePoseTimestamp = sourceTimestamp;
     packet.syncInterval = FGHooks::LastPresentSyncInterval();
     packet.presentFlags = FGHooks::LastPresentFlags();
 
+    const bool nonBlockingHandoff = Config::Instance()->ReprojNonBlockingHandoff.value_or_default();
     bool submitted = false;
     if (usedCaptureQueue)
     {
@@ -1474,11 +1476,19 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.completionFence = _captureFence;
         packet.completionFenceValue = packet.captureFenceValue;
         // With separate HUD-less world/UI resources the COPY queue never reads
-        // the virtual game backbuffer. Return it once its DIRECT producer is
-        // done; packet eligibility still waits for the full COPY completion.
-        // The composed fallback reads the virtual buffer and keeps that stricter fence.
-        packet.handoffFence = packet.hasUi ? _captureInputFence : _captureFence;
-        packet.handoffFenceValue = packet.hasUi ? gameReadyFenceValue : packet.captureFenceValue;
+        // the virtual game backbuffer. When nonBlockingHandoff is enabled,
+        // release the virtual backbuffer immediately without GPU wait.
+        // The composed fallback reads the virtual buffer and keeps the capture fence.
+        if (packet.hasUi && nonBlockingHandoff)
+        {
+            packet.handoffFence = nullptr;
+            packet.handoffFenceValue = 0;
+        }
+        else
+        {
+            packet.handoffFence = _captureFence;
+            packet.handoffFenceValue = packet.captureFenceValue;
+        }
         if (submitted && usingKcd2Isolation)
             Kcd2HudIsolation::MarkFrameCaptured(gameBackBuffer, kcd2Hudless, kcd2Ui, _captureFence,
                                                 packet.captureFenceValue);
@@ -1497,8 +1507,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
         packet.completionFence = _uiFence;
         packet.completionFenceValue = packet.captureFenceValue;
-        packet.handoffFence = _uiFence;
-        packet.handoffFenceValue = packet.captureFenceValue;
+        packet.handoffFence = (packet.hasUi && nonBlockingHandoff) ? nullptr : _uiFence;
+        packet.handoffFenceValue = (packet.hasUi && nonBlockingHandoff) ? 0 : packet.captureFenceValue;
         if (submitted)
         {
             std::scoped_lock lock(_metricsMutex);
@@ -1752,8 +1762,9 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // Leave enough time for the lightweight warp/composite/copy to finish
         // before Present while still sampling substantially later than the
         // normal four-millisecond dispatch wake.
-        constexpr double LATE_SAMPLE_LEAD_MS = 3.5;
-        WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
+        const double lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
+        const double lateLeadMs = lateLeadCfg > 0.5 ? lateLeadCfg : 4.0;
+        WaitForPresenterDeadline(scanoutDeadlineMs - lateLeadMs);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, packet))

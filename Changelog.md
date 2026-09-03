@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.32 (2026-09-03)
+* Fix game thread CPU stall via non-blocking virtual buffer handoff, tune late-latch lead, and add HudIsolation/AllowComposedWarp/LateSampleLead config
+
 ## v10.0.1.31 (2026-09-03)
 * Decouple async timewarp from the game queue and fence KCD2 pose/HUD capture
 

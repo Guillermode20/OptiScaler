@@ -219,7 +219,7 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket", 1)[0]
-        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && packet.hasUi", capture)
+        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && (packet.hasUi || allowComposed);", capture)
         self.assertNotIn("CopyPacketResource(cmdList, velocity", capture)
         self.assertIn("packet.constants.mode = 2", capture)
 
@@ -241,7 +241,7 @@ class ReprojectionTests(unittest.TestCase):
         dispatch = source.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
             "bool AReproj_Dx12::DispatchWarp", 1)[0]
         self.assertIn("deferredLateLatch = useCompute && _lateLatchFence != nullptr", dispatch)
-        self.assertIn("WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS)", dispatch)
+        self.assertIn("WaitForPresenterDeadline(scanoutDeadlineMs - lateLeadMs)", dispatch)
         self.assertNotIn("_gameCommandQueue->Wait(_computeFence", dispatch)
         self.assertIn("WaitForComputeAllocator(outputIndex)", dispatch)
         self.assertGreaterEqual(dispatch.count("PrepareRotationConstants("), 2)
@@ -365,8 +365,8 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("packet.completionFence = _captureFence", capture)
         # DIRECT fallback path is verbatim when compute capture is unavailable.
         self.assertIn("packet.completionFence = _uiFence", capture)
-        # The composed-HUD invariant survives the move: no warped composed frame.
-        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && packet.hasUi", capture)
+        # The composed-HUD check: only warp with UI unless AllowComposedWarp is enabled.
+        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && (packet.hasUi || allowComposed);", capture)
         retire = source.split("void AReproj_Dx12::RetirePackets()", 1)[1].split(
             "uint32_t AReproj_Dx12::PacketQueueDepth()", 1)[0]
         self.assertIn("packet.completionFence", retire)
@@ -381,8 +381,8 @@ class ReprojectionTests(unittest.TestCase):
             "bool AReproj_Dx12::DisplayPacket(", 1)[0]
         present = source.split("bool AReproj_Dx12::Present()", 1)[1].split(
             "void AReproj_Dx12::Activate", 1)[0]
-        self.assertIn("packet.hasUi ? _captureInputFence : _captureFence", capture)
-        self.assertIn("packet.hasUi ? gameReadyFenceValue : packet.captureFenceValue", capture)
+        self.assertIn("packet.hasUi && nonBlockingHandoff", capture)
+        self.assertIn("packet.handoffFence = nullptr", capture)
         self.assertIn("packet.handoffFence", present)
         self.assertIn("packet.handoffFenceValue", present)
         self.assertIn("SubmitReprojectionBuffer(virtualBufferIndex, handoffFence", present)
