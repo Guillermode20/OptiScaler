@@ -711,9 +711,8 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
     const auto sourceX = ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward);
     const auto sourceY = ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward);
     const auto sourceZ = ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward);
-    // Mode reaches here as 2 (camera) or 0 (no camera: FillConstants left raw
-    // prev rows in place, which no dispatch consumes).
-    if (constants.mode != 2)
+    // Mode reaches here as 2 (rotation) or 1 (depth+translation) or 0 (no camera)
+    if (constants.mode != 2 && constants.mode != 1)
         return;
     const float tanHalfFov = std::tan(constants.cameraVFov * 0.5f);
     const float focalX = constants.cameraAspect * tanHalfFov;
@@ -755,7 +754,7 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
 
 bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet)
 {
-    if (!packet.inputLatchReady || constants.mode != 2)
+    if (!packet.inputLatchReady || (constants.mode != 2 && constants.mode != 1))
         return false;
 
     ++_metricsLateInputSamples;
@@ -1386,7 +1385,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
         packet.completionFence = _captureFence;
         packet.completionFenceValue = packet.captureFenceValue;
-        if (submitted) { std::scoped_lock lock(_metricsMutex); ++_metricsCaptureDepth; if (packet.depth) ++_metricsDepthWarps; }
+        if (submitted) { std::scoped_lock lock(_metricsMutex); ++_metricsDirectCaptures; ++_metricsCaptureDepth; if (packet.depth) ++_metricsDepthWarps; }
     }
     else
     {

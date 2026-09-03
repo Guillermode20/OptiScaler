@@ -177,14 +177,9 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     // rendering instead of extending the game's frame. Falls back to game DIRECT.
     {
         D3D12_COMMAND_QUEUE_DESC capDesc {};
-        capDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+        capDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
         capDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         auto capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
-        if (FAILED(capRes))
-        {
-            capDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-            capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
-        }
         if (SUCCEEDED(capRes) && _captureQueue != nullptr)
         {
             _captureQueue->SetName(L"Reproj_CaptureQueue");

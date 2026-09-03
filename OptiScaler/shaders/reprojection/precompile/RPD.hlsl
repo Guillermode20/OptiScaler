@@ -77,8 +77,11 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
         int2 dpx = int2(min(max(sourceUv * float2(DepthSize), float2(0.0f, 0.0f)), float2(dmax)));
         float d = Depth.Load(int3(dpx, 0)).x;
         if (InvertedDepth != 0) d = 1.0f - d;
-        float denom = CameraNear + d * (CameraFar - CameraNear);
+        // 0=near,1=far after inversion - use Far - d*(Far-Near) so 0->Near 1->Far
+        float denom = CameraFar - d * (CameraFar - CameraNear);
         float viewZ = denom > 1.0e-6f ? CameraNear * CameraFar / denom : CameraFar;
+        // Skip skybox/far-plane (depth~1) to keep rotation homography
+        if (d > 0.999f) viewZ = CameraFar;
         float tanHalf = tan(CameraVFov * 0.5f);
         if (tanHalf > 1.0e-6f)
         {
