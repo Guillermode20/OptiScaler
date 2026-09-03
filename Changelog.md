@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.26 (2026-09-03)
+* Remove depth warp entirely (regressed feel, no tuning channel); back to rotation baseline with capture skip, wider ceiling, hitch hold
+
 ## v10.0.1.25 (2026-09-03)
 * Depth v2: continuous confidence blend instead of hard switch; DepthWarp visualize mode; default rotation until validated
 
