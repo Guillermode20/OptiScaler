@@ -113,13 +113,11 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("_realPeriodEmaMs", capture)
         self.assertIn("packet.frameDelta = _realPeriodEmaMs", capture)
 
-    def test_presenter_locks_to_measured_vblank_grid(self):
+    def test_presenter_uses_present_completion_clock(self):
         root = Path(__file__).resolve().parents[2]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        timing = (root / "OptiScaler/framegen/reproj/AReprojTiming.cpp").read_text(encoding="utf-8")
-        self.assertIn("GetFrameStatistics", timing)
-        self.assertIn("_displayClockAnchorMs", presenter)
-        self.assertIn("_measuredRefreshPeriodMs", presenter)
+        self.assertIn("nextDeadlineMs = presentedAt + refreshPeriodMs", presenter)
+        self.assertNotIn("SampleDisplayClock(", presenter)
 
     def test_presenter_uses_high_resolution_wait_for_final_timer_slice(self):
         # Wine/Proton can oversleep condition_variable::wait_for by most of a
@@ -131,6 +129,9 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("FrameLimit::sleepForPrecisePacingMs(chunk)", wait)
         self.assertIn("YieldProcessor", wait)
         self.assertNotIn("_presentCv.wait_for", wait)
+        # The precise pacing helper owns the spin tail. Reserving it again in
+        # WaitForPresenterDeadline creates tiny Wine timer sleeps that overshoot.
+        self.assertNotIn("remaining - spinWindowMs", wait)
         # Final spin window is 1.0ms on Proton for timer granularity, 0.2ms on Windows
         self.assertIn("spinWindowMs", wait)
         frame_limit = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
@@ -139,16 +140,24 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("200'000", presenter_sleep)
         self.assertIn("spinNs", presenter_sleep)
 
-    def test_vblank_lock_cannot_run_away_earlier(self):
-        # Per-slot bounds do not stop a sustained backwards walk when the grid
-        # phase estimate is biased early; only a cumulative budget does. Without
-        # it the deadline drifts far ahead of scanout and latency-1 presents
-        # block progressively until the pipeline wedges.
+    def test_completion_clock_cannot_run_away_from_present(self):
+        # Wine advances frame statistics per composed output, so the presenter
+        # must derive a fresh grid from Present completion rather than phase
+        # correcting against those statistics.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
-        self.assertIn("MAX_TOTAL_EARLY_CORRECTION_MS", presenter)
-        self.assertIn("totalEarlyCorrectionMs += appliedDeltaMs", presenter)
+        self.assertIn("nextDeadlineMs = presentedAt + refreshPeriodMs", presenter)
+        self.assertNotIn("totalEarlyCorrectionMs", presenter)
+
+    def test_occlusion_pauses_gpu_work_and_resets_cadence(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
+        self.assertIn("IsIconic(_hwnd)", presenter)
+        self.assertIn("_swapChain->Present(0, DXGI_PRESENT_TEST)", presenter)
+        self.assertIn("resetPresentationClock()", presenter)
+        self.assertIn("FrameLimit::sleepForMs(50.0)", presenter)
 
     def test_presenter_watchdog_downgrades_on_jammed_presents(self):
         # Present(1) is an unbounded blocking call; sustained jams or one
@@ -233,7 +242,8 @@ class ReprojectionTests(unittest.TestCase):
             "bool AReproj_Dx12::DispatchWarp", 1)[0]
         self.assertIn("deferredLateLatch = useCompute && _lateLatchFence != nullptr", dispatch)
         self.assertIn("WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS)", dispatch)
-        self.assertIn("useCompute && !WaitForComputeAllocator(outputIndex)", dispatch)
+        self.assertIn("_gameCommandQueue->Wait(_computeFence", dispatch)
+        self.assertNotIn("useCompute && !WaitForComputeAllocator(outputIndex)", dispatch)
         self.assertGreaterEqual(dispatch.count("PrepareRotationConstants("), 2)
         self.assertNotIn("PrepareRotationConstants(constants);", dispatch)
         self.assertNotIn("PrepareRotationConstants(lateConstants);", dispatch)
@@ -245,6 +255,8 @@ class ReprojectionTests(unittest.TestCase):
         sync_present = source.split("HRESULT AReproj_Dx12::PresentVirtualFrameSync", 1)[1].split(
             "bool AReproj_Dx12::IsCameraAllZero", 1)[0]
         self.assertNotIn('LOG_INFO("Reproj diag:', sync_present)
+        hooks = (root / "OptiScaler/hooks/FG_Hooks.cpp").read_text(encoding="utf-8")
+        self.assertNotIn('LOG_INFO("Reproj diag: FGPresent pre-activation', hooks)
 
     def test_kcd2_rotation_path_is_rigid_and_bounded(self):
         root = Path(__file__).resolve().parents[2]
@@ -262,9 +274,8 @@ class ReprojectionTests(unittest.TestCase):
         config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         self.assertNotIn("ReprojPresentCompletionClock", config)
-        self.assertIn("constexpr bool completionClock = true", presenter)
-        self.assertIn("if (!completionClock && SampleDisplayClock", presenter)
-        self.assertIn("if (completionClock || nextDeadlineMs <= 0.0)", presenter)
+        self.assertIn("nextDeadlineMs = presentedAt + refreshPeriodMs", presenter)
+        self.assertNotIn("SampleDisplayClock(", presenter)
         self.assertIn("maxUsableLeadMs", presenter)
         self.assertIn("std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs)", presenter)
 

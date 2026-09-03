@@ -194,19 +194,31 @@ bool AReproj_Dx12::CreateAsyncPresenter()
             for (size_t i = 0; i < BUFFER_COUNT; ++i)
             {
                 auto ctype = capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? D3D12_COMMAND_LIST_TYPE_COPY
-                                                                            : D3D12_COMMAND_LIST_TYPE_COMPUTE;
+                                                                          : D3D12_COMMAND_LIST_TYPE_COMPUTE;
                 auto ar = _device->CreateCommandAllocator(ctype, IID_PPV_ARGS(&_captureAllocator[i]));
-                if (FAILED(ar)) { capReady = false; break; }
+                if (FAILED(ar))
+                {
+                    capReady = false;
+                    break;
+                }
                 _captureAllocator[i]->SetName(std::format(L"Reproj_CaptureAllocator[{}]", i).c_str());
                 auto lr = _device->CreateCommandList(0, ctype, _captureAllocator[i], nullptr,
-                                                       IID_PPV_ARGS(&_captureCommandList[i]));
-                if (FAILED(lr)) { capReady = false; break; }
+                                                     IID_PPV_ARGS(&_captureCommandList[i]));
+                if (FAILED(lr))
+                {
+                    capReady = false;
+                    break;
+                }
                 _captureCommandList[i]->SetName(std::format(L"Reproj_CaptureList[{}]", i).c_str());
                 _captureCommandList[i]->Close();
             }
             if (!capReady)
             {
-                for (size_t i = 0; i < BUFFER_COUNT; ++i) { SAFE_RELEASE(_captureCommandList[i]); SAFE_RELEASE(_captureAllocator[i]); }
+                for (size_t i = 0; i < BUFFER_COUNT; ++i)
+                {
+                    SAFE_RELEASE(_captureCommandList[i]);
+                    SAFE_RELEASE(_captureAllocator[i]);
+                }
                 SAFE_RELEASE(_captureQueue);
                 LOG_WARN("Reproj: capture queue allocators failed, fallback to game DIRECT");
             }
@@ -215,7 +227,11 @@ bool AReproj_Dx12::CreateAsyncPresenter()
                 auto fr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureFence));
                 if (FAILED(fr))
                 {
-                    for (size_t i = 0; i < BUFFER_COUNT; ++i) { SAFE_RELEASE(_captureCommandList[i]); SAFE_RELEASE(_captureAllocator[i]); }
+                    for (size_t i = 0; i < BUFFER_COUNT; ++i)
+                    {
+                        SAFE_RELEASE(_captureCommandList[i]);
+                        SAFE_RELEASE(_captureAllocator[i]);
+                    }
                     SAFE_RELEASE(_captureQueue);
                     LOG_WARN("Reproj: capture fence failed, fallback to game DIRECT");
                 }
@@ -223,7 +239,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
                 {
                     _captureFence->SetName(L"Reproj_CaptureFence");
                     _captureFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                    LOG_INFO("Reproj: capture queue created ({})", capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE");
+                    LOG_INFO("Reproj: capture queue created ({})",
+                             capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE");
                 }
             }
         }
@@ -261,7 +278,9 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     }
 #endif
     LOG_INFO("Reproj: async presenter created (capture: {}, warp: {})",
-             _captureQueue != nullptr ? (_captureQueue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE") : "game DIRECT",
+             _captureQueue != nullptr
+                 ? (_captureQueue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE")
+                 : "game DIRECT",
              _computeQueue != nullptr ? "COMPUTE" : "DIRECT (fallback)");
     return true;
 }
@@ -273,7 +292,11 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     SAFE_RELEASE(_warpTimestampReadback);
     SAFE_RELEASE(_warpTimestampHeap);
     _presentTimestampFrequency = 0;
-    if (_captureFenceEvent) { CloseHandle(_captureFenceEvent); _captureFenceEvent = nullptr; }
+    if (_captureFenceEvent)
+    {
+        CloseHandle(_captureFenceEvent);
+        _captureFenceEvent = nullptr;
+    }
     SAFE_RELEASE(_captureFence);
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
@@ -430,7 +453,19 @@ void AReproj_Dx12::PresenterMain()
     UINT64 activeFrame = 0;
     double nextDeadlineMs = 0.0;
     uint32_t consecutiveJammedPresents = 0;
-    uint32_t consecutiveOccludedPresents = 0;
+    bool presenterOccluded = false;
+    uint32_t occlusionProbeCount = 0;
+
+    const auto resetPresentationClock = [&]
+    {
+        nextDeadlineMs = 0.0;
+        _dispatchLeadMs = 3.0;
+        std::scoped_lock metricsLock(_metricsMutex);
+        _lastDisplayPresentMs = 0.0;
+        _presentIntervalCount = 0;
+        _presentIntervalCursor = 0;
+        std::fill(_presentIntervals, _presentIntervals + _countof(_presentIntervals), 0.0);
+    };
 
     while (!_stopPresenter.load())
     {
@@ -458,6 +493,41 @@ void AReproj_Dx12::PresenterMain()
         // allocation, QPC sampling, or GPU timestamp queries here.
         _currentTelemetrySlot = nullptr;
 
+        // Once DXGI reports occlusion, stop recording/dispatching GPU work and
+        // use Present(TEST) as the visibility probe recommended by DXGI. Also
+        // enter this state proactively for a minimized window because Proton
+        // does not consistently return DXGI_STATUS_OCCLUDED on the first slot.
+        const bool minimized = _hwnd != NULL && IsIconic(_hwnd);
+        if (presenterOccluded || minimized)
+        {
+            if (!presenterOccluded)
+            {
+                presenterOccluded = true;
+                occlusionProbeCount = 0;
+                consecutiveJammedPresents = 0;
+                resetPresentationClock();
+                LOG_INFO("Reproj: window minimized, pausing presenter GPU work");
+            }
+
+            const auto visibilityResult = minimized ? DXGI_STATUS_OCCLUDED : _swapChain->Present(0, DXGI_PRESENT_TEST);
+            if (visibilityResult == DXGI_STATUS_OCCLUDED)
+            {
+                ++occlusionProbeCount;
+                FrameLimit::sleepForMs(50.0);
+                continue;
+            }
+            if (FAILED(visibilityResult))
+            {
+                LOG_ERROR("Reproj: occlusion visibility probe failed: {:X}", (UINT) visibilityResult);
+                _presenterState.store(PresenterState::Failed);
+                break;
+            }
+
+            LOG_INFO("Reproj: window visible again after {} occlusion probes", occlusionProbeCount);
+            presenterOccluded = false;
+            resetPresentationClock();
+        }
+
         if (nextDeadlineMs > 0.0)
         {
             const auto now = Util::MillisecondsNow();
@@ -466,8 +536,6 @@ void AReproj_Dx12::PresenterMain()
             {
                 const auto skipped = static_cast<uint32_t>(std::floor(lateness / refreshPeriodMs));
                 nextDeadlineMs += skipped * refreshPeriodMs;
-                std::scoped_lock metricsLock(_metricsMutex);
-                _metricsMissedDisplaySlots += skipped;
             }
 
             const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
@@ -491,14 +559,9 @@ void AReproj_Dx12::PresenterMain()
         if (slotResult != S_OK)
         {
             if (slotResult != DXGI_ERROR_WAS_STILL_DRAWING)
-            {
                 _presenterState.store(PresenterState::Failed);
-            }
-            else
-            {
-                std::scoped_lock metricsLock(_metricsMutex);
-                ++_metricsMissedDisplaySlots;
-            }
+            // A later successful-present interval accounts for a timed-out
+            // slot; counting here too would double the reported miss rate.
             if (nextDeadlineMs > 0.0)
                 nextDeadlineMs += refreshPeriodMs;
             continue;
@@ -534,8 +597,8 @@ void AReproj_Dx12::PresenterMain()
                 auto* captureFence = cand.completionFence != nullptr ? cand.completionFence : _uiFence;
                 const auto captureValue =
                     cand.completionFence != nullptr ? cand.completionFenceValue : cand.captureFenceValue;
-                const bool complete = captureValue == 0 || captureFence == nullptr ||
-                                      captureFence->GetCompletedValue() >= captureValue;
+                const bool complete =
+                    captureValue == 0 || captureFence == nullptr || captureFence->GetCompletedValue() >= captureValue;
                 if (complete && _packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
@@ -606,8 +669,7 @@ void AReproj_Dx12::PresenterMain()
         constexpr float maxTimeStep = 2.5f;
         // Bare-bones warp step: anchor age / represented period, clamped only by
         // the absolute extrapolation cap. No velocity limiting.
-        const auto unclampedStep =
-            static_cast<float>(anchorAgeMs / realPeriodMs);
+        const auto unclampedStep = static_cast<float>(anchorAgeMs / realPeriodMs);
         // Hitch hold: the game stopped publishing (streaming stall), so velocity
         // extrapolation would dead-reckon far past the last known pose and snap
         // back when publishing resumes. Hold the anchor's own pose instead.
@@ -616,8 +678,7 @@ void AReproj_Dx12::PresenterMain()
         // publishes with lagging captures keep normal extrapolation.
         const double publishAgeMs = std::max(0.0, targetDisplayMs - newestReadyRenderMs);
         constexpr float HITCH_HOLD_PERIODS = 2.5f;
-        const bool hitchHold = newestReadyRenderMs > 0.0 &&
-                               publishAgeMs > HITCH_HOLD_PERIODS * realPeriodMs;
+        const bool hitchHold = newestReadyRenderMs > 0.0 && publishAgeMs > HITCH_HOLD_PERIODS * realPeriodMs;
         auto timeStep = hitchHold ? 0.0f : std::clamp(unclampedStep, 0.0f, maxTimeStep);
         if (hitchHold)
         {
@@ -645,30 +706,18 @@ void AReproj_Dx12::PresenterMain()
         const auto presentDurationMs = presentedAt - presentCallStartMs;
         const auto poseAge = static_cast<float>(std::max(0.0, targetDisplayMs - selectedContent->sourcePoseTimestamp));
         const bool occluded = result == DXGI_STATUS_OCCLUDED;
-        // Occlusion is invisible-but-successful: count the frame, back off the
-        // cadence, and restart the deadline grid so the return to visible
-        // doesn't burst-count missed slots or jump timeStep.
+        // Occlusion is invisible-but-successful: do not count it as a displayed
+        // output. Enter the visibility-probe state and restart the deadline grid
+        // so returning does not burst-count missed slots or jump timeStep.
         if (occluded)
         {
-            RecordWarpFrame(true, false, poseAge);
-            if (++consecutiveOccludedPresents == 1)
-                LOG_INFO("Reproj: window occluded, backing off presenter cadence");
+            presenterOccluded = true;
+            occlusionProbeCount = 0;
             consecutiveJammedPresents = 0;
-            nextDeadlineMs = 0.0;
-            // Keep the interval tracker current while invisible so the return
-            // to visible doesn't burst-count the whole occluded span as missed.
-            {
-                std::scoped_lock metricsLock(_metricsMutex);
-                _lastDisplayPresentMs = presentedAt;
-            }
+            resetPresentationClock();
+            LOG_INFO("Reproj: window occluded, pausing presenter GPU work");
             FrameLimit::sleepForMs(50.0);
             continue;
-        }
-        if (consecutiveOccludedPresents > 0)
-        {
-            LOG_INFO("Reproj: window visible again after {} occluded slots", consecutiveOccludedPresents);
-            consecutiveOccludedPresents = 0;
-            nextDeadlineMs = 0.0;
         }
 
         if (FAILED(result))

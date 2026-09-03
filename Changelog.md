@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.28 (2026-09-03)
+* Stabilize async reprojection pacing and alt-tab recovery
+
 ## v10.0.1.27 (2026-09-03)
 * Async reproj efficiency + tab in/out: occlusion backoff, explicit cross-queue ordering, COPY-first capture, depth copies skipped unless enabled, DIRECT-only unwarped blits, symmetric lead control, dead per-slot telemetry stripped
 

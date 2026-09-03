@@ -89,7 +89,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         std::atomic<PacketState> state { PacketState::Free };
     };
 
-    std::unique_ptr<RP_Dx12> _warp; // the reprojection pass (v1/v2 PSOs)
+    std::unique_ptr<RP_Dx12> _warp;                // the reprojection pass (v1/v2 PSOs)
     ID3D12Resource* _lastColor[BUFFER_COUNT] = {}; // copy of the last presented real frame
     D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
     ID3D12Resource* _uiColor[BUFFER_COUNT] = {}; // sync-path UI capture composited after warping
@@ -232,6 +232,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsCaptureNotReady = 0;
     uint32_t _metricsHitchHolds = 0; // slots held at timeStep 0 during a publish stall
     float _metricsLateInputMaxDegrees = 0.0f;
+    float _metricsGamePresentBlockMaxMs = 0.0f;
+    float _metricsGamePresentPaceMaxMs = 0.0f;
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;

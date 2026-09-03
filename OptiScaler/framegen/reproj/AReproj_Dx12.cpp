@@ -26,10 +26,7 @@
 
 #include <magic_enum.hpp>
 
-const char* AReproj_Dx12::Name()
-{
-    return "Async Timewarp";
-}
+const char* AReproj_Dx12::Name() { return "Async Timewarp"; }
 
 feature_version AReproj_Dx12::Version() { return feature_version { 1, 0, 0 }; }
 
@@ -281,7 +278,11 @@ bool AReproj_Dx12::SubmitCaptureCommandList(int fIndex)
         ++_captureFenceValue;
         _captureAllocatorFenceValues[fIndex] = _captureFenceValue;
         auto r = _captureQueue->Signal(_captureFence, _captureFenceValue);
-        if (FAILED(r)) { LOG_ERROR("Reproj: capture Signal failed {:X}", (UINT) r); return false; }
+        if (FAILED(r))
+        {
+            LOG_ERROR("Reproj: capture Signal failed {:X}", (UINT) r);
+            return false;
+        }
     }
     return true;
 }
@@ -294,8 +295,10 @@ bool AReproj_Dx12::WaitForCaptureAllocator(int fIndex)
     if (fv == 0 || _captureFence->GetCompletedValue() >= fv)
         return true;
     HANDLE ev = _captureFenceEvent ? _captureFenceEvent : _scFenceEvent;
-    if (ev == nullptr) return false;
-    if (FAILED(_captureFence->SetEventOnCompletion(fv, ev))) return false;
+    if (ev == nullptr)
+        return false;
+    if (FAILED(_captureFence->SetEventOnCompletion(fv, ev)))
+        return false;
     if (WaitForSingleObject(ev, 5000) != WAIT_OBJECT_0)
     {
         LOG_ERROR("Reproj: capture wait failed {}", _captureFence->GetCompletedValue());
@@ -700,7 +703,8 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
             predictedUp = up;
             predictedForward = forward;
         }
-        else if (!ExtrapolateCameraRotation(constants, sourceRight, sourceUp, sourceForward, &predictedRight, &predictedUp, &predictedForward))
+        else if (!ExtrapolateCameraRotation(constants, sourceRight, sourceUp, sourceForward, &predictedRight,
+                                            &predictedUp, &predictedForward))
         {
             predictedRight = sourceRight;
             predictedUp = sourceUp;
@@ -764,8 +768,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
 
     Kcd2Camera::Snapshot latestCamera {};
     Kcd2Camera::Snapshot prevCamera {};
-    const bool haveLateCamera = Kcd2Camera::IsAvailable() &&
-                                Kcd2Camera::ReadSnapshots(latestCamera, prevCamera) &&
+    const bool haveLateCamera = Kcd2Camera::IsAvailable() && Kcd2Camera::ReadSnapshots(latestCamera, prevCamera) &&
                                 latestCamera.timestampMs > packet.sourcePoseTimestamp &&
                                 latestCamera.cutGeneration == packet.sourceCutGeneration;
 
@@ -836,8 +839,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         pitch *= maxRotation / rotation;
     }
 
-    PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch),
-                             pBaseRight, pBaseUp, pBaseForward);
+    PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch), pBaseRight, pBaseUp,
+                             pBaseForward);
     if (haveLateCamera)
     {
         ++_metricsLateCamHits;
@@ -848,8 +851,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         ++_metricsPacketBaseHits;
     ++_metricsLateInputApplied;
     _metricsLateInputMaxDegrees = std::max(
-        _metricsLateInputMaxDegrees,
-        static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
+        _metricsLateInputMaxDegrees, static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
     if (_currentTelemetrySlot != nullptr)
     {
         _currentTelemetrySlot->lateInputApplied = true;
@@ -1056,7 +1058,8 @@ bool AReproj_Dx12::CaptureAllocatorReady(int packetIndex)
         return false;
     if (_captureQueue != nullptr && _captureFence != nullptr)
     {
-        if (_captureAllocator[packetIndex] == nullptr) return true;
+        if (_captureAllocator[packetIndex] == nullptr)
+            return true;
         auto fv = _captureAllocatorFenceValues[packetIndex];
         return fv == 0 || _captureFence->GetCompletedValue() >= fv;
     }
@@ -1099,8 +1102,8 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     ++_metricsSkippedAnchorSamples;
     // No pacing happened on this dropped-publication path, so pace= is
     // reset rather than left carrying the previous frame's sleep time.
-    _runtimeMetrics.gamePresentBlockMs = static_cast<float>(Util::MillisecondsNow() - presentStartMs);
-    _runtimeMetrics.gamePresentPaceMs = 0.0f;
+    _metricsGamePresentBlockMaxMs =
+        std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(Util::MillisecondsNow() - presentStartMs));
 }
 
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
@@ -1174,10 +1177,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         auto capList = GetCaptureCommandList(packetIndex);
         if (capList != nullptr)
         {
-            ok = CopyPacketResource(capList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
+            ok =
+                CopyPacketResource(capList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
             if (ok && packet.hasUi)
             {
-                packet.hasUi = CopyPacketResource(capList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
+                packet.hasUi =
+                    CopyPacketResource(capList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
                 if (!packet.hasUi)
                 {
                     LOG_WARN("Reproj: UI capture failed; using composed frame");
@@ -1189,20 +1194,30 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             if (ok && wantDepthCapture)
             {
                 auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
-                if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) && depthRes->GetResource() != nullptr)
+                if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) &&
+                    depthRes->GetResource() != nullptr)
                 {
                     auto* d = depthRes->GetResource();
                     auto ds = depthRes->state;
-                    bool dOk = CopyPacketResource(capList, d, ds, &packet.depth, packet.depthState, L"Reproj_PacketDepth");
+                    bool dOk =
+                        CopyPacketResource(capList, d, ds, &packet.depth, packet.depthState, L"Reproj_PacketDepth");
                     if (dOk && packet.depth != nullptr)
                     {
                         auto dd = packet.depth->GetDesc();
                         packet.depthWidth = static_cast<uint32_t>(dd.Width);
                         packet.depthHeight = dd.Height;
                     }
-                    else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+                    else
+                    {
+                        SAFE_RELEASE(packet.depth);
+                        packet.depthWidth = packet.depthHeight = 0;
+                    }
                 }
-                else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+                else
+                {
+                    SAFE_RELEASE(packet.depth);
+                    packet.depthWidth = packet.depthHeight = 0;
+                }
             }
             usedCaptureQueue = true;
         }
@@ -1211,10 +1226,11 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     {
         auto cmdList = GetUICommandList(packetIndex);
         ok = cmdList != nullptr &&
-              CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
+             CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
         if (ok && packet.hasUi)
         {
-            packet.hasUi = CopyPacketResource(cmdList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
+            packet.hasUi =
+                CopyPacketResource(cmdList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
             if (!packet.hasUi)
             {
                 LOG_WARN("Reproj: UI capture failed; using the composed game frame for this packet");
@@ -1236,9 +1252,17 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                     packet.depthWidth = static_cast<uint32_t>(dd.Width);
                     packet.depthHeight = dd.Height;
                 }
-                else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+                else
+                {
+                    SAFE_RELEASE(packet.depth);
+                    packet.depthWidth = packet.depthHeight = 0;
+                }
             }
-            else { SAFE_RELEASE(packet.depth); packet.depthWidth = packet.depthHeight = 0; }
+            else
+            {
+                SAFE_RELEASE(packet.depth);
+                packet.depthWidth = packet.depthHeight = 0;
+            }
         }
     }
     if (!ok)
@@ -1280,8 +1304,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             float kcd2Yaw = 0.0f;
             float kcd2Pitch = 0.0f;
             DecomposeCameraPairRotation(packet.constants.cameraForward, packet.constants.prevCameraForward,
-                                        packet.constants.prevCameraRight, packet.constants.prevCameraUp,
-                                        &kcd2Yaw, &kcd2Pitch);
+                                        packet.constants.prevCameraRight, packet.constants.prevCameraUp, &kcd2Yaw,
+                                        &kcd2Pitch);
             const double prevPoseTime = kcd2CameraTimestamp - kcd2PoseIntervalMs;
             const auto mouseNow = OptiInput::GetRawMouseMotionAt(kcd2CameraTimestamp);
             const auto mousePrev = OptiInput::GetRawMouseMotionAt(prevPoseTime);
@@ -1320,7 +1344,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         }
         // Choose mode: depth-corrected (1) when enabled, depth captured, and projection sane; else rotation-only (2).
         bool depthSane = packet.depth != nullptr && packet.depthWidth > 0 && packet.constants.cameraNear > 0.0f &&
-                         packet.constants.cameraFar > packet.constants.cameraNear && packet.constants.cameraVFov > 0.01f;
+                         packet.constants.cameraFar > packet.constants.cameraNear &&
+                         packet.constants.cameraVFov > 0.01f;
         bool wantDepth = Config::Instance()->ReprojDepthEnabled.value_or_default() && depthSane;
         // Translation magnitude gate: tiny translations (<1cm) stay rotation-only to avoid depth noise.
         if (wantDepth)
@@ -1328,8 +1353,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             float dx = packet.constants.cameraPosition[0] - packet.constants.prevCameraPosition[0];
             float dy = packet.constants.cameraPosition[1] - packet.constants.prevCameraPosition[1];
             float dz = packet.constants.cameraPosition[2] - packet.constants.prevCameraPosition[2];
-            float tr = std::sqrt(dx*dx+dy*dy+dz*dz);
-            if (tr < 0.005f) wantDepth = false;
+            float tr = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (tr < 0.005f)
+                wantDepth = false;
         }
         packet.constants.mode = wantDepth ? 1u : 2u;
         packet.constants.depthWidth = packet.depthWidth;
@@ -1350,12 +1376,18 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             packet.constants.targetPosition[1] = packet.constants.prevCameraPosition[1] + rawDy;
             packet.constants.targetPosition[2] = packet.constants.prevCameraPosition[2] + adjDz;
             packet.constants.targetPosition[3] = 0.0f;
-            std::memcpy(packet.constants.targetRight, packet.constants.cameraRight, sizeof(packet.constants.targetRight));
+            std::memcpy(packet.constants.targetRight, packet.constants.cameraRight,
+                        sizeof(packet.constants.targetRight));
             std::memcpy(packet.constants.targetUp, packet.constants.cameraUp, sizeof(packet.constants.targetUp));
-            std::memcpy(packet.constants.targetForward, packet.constants.cameraForward, sizeof(packet.constants.targetForward));
+            std::memcpy(packet.constants.targetForward, packet.constants.cameraForward,
+                        sizeof(packet.constants.targetForward));
             // Track translation magnitude for telemetry
-            float tr2 = std::sqrt(rawDx*rawDx+rawDy*rawDy+adjDz*adjDz)*100.0f;
-            { std::scoped_lock lk(_metricsMutex); _metricsTxCmTotal += tr2; ++_metricsTxSamples; }
+            float tr2 = std::sqrt(rawDx * rawDx + rawDy * rawDy + adjDz * adjDz) * 100.0f;
+            {
+                std::scoped_lock lk(_metricsMutex);
+                _metricsTxCmTotal += tr2;
+                ++_metricsTxSamples;
+            }
         }
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
@@ -1415,7 +1447,14 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
         packet.completionFence = _captureFence;
         packet.completionFenceValue = packet.captureFenceValue;
-        if (submitted) { std::scoped_lock lock(_metricsMutex); ++_metricsDirectCaptures; ++_metricsCaptureDepth; if (packet.depth) ++_metricsDepthWarps; }
+        if (submitted)
+        {
+            std::scoped_lock lock(_metricsMutex);
+            ++_metricsDirectCaptures;
+            ++_metricsCaptureDepth;
+            if (packet.depth)
+                ++_metricsDepthWarps;
+        }
     }
     else
     {
@@ -1423,9 +1462,14 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
         packet.completionFence = _uiFence;
         packet.completionFenceValue = packet.captureFenceValue;
-        if (submitted) { std::scoped_lock lock(_metricsMutex); ++_metricsDirectCaptures; }
+        if (submitted)
+        {
+            std::scoped_lock lock(_metricsMutex);
+            ++_metricsDirectCaptures;
+        }
     }
-    if (!submitted) return false;
+    if (!submitted)
+        return false;
     // Null-depth packets still warp rotation-only; depth failure is not fatal.
     return true;
 }
@@ -1595,9 +1639,9 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         if (!ApplyLateInput(constants, packet))
             PrepareRotationConstants(constants, false);
     }
-    const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
-                                     outputIndex, deferredLateLatch, packet.ui, packet.uiState, packet.depth,
-                                     packet.depthState);
+    const bool ok =
+        _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants, outputIndex,
+                        deferredLateLatch, packet.ui, packet.uiState, packet.depth, packet.depthState);
     if (!ok)
     {
         backBuffer->Release();
@@ -1878,6 +1922,11 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.droppedAnchors = _metricsSkippedAnchorSamples;
     _runtimeMetrics.directCaptures = _metricsDirectCaptures;
     _runtimeMetrics.captureNotReady = _metricsCaptureNotReady;
+    // block/pace report the worst game-thread cost in the one-second window.
+    // Reporting the last sample hid exactly the intermittent handoff stalls
+    // that pull an otherwise 60+ FPS source into the mid-50s.
+    _runtimeMetrics.gamePresentBlockMs = _metricsGamePresentBlockMaxMs;
+    _runtimeMetrics.gamePresentPaceMs = _metricsGamePresentPaceMaxMs;
     if (_presentIntervalCount > 0)
     {
         std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
@@ -1888,9 +1937,8 @@ void AReproj_Dx12::LogMetricsIfDue()
         _runtimeMetrics.p95PresentIntervalMs = static_cast<float>(*p95);
     }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
-    const double lateCamAge = _metricsLateCamAgeSamples > 0
-                                    ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples
-                                    : 0.0;
+    const double lateCamAge =
+        _metricsLateCamAgeSamples > 0 ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples : 0.0;
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} latch={}/{}/{} lateAge={:.1f}ms "
@@ -1926,6 +1974,8 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsCaptureNotReady = 0;
     _metricsHitchHolds = 0;
     _metricsLateInputMaxDegrees = 0.0f;
+    _metricsGamePresentBlockMaxMs = 0.0f;
+    _metricsGamePresentPaceMaxMs = 0.0f;
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -2131,8 +2181,8 @@ bool AReproj_Dx12::Present()
     const bool focusLost = !focused && !State::Instance().isRunningOnLinux;
     const bool warpAllowed = !stalled && !_reset[fIndex] && !focusLost;
     if (!warpAllowed)
-        LOG_DEBUG("Reproj: publishing unwarped anchor (reset:{} focused:{} poseAge:{:.1f}ms)", _reset[fIndex],
-                  focused, poseAge);
+        LOG_DEBUG("Reproj: publishing unwarped anchor (reset:{} focused:{} poseAge:{:.1f}ms)", _reset[fIndex], focused,
+                  poseAge);
 
     if (virtualized && _presenterState.load() == PresenterState::Running)
     {
@@ -2164,8 +2214,10 @@ bool AReproj_Dx12::Present()
             std::scoped_lock metricsLock(_metricsMutex);
             // block= covers real game-thread work only; the pacing sleep is
             // reported separately in pace= so queue-pin costs stay visible.
-            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(paceStart - presentStart);
-            _runtimeMetrics.gamePresentPaceMs = static_cast<float>(paceEnd - paceStart);
+            _metricsGamePresentBlockMaxMs =
+                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStart));
+            _metricsGamePresentPaceMaxMs =
+                std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
             return advanced;
         }
 
@@ -2210,8 +2262,7 @@ bool AReproj_Dx12::Present()
         const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, captureFence,
                                                                                        packet.captureFenceValue));
         HRESULT advanceHr = E_FAIL;
-        const bool advanced =
-            submitted && SUCCEEDED(advanceHr = wrapped->AdvanceReprojectionBuffer());
+        const bool advanced = submitted && SUCCEEDED(advanceHr = wrapped->AdvanceReprojectionBuffer());
         if (captured && submitted && advanced)
         {
             packet.state.store(PacketState::Ready);
@@ -2228,8 +2279,10 @@ bool AReproj_Dx12::Present()
             std::scoped_lock metricsLock(_metricsMutex);
             // block= covers real game-thread work only (capture submit,
             // publication); the pacing sleep is reported separately in pace=.
-            _runtimeMetrics.gamePresentBlockMs = static_cast<float>(paceStart - presentStart);
-            _runtimeMetrics.gamePresentPaceMs = static_cast<float>(paceEnd - paceStart);
+            _metricsGamePresentBlockMaxMs =
+                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStart));
+            _metricsGamePresentPaceMaxMs =
+                std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
             return true;
         }
 
@@ -2264,10 +2317,9 @@ bool AReproj_Dx12::Present()
 
     // Async ownership is required for timewarp. If it is unavailable, present the
     // game frame unchanged; never run a blocking generated-frame fallback.
-    HRESULT fallbackResult = virtualized
-                                 ? PresentVirtualFrameSync(fIndex, gameBackBuffer, virtualBufferIndex, syncInterval,
-                                                           presentFlags, false)
-                                 : PresentFrame(syncInterval, presentFlags);
+    HRESULT fallbackResult = virtualized ? PresentVirtualFrameSync(fIndex, gameBackBuffer, virtualBufferIndex,
+                                                                   syncInterval, presentFlags, false)
+                                         : PresentFrame(syncInterval, presentFlags);
     SAFE_RELEASE(gameBackBuffer);
     return SUCCEEDED(fallbackResult);
 
@@ -3174,7 +3226,11 @@ void AReproj_Dx12::ReleaseObjects()
         _captureAllocatorFenceValues[i] = 0;
     }
 
-    if (_captureFenceEvent) { CloseHandle(_captureFenceEvent); _captureFenceEvent = nullptr; }
+    if (_captureFenceEvent)
+    {
+        CloseHandle(_captureFenceEvent);
+        _captureFenceEvent = nullptr;
+    }
     SAFE_RELEASE(_captureFence);
     _captureFenceValue = 0;
     SAFE_RELEASE(_uiFence);
