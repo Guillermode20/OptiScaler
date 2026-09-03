@@ -1164,14 +1164,18 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // Prefer the dedicated capture queue (overlap) otherwise fallback to game DIRECT UI list.
     bool ok = false;
     bool usedCaptureQueue = false;
+    UINT64 gameReadyFenceValue = 0;
+    packet.handoffFence = nullptr;
+    packet.handoffFenceValue = 0;
     if (_captureQueue != nullptr && _captureFence != nullptr)
     {
         // The source was rendered by the game's DIRECT queue. Explicitly hand
         // ownership to the capture queue; without this wait, alt-tab/loads can
         // expose a partially-rendered backbuffer to the copy engine.
-        const auto gameReadyFenceValue = ++_captureFenceValue;
-        if (_gameCommandQueue == nullptr || FAILED(_gameCommandQueue->Signal(_captureFence, gameReadyFenceValue)) ||
-            FAILED(_captureQueue->Wait(_captureFence, gameReadyFenceValue)))
+        gameReadyFenceValue = ++_captureInputFenceValue;
+        if (_gameCommandQueue == nullptr || _captureInputFence == nullptr ||
+            FAILED(_gameCommandQueue->Signal(_captureInputFence, gameReadyFenceValue)) ||
+            FAILED(_captureQueue->Wait(_captureInputFence, gameReadyFenceValue)))
             return false;
 
         auto capList = GetCaptureCommandList(packetIndex);
@@ -1447,6 +1451,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
         packet.completionFence = _captureFence;
         packet.completionFenceValue = packet.captureFenceValue;
+        // With separate HUD-less world/UI resources the COPY queue never reads
+        // the virtual game backbuffer. Return it once its DIRECT producer is
+        // done; packet eligibility still waits for the full COPY completion.
+        // The composed fallback reads the virtual buffer and keeps that stricter fence.
+        packet.handoffFence = packet.hasUi ? _captureInputFence : _captureFence;
+        packet.handoffFenceValue = packet.hasUi ? gameReadyFenceValue : packet.captureFenceValue;
         if (submitted)
         {
             std::scoped_lock lock(_metricsMutex);
@@ -1462,6 +1472,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
         packet.completionFence = _uiFence;
         packet.completionFenceValue = packet.captureFenceValue;
+        packet.handoffFence = _uiFence;
+        packet.handoffFenceValue = packet.captureFenceValue;
         if (submitted)
         {
             std::scoped_lock lock(_metricsMutex);
@@ -2255,12 +2267,15 @@ bool AReproj_Dx12::Present()
             return true;
         }
         const bool captured = CaptureFramePacket(fIndex, packetIndex, gameBackBuffer, virtualBufferIndex, warpAllowed);
-        // The capture fence is the packet completion fence CaptureFramePacket
-        // submitted its DIRECT copies with; AdvanceReprojectionBuffer gates
-        // buffer reuse on it.
+        // Packet readiness and virtual-buffer reuse have separate fences on the
+        // isolated-HUD path: reuse need not wait for copies that only read the
+        // separate HUD-less/UI resources.
         auto* captureFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
-        const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, captureFence,
-                                                                                       packet.captureFenceValue));
+        auto* handoffFence = packet.handoffFence != nullptr ? packet.handoffFence : captureFence;
+        const auto handoffFenceValue =
+            packet.handoffFenceValue != 0 ? packet.handoffFenceValue : packet.captureFenceValue;
+        const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence,
+                                                                                       handoffFenceValue));
         HRESULT advanceHr = E_FAIL;
         const bool advanced = submitted && SUCCEEDED(advanceHr = wrapped->AdvanceReprojectionBuffer());
         if (captured && submitted && advanced)
@@ -2498,6 +2513,8 @@ void AReproj_Dx12::Deactivate()
             pkt.captureFenceValue = 0;
             pkt.completionFence = nullptr;
             pkt.completionFenceValue = 0;
+            pkt.handoffFence = nullptr;
+            pkt.handoffFenceValue = 0;
             pkt.retirementFenceValue = 0;
             pkt.frameId = 0;
             pkt.hasCamera = false;
@@ -3206,6 +3223,8 @@ void AReproj_Dx12::ReleaseObjects()
         _packets[i].captureFenceValue = 0;
         _packets[i].completionFence = nullptr;
         _packets[i].completionFenceValue = 0;
+        _packets[i].handoffFence = nullptr;
+        _packets[i].handoffFenceValue = 0;
         _packets[i].retirementFenceValue = 0;
         _packets[i].syncInterval = 0;
         _packets[i].presentFlags = 0;
@@ -3233,6 +3252,8 @@ void AReproj_Dx12::ReleaseObjects()
     }
     SAFE_RELEASE(_captureFence);
     _captureFenceValue = 0;
+    SAFE_RELEASE(_captureInputFence);
+    _captureInputFenceValue = 0;
     SAFE_RELEASE(_uiFence);
     SAFE_RELEASE(_scFence);
     SAFE_RELEASE(_lateLatchFence);

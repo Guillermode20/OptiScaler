@@ -331,7 +331,7 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("++_metricsSkippedAnchorSamples", exhaust)
 
     def test_capture_copies_can_bypass_game_queue(self):
-        # Capture color/UI copies must be able to run on the COMPUTE queue so
+        # Capture color/UI copies must be able to run on a dedicated queue so
         # they overlap rendering; the game queue then only publishes its frame
         # fence. Retirement/presenter/downgrade must follow the packet
         # completion fence rather than assuming the UI fence.
@@ -342,6 +342,7 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("PollCaptureAllocator(packetIndex)", capture)
         self.assertIn("GetCaptureCommandList(packetIndex)", capture)
         self.assertIn("SubmitCaptureCommandList(packetIndex", capture)
+        self.assertIn("_captureInputFence", capture)
         self.assertIn("packet.completionFence = _captureFence", capture)
         # DIRECT fallback path is verbatim when compute capture is unavailable.
         self.assertIn("packet.completionFence = _uiFence", capture)
@@ -353,6 +354,19 @@ class ReprojectionTests(unittest.TestCase):
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         self.assertIn("completionFence", presenter)
         self.assertIn("_captureFence", presenter)
+
+    def test_isolated_hud_releases_virtual_buffer_before_packet_copy_finishes(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
+            "bool AReproj_Dx12::DisplayPacket(", 1)[0]
+        present = source.split("bool AReproj_Dx12::Present()", 1)[1].split(
+            "void AReproj_Dx12::Activate", 1)[0]
+        self.assertIn("packet.hasUi ? _captureInputFence : _captureFence", capture)
+        self.assertIn("packet.hasUi ? gameReadyFenceValue : packet.captureFenceValue", capture)
+        self.assertIn("packet.handoffFence", present)
+        self.assertIn("packet.handoffFenceValue", present)
+        self.assertIn("SubmitReprojectionBuffer(virtualBufferIndex, handoffFence", present)
 
     def test_phase_fit_selects_input_window_that_explains_camera_motion(self):
         # Model the C++ through-origin least-squares score. Camera response is

@@ -225,8 +225,11 @@ bool AReproj_Dx12::CreateAsyncPresenter()
             else
             {
                 auto fr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureFence));
-                if (FAILED(fr))
+                auto inputFr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureInputFence));
+                if (FAILED(fr) || FAILED(inputFr))
                 {
+                    SAFE_RELEASE(_captureFence);
+                    SAFE_RELEASE(_captureInputFence);
                     for (size_t i = 0; i < BUFFER_COUNT; ++i)
                     {
                         SAFE_RELEASE(_captureCommandList[i]);
@@ -237,6 +240,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
                 }
                 else
                 {
+                    _captureInputFence->SetName(L"Reproj_CaptureInputFence");
                     _captureFence->SetName(L"Reproj_CaptureFence");
                     _captureFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
                     LOG_INFO("Reproj: capture queue created ({})",
@@ -297,6 +301,8 @@ void AReproj_Dx12::DestroyAsyncPresenter()
         CloseHandle(_captureFenceEvent);
         _captureFenceEvent = nullptr;
     }
+    SAFE_RELEASE(_captureInputFence);
+    _captureInputFenceValue = 0;
     SAFE_RELEASE(_captureFence);
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {

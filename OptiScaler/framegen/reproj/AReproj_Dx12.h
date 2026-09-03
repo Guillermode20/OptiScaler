@@ -74,6 +74,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     {
         UINT64 frameId = 0;
         UINT64 captureFenceValue = 0;
+        ID3D12Fence* handoffFence = nullptr; // non-owning; protects virtual-buffer reuse
+        UINT64 handoffFenceValue = 0;
         UINT64 retirementFenceValue = 0;
         double frameDelta = 0.0;
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
@@ -132,13 +134,16 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
 
     // Anchor capture runs on a dedicated COPY queue (fallback: game DIRECT) so
     // the color/UI/depth copies overlap rendering instead of extending the
-    // game's frame. Ordering is via _uiFence Wait/Signal round-trip; the
-    // presenter polls the capture fence completion. The async warp stays on
-    // the COMPUTE queue.
+    // game's frame. _captureInputFence orders DIRECT producers before COPY;
+    // _captureFence tracks COPY completion for packet readiness. Keeping the
+    // fence timelines separate prevents a later DIRECT signal from falsely
+    // completing an earlier COPY packet. The async warp stays on COMPUTE.
     ID3D12CommandQueue* _captureQueue = nullptr;
     ID3D12CommandAllocator* _captureAllocator[BUFFER_COUNT] = {};
     ID3D12GraphicsCommandList* _captureCommandList[BUFFER_COUNT] = {};
     bool _captureCommandListResetted[BUFFER_COUNT] = {};
+    ID3D12Fence* _captureInputFence = nullptr;
+    UINT64 _captureInputFenceValue = 0;
     ID3D12Fence* _captureFence = nullptr;
     HANDLE _captureFenceEvent = nullptr;
     UINT64 _captureFenceValue = 0;

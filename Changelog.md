@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.29 (2026-09-03)
+* Release isolated-HUD virtual buffers before packet COPY completion
+
 ## v10.0.1.28 (2026-09-03)
 * Stabilize async reprojection pacing and alt-tab recovery
 
