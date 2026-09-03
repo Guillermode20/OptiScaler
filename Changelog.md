@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.39 (2026-09-03)
+* Fix startup crash: TryRedirect held the isolation g_mutex and MarkWorldSnapshotCl re-locked the same non-recursive mutex (EDEADLK -> uncaught std::system_error) the moment the async presenter armed the world fence; the marker now runs under the caller's lock.
+
 ## v10.0.1.38 (2026-09-03)
 * Adaptive late-latch sample lead: LateSampleLead=auto (default) now hunts the mouse sample as late as the warp allows instead of a fixed 4 ms - the presenter measures post-warp headroom each slot and slides the lead within [2,6] ms; fixed values still override. New sampLead= log key.
 

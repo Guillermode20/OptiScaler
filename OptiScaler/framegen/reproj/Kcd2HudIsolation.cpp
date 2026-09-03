@@ -275,6 +275,7 @@ bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
         // Reserve a world-fence value and mark that CL so hkExecuteCommandLists
         // signals the fence the moment the CL is submitted (per-pass renderers:
         // mid-frame; single-CL-per-frame: at present — safe either way).
+        // g_mutex is already held here; MarkWorldSnapshotCl must not re-lock it.
         MarkWorldSnapshotCl(commandList);
     }
 
@@ -414,9 +415,15 @@ void SetWorldSignalContext(ID3D12Fence* worldFence)
 
 UINT64 MarkWorldSnapshotCl(ID3D12GraphicsCommandList* commandList)
 {
-    if (g_worldFence == nullptr || commandList == nullptr)
+    // Callers (TryRedirect) hold g_mutex across this call: taking the lock
+    // again here recursively locked a non-recursive std::mutex, which MSVC
+    // surfaces as EDEADLK -> an uncaught std::system_error on the game's
+    // render thread the moment the async presenter arms the world fence
+    // (crash on startup once the Scaleform frame after activation redirected).
+    if (commandList == nullptr)
         return 0;
-    std::scoped_lock lock(g_mutex);
+    if (g_worldFence == nullptr)
+        return 0;
     const auto value = ++g_worldFenceValue;
     g_lastWorldSignalValue = value;
     if (g_pendingWorldSignalCount < static_cast<int>(g_pendingWorldSignals.size()))

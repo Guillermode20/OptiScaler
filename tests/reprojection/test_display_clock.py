@@ -192,6 +192,29 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIsNotNone(recovered_at)
         self.assertGreater(recovered_at - shed_at, 400.0)
 
+    def test_world_fence_marker_does_not_relock_the_isolation_mutex(self):
+        # Regression: TryRedirect holds the isolation g_mutex and calls
+        # MarkWorldSnapshotCl, which used to take the same non-recursive lock
+        # again. That recursive lock is EDEADLK -> an uncaught
+        # std::system_error on the game's render thread, crashing the process
+        # at startup once the async presenter armed the world fence (BugSplat
+        # 0xE06D7363, msvcp140 std::system_error vtable).
+        root = Path(__file__).resolve().parents[2]
+        src = (root / "OptiScaler/framegen/reproj/Kcd2HudIsolation.cpp").read_text(encoding="utf-8")
+        redirect = src.split("bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,", 1)[1]
+        # The marker call sits inside TryRedirect's g_mutex scope.
+        self.assertIn("std::scoped_lock lock(g_mutex)", redirect)
+        self.assertIn("MarkWorldSnapshotCl(commandList)", redirect)
+        # The marker body itself must never take the lock again.
+        marker = src.split("UINT64 MarkWorldSnapshotCl(ID3D12GraphicsCommandList* commandList)", 1)[1].split(
+            "bool OnWorldSnapshotSubmitted", 1)[0]
+        self.assertIn("recursively locked a non-recursive std::mutex", marker)
+        self.assertNotIn("std::scoped_lock lock(g_mutex)", marker)
+        self.assertNotIn("std::unique_lock lock(g_mutex)", marker)
+        # TryRedirect is the only caller - no other site depends on the old
+        # self-locking behavior.
+        self.assertEqual(redirect.count("MarkWorldSnapshotCl(commandList)"), 1)
+
     def test_late_sample_lead_defaults_to_adaptive_and_retunes(self):
         # LateSampleLead auto/0 = adaptive: after each warp completes the
         # presenter measures headroom to the deadline and slides the sample

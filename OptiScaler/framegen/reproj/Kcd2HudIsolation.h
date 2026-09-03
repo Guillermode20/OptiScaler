@@ -23,6 +23,11 @@ void OnEndDisplay();
 // capture worker copy the world while the game still finishes its frame.
 // Falls back gracefully (value 0) when no snapshot was recorded this frame.
 void SetWorldSignalContext(ID3D12Fence* worldFence);
+// Reserves a world-fence value and marks the CL that carries the world
+// snapshot. Must be called with the isolation lock already held (TryRedirect
+// does); it deliberately does NOT lock itself - re-locking there recursively
+// locked the non-recursive g_mutex and crashed the game with an uncaught
+// std::system_error (EDEADLK) once the world fence was armed.
 UINT64 MarkWorldSnapshotCl(ID3D12GraphicsCommandList* commandList);
 bool OnWorldSnapshotSubmitted(ID3D12CommandQueue* queue, ID3D12CommandList* const* lists, UINT count);
 UINT64 TakeWorldSignalValue(ID3D12Resource* backBuffer);
