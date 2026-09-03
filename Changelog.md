@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.27 (2026-09-03)
+* Async reproj efficiency + tab in/out: occlusion backoff, explicit cross-queue ordering, COPY-first capture, depth copies skipped unless enabled, DIRECT-only unwarped blits, symmetric lead control, dead per-slot telemetry stripped
+
 ## v10.0.1.26 (2026-09-03)
 * Remove depth warp entirely (regressed feel, no tuning channel); back to rotation baseline with capture skip, wider ceiling, hitch hold
 

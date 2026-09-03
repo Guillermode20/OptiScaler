@@ -1073,12 +1073,25 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     // The fence signal is enqueued on the game queue behind all prior work,
     // so it correctly orders after even the in-flight submission that forced
     // the skip; no allocator is touched, so nothing is reset under the GPU.
+    // If the handoff itself cannot complete, fail the publication rather than
+    // returning a virtual resource to the game while capture still owns it.
     const auto fenceValue = ++_uiFenceValue;
     _uiAllocatorFenceValues[fIndex] = fenceValue;
-    if (_gameCommandQueue == nullptr || _uiFence == nullptr || wrapped == nullptr ||
-        FAILED(_gameCommandQueue->Signal(_uiFence, fenceValue)) ||
-        FAILED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue)) ||
-        FAILED(wrapped->AdvanceReprojectionBuffer()))
+    bool ok = _gameCommandQueue != nullptr && _uiFence != nullptr && wrapped != nullptr &&
+              SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue)) &&
+              SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue));
+    if (ok)
+    {
+        const auto advanceHr = wrapped->AdvanceReprojectionBuffer();
+        if (FAILED(advanceHr))
+        {
+            if (advanceHr == DXGI_ERROR_WAS_STILL_DRAWING)
+                wrapped->AbortReprojectionBuffer(virtualBufferIndex);
+            else
+                _presenterState.store(PresenterState::Failed);
+        }
+    }
+    else
         _presenterState.store(PresenterState::Failed);
     RecordWarpFrame(false, true, 0.0f);
     SAFE_RELEASE(gameBackBuffer);
@@ -1134,6 +1147,15 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         }
     }
 
+    // Depth is only consumed by mode-1 translation (ReprojDepthEnabled). When it is off
+    // (the default) skip the full-resolution depth copy entirely: one less copy per anchor,
+    // no retained depth texture, no wasted COPY bandwidth on every source frame.
+    const bool wantDepthCapture = Config::Instance()->ReprojDepthEnabled.value_or_default();
+    if (!wantDepthCapture)
+    {
+        SAFE_RELEASE(packet.depth);
+        packet.depthWidth = packet.depthHeight = 0;
+    }
     // PollCaptureAllocator(packetIndex) // kept for test invariant (see CaptureAllocatorReady)
     // packet.constants.mode = 2 // rotation-only fallback literal for test invariant
     // Prefer the dedicated capture queue (overlap) otherwise fallback to game DIRECT UI list.
@@ -1141,6 +1163,14 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     bool usedCaptureQueue = false;
     if (_captureQueue != nullptr && _captureFence != nullptr)
     {
+        // The source was rendered by the game's DIRECT queue. Explicitly hand
+        // ownership to the capture queue; without this wait, alt-tab/loads can
+        // expose a partially-rendered backbuffer to the copy engine.
+        const auto gameReadyFenceValue = ++_captureFenceValue;
+        if (_gameCommandQueue == nullptr || FAILED(_gameCommandQueue->Signal(_captureFence, gameReadyFenceValue)) ||
+            FAILED(_captureQueue->Wait(_captureFence, gameReadyFenceValue)))
+            return false;
+
         auto capList = GetCaptureCommandList(packetIndex);
         if (capList != nullptr)
         {
@@ -1155,8 +1185,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                                             packet.colorState, L"Reproj_PacketColor");
                 }
             }
-            // Depth capture (optional, fail-open)
-            if (ok)
+            // Depth capture (optional, fail-open) — skipped unless depth mode is enabled.
+            if (ok && wantDepthCapture)
             {
                 auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
                 if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) && depthRes->GetResource() != nullptr)
@@ -1192,7 +1222,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                                         packet.colorState, L"Reproj_PacketColor");
             }
         }
-        if (ok)
+        if (ok && wantDepthCapture)
         {
             auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
             if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) && depthRes->GetResource() != nullptr)
@@ -1409,19 +1439,18 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
 
-    const bool useCompute = _computeQueue != nullptr;
-
-    if (useCompute ? !WaitForComputeAllocator(outputIndex) : !WaitForSCAllocator(outputIndex))
+    // Unwarped blits are pure copies: keep them on the DIRECT SC queue where the
+    // rasterizing UI pass also lives. Routing a copy through COMPUTE cost an extra
+    // ExecuteCommandLists plus a cross-queue Wait and a second SC submit per slot.
+    if (!WaitForSCAllocator(outputIndex))
         return false;
 
-    auto cmdList = useCompute ? GetComputeCommandList(outputIndex) : GetSCCommandList(outputIndex);
+    auto cmdList = GetSCCommandList(outputIndex);
     if (cmdList == nullptr)
         return false;
 
-    // Reserve the SC retirement fence value for the NON-compute path; the compute
-    // path reserves inside SubmitComputeCommandList.
-    if (!useCompute)
-        _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
+    // Reserve the SC retirement fence value for this slot.
+    _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
     // Telemetry: use sequence-indexed query if provided, otherwise fallback to outputIndex
     uint32_t queryStart = telemetryQueryStart;
@@ -1447,10 +1476,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
             cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, queryStart, 2,
                                       _warpTimestampReadback, queryStart * sizeof(UINT64));
         }
-        if (useCompute)
-            SubmitComputeCommandList(outputIndex);
-        else
-            SubmitSCCommandList(outputIndex);
+        SubmitSCCommandList(outputIndex);
         packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
         if (_currentTelemetrySlot && useTelemetryQuery)
             _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
@@ -1460,8 +1486,21 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
     ResourceBarrier(cmdList, packet.color, packet.colorState, D3D12_RESOURCE_STATE_COPY_SOURCE);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
     cmdList->CopyResource(backBuffer, packet.color);
-    ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-    ResourceBarrier(cmdList, packet.color, D3D12_RESOURCE_STATE_COPY_SOURCE, packet.colorState);
+    // Batch the restore transitions: one driver call instead of two.
+    {
+        D3D12_RESOURCE_BARRIER barriers[2] {};
+        barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[0].Transition.pResource = backBuffer;
+        barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+        barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barriers[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barriers[1].Transition.pResource = packet.color;
+        barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barriers[1].Transition.StateAfter = packet.colorState;
+        barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmdList->ResourceBarrier(packet.colorState != D3D12_RESOURCE_STATE_COPY_SOURCE ? 2 : 1, barriers);
+    }
     backBuffer->Release();
 
     const bool composeUiNow = composeUi && packet.hasUi && _renderUI != nullptr && _renderUI->IsInit();
@@ -1474,37 +1513,18 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, uint32_t telem
                                   queryStart * sizeof(UINT64));
     }
 
-    if (useCompute)
-    {
-        if (!SubmitComputeCommandList(outputIndex))
-            return false;
-    }
-    else
-    {
-        if (composeUiNow)
-            _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
-        if (!SubmitSCCommandList(outputIndex))
-            return false;
-    }
+    if (composeUiNow)
+        _renderUI->Dispatch(realSwapChain, cmdList, packet.ui, packet.uiState);
+    if (!SubmitSCCommandList(outputIndex))
+        return false;
 
-    // UI composition uses a rasterizing pipeline, invalid on COMPUTE; run it on
-    // the DIRECT SC queue after the compute copy completes.
-    if (useCompute && composeUiNow && _computeFence != nullptr)
-    {
-        _presentQueue->Wait(_computeFence, _computeAllocatorFenceValues[outputIndex]);
-        auto scCmdList = GetSCCommandList(outputIndex);
-        if (scCmdList != nullptr)
-        {
-            _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
-            _renderUI->Dispatch(realSwapChain, scCmdList, packet.ui, packet.uiState);
-            SubmitSCCommandList(outputIndex);
-        }
-    }
-
-    // Retirement is tracked on _scFence. When the copy ran on COMPUTE,
-    // SubmitComputeCommandList signaled _scFence; the SC UI pass (if any) set a
-    // later _scFence value that also covers the copy.
+    // The real swapchain was created on the game's DIRECT queue, while this
+    // copy/UI list runs on _presentQueue. Order Present on the actual swapchain
+    // queue with a GPU-side wait; never CPU-wait here.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
+    if (_gameCommandQueue == nullptr || _scFence == nullptr ||
+        FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
+        return false;
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
     return true;
@@ -1667,12 +1687,23 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
             return false;
     }
 
-    // The swapchain was created against the DIRECT queue, so do not rely on an
-    // implicit cross-queue dependency for a backbuffer written by COMPUTE.
-    // A short completion wait is deterministic and avoids routing any work back
-    // through KCD2's contended DIRECT queue.
-    if (useCompute && !WaitForComputeAllocator(outputIndex))
-        return false;
+    // Cross-queue ordering without a CPU stall: the backbuffer was written by the
+    // compute queue but presented from the DIRECT queue. Retirement (packet + allocator
+    // reuse) is already fenced — SubmitComputeCommandList signaled _scFence and the
+    // next use of this slot waits on it — so Present only needs GPU-side ordering.
+    // Enqueue a queue-level wait instead of blocking this thread on completion: the
+    // old trailing WaitForComputeAllocator stalled every slot ~2-4 ms and serialized
+    // the presenter against the warp it just submitted.
+    if (useCompute && _computeFence != nullptr)
+    {
+        // The real swapchain was created on the game's DIRECT queue, not on
+        // _presentQueue. Queue the dependency on the actual presenting queue;
+        // a wait on _presentQueue alone does not order Present() and can produce
+        // an occasional old/half-written frame after focus changes.
+        if (_gameCommandQueue == nullptr ||
+            FAILED(_gameCommandQueue->Wait(_computeFence, _computeAllocatorFenceValues[outputIndex])))
+            return false;
+    }
     return true;
 }
 
@@ -2178,7 +2209,9 @@ bool AReproj_Dx12::Present()
         auto* captureFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
         const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, captureFence,
                                                                                        packet.captureFenceValue));
-        const bool advanced = submitted && SUCCEEDED(wrapped->AdvanceReprojectionBuffer());
+        HRESULT advanceHr = E_FAIL;
+        const bool advanced =
+            submitted && SUCCEEDED(advanceHr = wrapped->AdvanceReprojectionBuffer());
         if (captured && submitted && advanced)
         {
             packet.state.store(PacketState::Ready);
@@ -2200,6 +2233,9 @@ bool AReproj_Dx12::Present()
             return true;
         }
 
+        // Any failed virtual-buffer handoff is a hard ownership failure. The
+        // current virtual buffer remains Capturing, so returning to the game
+        // would let it render into a resource still read by capture.
         // Hard publication failures permanently hand the real swapchain back to the
         // game queue before displaying this same virtual frame synchronously.
         packet.state.store(PacketState::Retired);

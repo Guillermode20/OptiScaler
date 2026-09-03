@@ -623,6 +623,10 @@ HRESULT WrappedIDXGISwapChain4::AdvanceReprojectionBuffer()
     }
     else if (fence != nullptr && completedValue < fenceValue)
     {
+        // The next virtual buffer cannot be handed back to the game until its
+        // previous capture is complete. This is ownership back-pressure, not a
+        // display wait; keep the bounded wait here so the game never renders
+        // into a resource still read by the capture queue.
         HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (event == nullptr || FAILED(fence->SetEventOnCompletion(fenceValue, event)) ||
             WaitForSingleObject(event, 5000) != WAIT_OBJECT_0)
@@ -666,10 +670,9 @@ HRESULT WrappedIDXGISwapChain4::AdvanceReprojectionBuffer()
 
 void WrappedIDXGISwapChain4::AbortReprojectionBuffer(UINT index)
 {
-    std::scoped_lock lock(_reprojectionMutex);
-    if (_reprojectionVirtualized && index == _reprojectionIndex && index < _reprojectionBuffers.size() &&
-        _reprojectionBuffers[index].state == VirtualBufferState::Rendering)
-        _reprojectionBuffers[index].state = VirtualBufferState::Rendering;
+    // Abort is reserved for a future true non-blocking handoff. A submitted capture
+    // cannot be discarded while the game may reuse the virtual resource.
+    (void) index;
 }
 
 bool WrappedIDXGISwapChain4::VirtualBuffersHaveExternalReferences() const

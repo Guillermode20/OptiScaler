@@ -173,13 +173,20 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 
-    // Dedicated COPY queue for anchor capture so color/UI/depth copies overlap
-    // rendering instead of extending the game's frame. Falls back to game DIRECT.
+    // Dedicated COPY queue for anchor capture so color/UI copies overlap
+    // rendering instead of extending the game's frame. COPY is a DMA engine:
+    // no shader cores, no contention with game/compute work. Falls back to
+    // a COMPUTE queue and finally to game DIRECT when COPY is unavailable.
     {
         D3D12_COMMAND_QUEUE_DESC capDesc {};
-        capDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        capDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
         capDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
         auto capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
+        if (FAILED(capRes) || _captureQueue == nullptr)
+        {
+            capDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+            capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
+        }
         if (SUCCEEDED(capRes) && _captureQueue != nullptr)
         {
             _captureQueue->SetName(L"Reproj_CaptureQueue");
@@ -406,16 +413,14 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     if (syncInterval == 0)
         presentFlags |= DXGI_PRESENT_DO_NOT_WAIT;
     const auto result = _swapChain->Present(syncInterval, presentFlags);
-    if (result == S_OK)
+    if (result == S_OK || result == DXGI_STATUS_OCCLUDED)
         fakenvapi::reportFGPresent(_swapChain, true, interpolated);
     else if (result == DXGI_ERROR_DEVICE_REMOVED && _device != nullptr)
         Util::GetDeviceRemovedReason(_device);
 
-    // An occluded window is a transient success state (minimize/alt-tab), not a
-    // presenter failure. Treat it as an invisible-but-successful present.
-    if (result == DXGI_STATUS_OCCLUDED)
-        return S_OK;
-
+    // Propagate occlusion: the presenter backs off instead of spinning the full
+    // cadence against an invisible window (alt-tab/minimize) and resets its
+    // deadline grid on return so no missed-slot burst is counted.
     return result;
 }
 
@@ -424,18 +429,8 @@ void AReproj_Dx12::PresenterMain()
     int activePacketIndex = -1;
     UINT64 activeFrame = 0;
     double nextDeadlineMs = 0.0;
-    constexpr double VBLANK_SAFETY_LEAD_MS = 2.0;
-    constexpr double MAX_TOTAL_EARLY_CORRECTION_MS = 16.0; // 4->16: 8ms drift needs >4ms to recover
-    double totalEarlyCorrectionMs = 0.0;
     uint32_t consecutiveJammedPresents = 0;
-    LARGE_INTEGER qpcFrequency {};
-    QueryPerformanceFrequency(&qpcFrequency);
-    const auto* config = Config::Instance();
-
-    // Telemetry: ensure clock initialized (already in ReprojTelemetry ctor)
-    // Poll calibration once at thread start if enabled.
-    if (false)
-        _telemetry.TryCalibrate();
+    uint32_t consecutiveOccludedPresents = 0;
 
     while (!_stopPresenter.load())
     {
@@ -447,75 +442,21 @@ void AReproj_Dx12::PresenterMain()
         // current slot while retaining a small safety margin.
         const auto maxUsableLeadMs = std::max(3.0, std::min(20.0, refreshPeriodMs * 0.75));
         const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs);
-        constexpr bool completionClock = true;
 
-        // Handle TargetRefresh change without restart: reset EMA and grid
-        // so 240→120 doesn't stay stuck at 4ms period with early correction drift.
+        // Handle TargetRefresh change without restart: reset the grid so a
+        // 240→120 switch doesn't stay stuck at the old period.
         static double lastSeenRefreshHz = 0.0;
         if (lastSeenRefreshHz > 1.0 && std::abs(refreshHz - lastSeenRefreshHz) > 0.5)
         {
-            _measuredRefreshPeriodMs = refreshPeriodMs;
-            _displayClockAnchorMs = 0.0;
-            totalEarlyCorrectionMs = 0.0;
             _dispatchLeadMs = 3.0;
             nextDeadlineMs = 0.0;
-            _lastStatsSyncRefreshCount = 0;
-            _lastStatsSyncQpc = 0;
         }
         lastSeenRefreshHz = refreshHz;
 
-        // Telemetry per-slot record (only if enabled, otherwise dummy to avoid overhead)
-        ReprojSlotRecord* tSlot = nullptr;
-        constexpr bool telemetryEnabled = false;
-        if (telemetryEnabled)
-        {
-            tSlot = _telemetry.BeginSlot();
-            tSlot->loopBeginQpc = _telemetry.NowQpc();
-            tSlot->targetRefreshHz = refreshHz;
-            tSlot->configuredPeriodMs = refreshPeriodMs;
-            tSlot->measuredPeriodMs = _measuredRefreshPeriodMs;
-            tSlot->dispatchLeadMs = dispatchLeadMs;
-            tSlot->displayClockAnchorMs = _displayClockAnchorMs;
-            tSlot->totalEarlyCorrectionMs = totalEarlyCorrectionMs;
-            tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
-            tSlot->softwareDeadlineQpc = 0; // filled below when known
-            // Periodically try calibration and poll completed GPU work
-            _telemetry.TryCalibrate();
-            _telemetry.PollCompletedGpuWork();
-        }
-
-        // Wine can advance DXGI frame statistics once per composed output rather than per
-        // physical vblank.  The completion-clock mode deliberately treats Present(1)'s
-        // return timestamp as the phase source and leaves this unstable correction out.
-        if (!completionClock && SampleDisplayClock(Util::MillisecondsNow()) && nextDeadlineMs > 0.0)
-        {
-            const auto nearestVblankMs =
-                _displayClockAnchorMs +
-                std::round((nextDeadlineMs - _displayClockAnchorMs) / refreshPeriodMs) * refreshPeriodMs;
-            const auto correctedMs = nearestVblankMs - VBLANK_SAFETY_LEAD_MS;
-            if (correctedMs < nextDeadlineMs)
-            {
-                const auto remainingBudgetMs = MAX_TOTAL_EARLY_CORRECTION_MS + totalEarlyCorrectionMs;
-                const auto appliedDeltaMs =
-                    std::max(std::max(correctedMs - nextDeadlineMs, -refreshPeriodMs * 0.5), -remainingBudgetMs);
-                if (appliedDeltaMs < 0.0)
-                {
-                    nextDeadlineMs += appliedDeltaMs;
-                    totalEarlyCorrectionMs += appliedDeltaMs;
-                    if (tSlot)
-                        tSlot->displayClockCorrectionApplied = true;
-                }
-            }
-        }
-
-        if (tSlot)
-        {
-            tSlot->measuredPeriodMs = _measuredRefreshPeriodMs;
-            tSlot->dxgiStatsValid = _displayClockAnchorMs > 0.0 && _measuredRefreshPeriodMs > 1.0;
-            tSlot->displayClockAnchorMs = _displayClockAnchorMs;
-            tSlot->totalEarlyCorrectionMs = totalEarlyCorrectionMs;
-            tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
-        }
+        // Per-slot telemetry is compiled out of the minimal path (see AGENTS.md):
+        // the once-per-second Reproj: line is the only instrument. No per-slot
+        // allocation, QPC sampling, or GPU timestamp queries here.
+        _currentTelemetrySlot = nullptr;
 
         if (nextDeadlineMs > 0.0)
         {
@@ -523,159 +464,47 @@ void AReproj_Dx12::PresenterMain()
             const auto lateness = now - nextDeadlineMs;
             if (lateness >= refreshPeriodMs)
             {
-                const auto missedDeadlineMs = nextDeadlineMs;
                 const auto skipped = static_cast<uint32_t>(std::floor(lateness / refreshPeriodMs));
                 nextDeadlineMs += skipped * refreshPeriodMs;
                 std::scoped_lock metricsLock(_metricsMutex);
                 _metricsMissedDisplaySlots += skipped;
-                if (tSlot)
-                {
-                    tSlot->outcome = ReprojSlotOutcome::SoftwareSkipped;
-                    // representedSlots describes the output produced by this
-                    // record. These are absent slots, so keep it at one and
-                    // account for the skipped vblanks exactly once below.
-                    tSlot->representedSlots = 1;
-                    tSlot->skippedSlotsBeforeAttempt = skipped;
-                    const auto nowQpc = _telemetry.NowQpc();
-                    const auto deadlineQpc =
-                        nowQpc + static_cast<int64_t>((missedDeadlineMs - now) * qpcFrequency.QuadPart / 1000.0);
-                    tSlot->softwareDeadlineQpc = deadlineQpc;
-                    tSlot->wakeTargetQpc =
-                        deadlineQpc - static_cast<int64_t>(dispatchLeadMs * qpcFrequency.QuadPart / 1000.0);
-                    tSlot->wakeCompletedQpc = nowQpc;
-                    tSlot->targetRefreshHz = refreshHz;
-                    _telemetry.FinalizeSlot(tSlot);
-                    _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-                    // Publish window if due
-                    if (_telemetry.ShouldPublish(_telemetry.NowQpc()))
-                    {
-                        auto snap = _telemetry.Publish(_telemetry.NowQpc(), _metricsMissedDisplaySlots);
-                        if (_telemetry.ShouldDumpMiss(snap))
-                            _telemetry.DumpMissWindow(tSlot->sequence);
-                    }
-                    // Reset tSlot to avoid double-finalize below (create new slot next iteration)
-                    tSlot = nullptr;
-                    // We still need to sleep until next deadline's lead, but skip this slot's present.
-                    // Continue to next iteration after deadline adjustment.
-                    // Fall through to WaitForPresenterDeadline handling below with skipped accounting.
-                }
-            }
-
-            if (tSlot)
-            {
-                const double deadlineMs = nextDeadlineMs;
-                const double wakeTargetMs = deadlineMs - dispatchLeadMs;
-                // Convert ms to QPC using telemetry clock
-                // Simpler: store ms-based deadline in QPC via Now + delta
-                // We'll store softwareDeadline as QPC corresponding to nextDeadlineMs
-                // Approximate: softwareDeadlineQpc = NowQpc + (deadlineMs - now) * freq/1000
-                const int64_t deltaQpc =
-                    static_cast<int64_t>((deadlineMs - Util::MillisecondsNow()) * qpcFrequency.QuadPart / 1000.0);
-                tSlot->softwareDeadlineQpc = _telemetry.NowQpc() + deltaQpc;
-                tSlot->wakeTargetQpc =
-                    tSlot->softwareDeadlineQpc - static_cast<int64_t>(dispatchLeadMs * qpcFrequency.QuadPart / 1000.0);
             }
 
             const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
             const auto wakeCompletedMs = Util::MillisecondsNow();
-            if (tSlot)
-                tSlot->wakeCompletedQpc = _telemetry.NowQpc();
 
-            // Adapt from usable headroom after the actual wake, not from loop-top lateness. Present(1)
-            // normally blocks for most of a refresh, so loop-top is early even when Wine's timer then
-            // overshoots the requested wake by 3-10 ms. An older GPU-duration path reset this to 3 ms
-            // every slot, making the old adaptation ineffective (telemetry always reported lead=3.00).
-            const double LEAD_GROW_MS = State::Instance().isRunningOnLinux ? 1.0 : 0.5;
-            constexpr double LEAD_DECAY_MS = 0.05;
+            // Symmetric proportional lead control: grow when the wake lands too
+            // close to the deadline, relax when headroom is generous. The old
+            // +1.0/-0.05 ratchet stuck at the 8 ms cap and added latency.
             const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
             const double growCap = std::min(8.0, maxUsableLeadMs);
-            // On Proton the timer can overshoot even with 1ms spin window; grow faster so we
-            // recover from a burst of late wakes in fewer slots.
-            if (wakeHeadroomMs < (State::Instance().isRunningOnLinux ? 2.5 : 2.0))
-                _dispatchLeadMs = std::min(_dispatchLeadMs + LEAD_GROW_MS, growCap);
+            if (wakeHeadroomMs < 2.0)
+                _dispatchLeadMs = std::min(_dispatchLeadMs + 0.25, growCap);
             else if (wakeHeadroomMs > 4.0)
-                _dispatchLeadMs = std::max(_dispatchLeadMs - LEAD_DECAY_MS, 3.0);
+                _dispatchLeadMs = std::max(_dispatchLeadMs - 0.1, 3.0);
 
             if (!deadlineOk)
-            {
-                if (tSlot)
-                {
-                    tSlot->outcome = ReprojSlotOutcome::PresenterStopped;
-                    _telemetry.FinalizeSlot(tSlot);
-                    _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-                }
                 break;
-            }
-        }
-        else if (tSlot)
-        {
-            tSlot->softwareDeadlineQpc = 0;
-            tSlot->wakeTargetQpc = 0;
-            tSlot->wakeCompletedQpc = _telemetry.NowQpc();
         }
 
-        if (tSlot)
-            tSlot->waitableBeginQpc = _telemetry.NowQpc();
         const auto slotResult = WaitForPresentSlot();
-        if (tSlot)
-        {
-            tSlot->waitableEndQpc = _telemetry.NowQpc();
-            tSlot->waitableResult = slotResult;
-            if (FAILED(slotResult) && slotResult != DXGI_ERROR_WAS_STILL_DRAWING)
-                tSlot->outcome = ReprojSlotOutcome::WaitableTimeout; // will be refined below
-        }
         if (slotResult != S_OK)
         {
             if (slotResult != DXGI_ERROR_WAS_STILL_DRAWING)
             {
                 _presenterState.store(PresenterState::Failed);
-                if (tSlot)
-                {
-                    tSlot->outcome = ReprojSlotOutcome::WaitableTimeout;
-                    _telemetry.FinalizeSlot(tSlot);
-                    _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-                    if (_telemetry.ShouldPublish(_telemetry.NowQpc()))
-                    {
-                        auto snap = _telemetry.Publish(_telemetry.NowQpc(), _metricsMissedDisplaySlots);
-                        if (_telemetry.ShouldDumpMiss(snap))
-                            _telemetry.DumpMissWindow(tSlot->sequence);
-                    }
-                }
             }
             else
             {
                 std::scoped_lock metricsLock(_metricsMutex);
                 ++_metricsMissedDisplaySlots;
-                if (tSlot)
-                {
-                    tSlot->outcome = ReprojSlotOutcome::WaitableTimeout;
-                    tSlot->primaryMissCause = ReprojMissCause::WaitableLate;
-                    _telemetry.FinalizeSlot(tSlot);
-                    _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-                    if (_telemetry.ShouldPublish(_telemetry.NowQpc()))
-                    {
-                        auto snap = _telemetry.Publish(_telemetry.NowQpc(), _metricsMissedDisplaySlots);
-                        if (_telemetry.ShouldDumpMiss(snap))
-                            _telemetry.DumpMissWindow(tSlot->sequence);
-                    }
-                }
             }
             if (nextDeadlineMs > 0.0)
                 nextDeadlineMs += refreshPeriodMs;
             continue;
         }
         if (_stopPresenter.load())
-        {
-            if (tSlot)
-            {
-                tSlot->outcome = ReprojSlotOutcome::PresenterStopped;
-                _telemetry.FinalizeSlot(tSlot);
-            }
             break;
-        }
-
-        if (tSlot)
-            tSlot->packetSelectionQpc = _telemetry.NowQpc();
 
         int newestPacketIndex = -1;
         UINT64 newestFrame = activeFrame;
@@ -716,13 +545,9 @@ void AReproj_Dx12::PresenterMain()
         }
 
         bool newAnchor = false;
-        // A claimed packet is complete by construction above. On reuse,
-        // captureReady is false when a newer anchor existed but was skipped
-        // as incomplete.
-        bool captureReady = newestReadyFrame <= activeFrame;
+        // A claimed packet is complete by construction above.
         if (newestPacketIndex >= 0)
         {
-            captureReady = true;
             auto expected = PacketState::Ready;
             if (_packets[newestPacketIndex].state.compare_exchange_strong(expected, PacketState::Presenting))
             {
@@ -752,29 +577,9 @@ void AReproj_Dx12::PresenterMain()
             ++_metricsCaptureNotReady;
         }
 
-        if (tSlot)
-        {
-            tSlot->anchorFrameId = activeFrame;
-            tSlot->captureFenceReadyAtSelection = captureReady;
-            tSlot->newAnchor = newAnchor;
-            tSlot->repeatedAnchor = !newAnchor && activePacketIndex >= 0;
-        }
-
         if (activePacketIndex < 0)
         {
             nextDeadlineMs = 0.0;
-            if (tSlot)
-            {
-                tSlot->outcome = ReprojSlotOutcome::NoAnchor;
-                _telemetry.FinalizeSlot(tSlot);
-                _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-                if (_telemetry.ShouldPublish(_telemetry.NowQpc()))
-                {
-                    auto snap = _telemetry.Publish(_telemetry.NowQpc(), _metricsMissedDisplaySlots);
-                    if (_telemetry.ShouldDumpMiss(snap))
-                        _telemetry.DumpMissWindow(tSlot->sequence);
-                }
-            }
             std::unique_lock lock(_presentMutex);
             _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(refreshPeriodMs),
                                 [&] { return _stopPresenter.load() || _readyFrameId.load() > activeFrame; });
@@ -784,11 +589,6 @@ void AReproj_Dx12::PresenterMain()
         auto& packet = _packets[activePacketIndex];
         ContentFrame* selectedContent = &packet;
         const bool newContent = newAnchor;
-        if (tSlot)
-        {
-            tSlot->newAnchor = newContent;
-            tSlot->repeatedAnchor = !newContent;
-        }
         const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
         const auto targetDisplayMs = nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
         const auto rawPeriod = packet.rawFrameDelta > 1.0 ? packet.rawFrameDelta : packet.frameDelta;
@@ -825,151 +625,60 @@ void AReproj_Dx12::PresenterMain()
             ++_metricsHitchHolds;
         }
 
-        if (tSlot)
-        {
-            tSlot->packetRenderTimestampMs = selectedContent->renderTimestamp;
-            tSlot->sourcePoseTimestampMs = selectedContent->sourcePoseTimestamp;
-            tSlot->rawCaptureIntervalMs = static_cast<float>(packet.rawFrameDelta);
-            tSlot->selectedFrameIntervalMs = static_cast<float>(packet.frameDelta);
-            tSlot->sourceProvidedFrameIntervalMs = static_cast<float>(State::Instance().lastFGFrameTime);
-            tSlot->refreshPeriodMs = static_cast<float>(refreshPeriodMs);
-            tSlot->anchorAgeMs = static_cast<float>(anchorAgeMs);
-            tSlot->unclampedTimeStep =
-                static_cast<float>(anchorAgeMs / realPeriodMs);
-            tSlot->finalTimeStep = timeStep;
-            tSlot->maxTimeStep = maxTimeStep;
-            tSlot->timestepClamped = tSlot->unclampedTimeStep > maxTimeStep || tSlot->unclampedTimeStep < 0;
-            tSlot->mvScaleX = selectedContent->constants.mvScaleX;
-            tSlot->mvScaleY = selectedContent->constants.mvScaleY;
-            tSlot->jitterX = selectedContent->constants.jitterX;
-            tSlot->jitterY = selectedContent->constants.jitterY;
-            tSlot->cameraVFov = selectedContent->constants.cameraVFov;
-            tSlot->cameraAspect = selectedContent->constants.cameraAspect;
-            tSlot->cameraNear = selectedContent->constants.cameraNear;
-            tSlot->cameraFar = selectedContent->constants.cameraFar;
-            tSlot->requestedMode = ReprojEffectiveMode::RotationOnly;
-            // Record the actual constants submitted to the shader.  Packet resource
-            // availability alone cannot distinguish the stable rotation-only path
-            // from full depth/camera reprojection.
-            tSlot->effectiveMode = packet.warpAllowed ? ReprojEffectiveMode::RotationOnly
-                                                       : ReprojEffectiveMode::Unwarped;
-            tSlot->velocityAvailable = false;
-            tSlot->depthAvailable = false;
-            tSlot->cameraBasisAvailable = packet.hasCamera;
-            tSlot->depthConstantsValid = false;
-            tSlot->cameraProjectionValid =
-                selectedContent->constants.cameraVFov > 0.01f && selectedContent->constants.cameraAspect > 0.01f;
-            tSlot->hudlessSource = packet.hasUi;
-            tSlot->poseIntervalMs = static_cast<float>(realPeriodMs);
-            // Timestamp origin
-            if (selectedContent->sourcePoseTimestamp > 0 && packet.hasCamera)
-                tSlot->timestampOrigin = ReprojTimestampOrigin::CameraCallback;
-            else if (selectedContent->sourcePoseTimestamp > 0)
-                tSlot->timestampOrigin = ReprojTimestampOrigin::PacketCapture;
-            else
-                tSlot->timestampOrigin = ReprojTimestampOrigin::FrameIntervalFallback;
-            // Shadow calculations
-            const double rawStep = anchorAgeMs / std::max(1.0, packet.frameDelta);
-            const double emaStep = anchorAgeMs / std::max(1.0, _realPeriodEmaMs);
-            // Store differences via unused fields for analysis (reusing shadow arrays in publish)
-            (void) rawStep;
-            (void) emaStep;
-        }
-
-        // GPU query reservation (sequence-indexed, non-blocking)
-        uint32_t queryStart = UINT32_MAX;
-        uint64_t scFenceBefore = _scFenceValue + 1;
-        if (tSlot && telemetryEnabled)
-        {
-            queryStart = _telemetry.ReserveGpuQueries(tSlot->sequence, scFenceBefore);
-            tSlot->gpuQueryIndex = queryStart;
-            tSlot->scFenceValue = (queryStart != UINT32_MAX) ? scFenceBefore : 0;
-            tSlot->commandRecordingBeginQpc = _telemetry.NowQpc();
-            _currentTelemetrySlot = tSlot;
-        }
-        else
-        {
-            _currentTelemetrySlot = nullptr;
-        }
-
-        if (tSlot)
-        {
-            tSlot->contentKind = 0;
-            tSlot->contentFraction = 1.0f;
-            tSlot->contentAgeMs = static_cast<float>(
-                std::max(0.0, targetDisplayMs - selectedContent->sourcePoseTimestamp));
-            tSlot->fgDurationMs = 0.0f;
-            tSlot->targetScanoutTimestampMs = targetDisplayMs + refreshPeriodMs * 0.5;
-        }
+        // No per-slot telemetry: timeStep inputs stay local, the 1 Hz log line aggregates.
+        constexpr uint32_t queryStart = UINT32_MAX;
 
         const bool dispatched = packet.warpAllowed && !focusLost
                                     ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
                                     : DisplayPacket(activePacketIndex, true, queryStart);
 
-        if (tSlot)
-        {
-            tSlot->commandRecordingEndQpc = _telemetry.NowQpc();
-            tSlot->queueSubmitQpc = _telemetry.NowQpc();
-            if (queryStart != UINT32_MAX)
-                _telemetry.OnGpuWorkSubmitted(tSlot->sequence, scFenceBefore, queryStart, tSlot->queueSubmitQpc);
-            _currentTelemetrySlot = nullptr;
-        }
-        else
-        {
-            _currentTelemetrySlot = nullptr;
-        }
-
         if (!dispatched)
         {
             LOG_ERROR("Reproj: scheduled output failed for anchor {}", packet.frameId);
             _presenterState.store(PresenterState::Failed);
-            if (tSlot)
-            {
-                tSlot->outcome = ReprojSlotOutcome::DispatchFailed;
-                _telemetry.FinalizeSlot(tSlot);
-                _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-            }
             break;
         }
-
-        if (tSlot)
-            tSlot->presentBeginQpc = _telemetry.NowQpc();
 
         const auto presentCallStartMs = Util::MillisecondsNow();
         const auto result = PresentCompositorFrame(1, 0, !newContent, false);
         const auto presentedAt = Util::MillisecondsNow();
         const auto presentDurationMs = presentedAt - presentCallStartMs;
         const auto poseAge = static_cast<float>(std::max(0.0, targetDisplayMs - selectedContent->sourcePoseTimestamp));
-        RecordWarpFrame(result == S_OK, result != S_OK, poseAge);
-
-        if (tSlot)
+        const bool occluded = result == DXGI_STATUS_OCCLUDED;
+        // Occlusion is invisible-but-successful: count the frame, back off the
+        // cadence, and restart the deadline grid so the return to visible
+        // doesn't burst-count missed slots or jump timeStep.
+        if (occluded)
         {
-            tSlot->presentEndQpc = _telemetry.NowQpc();
-            tSlot->presentResult = result;
-            tSlot->presentBlockMs = static_cast<float>(presentDurationMs);
-            tSlot->presentIntervalMs = static_cast<float>(refreshPeriodMs);
-            if (_lastDisplayPresentMs > 0.0)
+            RecordWarpFrame(true, false, poseAge);
+            if (++consecutiveOccludedPresents == 1)
+                LOG_INFO("Reproj: window occluded, backing off presenter cadence");
+            consecutiveJammedPresents = 0;
+            nextDeadlineMs = 0.0;
+            // Keep the interval tracker current while invisible so the return
+            // to visible doesn't burst-count the whole occluded span as missed.
             {
-                const double interval = presentedAt - _lastDisplayPresentMs;
-                tSlot->presentIntervalMs = static_cast<float>(interval);
+                std::scoped_lock metricsLock(_metricsMutex);
+                _lastDisplayPresentMs = presentedAt;
             }
-            tSlot->outcome = (result == S_OK) ? ReprojSlotOutcome::Presented : ReprojSlotOutcome::PresentFailed;
-            _telemetry.FinalizeSlot(tSlot);
-            _telemetry.ClassifySlot(*tSlot, refreshPeriodMs);
-            if (_telemetry.ShouldPublish(_telemetry.NowQpc()))
-            {
-                auto snap = _telemetry.Publish(_telemetry.NowQpc(), _metricsMissedDisplaySlots);
-                if (_telemetry.ShouldDumpMiss(snap))
-                    _telemetry.DumpMissWindow(tSlot->sequence);
-            }
+            FrameLimit::sleepForMs(50.0);
+            continue;
+        }
+        if (consecutiveOccludedPresents > 0)
+        {
+            LOG_INFO("Reproj: window visible again after {} occluded slots", consecutiveOccludedPresents);
+            consecutiveOccludedPresents = 0;
+            nextDeadlineMs = 0.0;
         }
 
-        if (result != S_OK)
+        if (FAILED(result))
         {
+            RecordWarpFrame(false, true, poseAge);
             LOG_ERROR("Reproj: display-clock present failed: {:X}", (UINT) result);
             _presenterState.store(PresenterState::Failed);
             break;
         }
+        RecordWarpFrame(true, false, poseAge);
 
         constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;
         constexpr double WATCHDOG_WEDGE_MS = 2000.0;
@@ -1002,7 +711,7 @@ void AReproj_Dx12::PresenterMain()
             _lastDisplayPresentMs = presentedAt;
         }
 
-        if (completionClock || nextDeadlineMs <= 0.0)
+        if (nextDeadlineMs <= 0.0)
             nextDeadlineMs = presentedAt + refreshPeriodMs;
         else
             nextDeadlineMs += refreshPeriodMs;
