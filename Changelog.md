@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.36 (2026-09-03)
+* Reproj: adaptive repeat-warp shed — repeated display slots blit instead of warp while the source cannot sustain its frame-rate cap or the game thread stalls behind the GPU, then full 120 Hz warps resume
+
 ## v10.0.1.35 (2026-09-03)
 * Fix startup crash (NULL packet.color deref) in the capture-worker path
 

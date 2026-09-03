@@ -481,6 +481,86 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     return result;
 }
 
+// Adaptive repeat-warp shed: the presenter normally warps every repeated
+// display slot for a full 120 Hz image cadence, but that warp compute shares
+// the GPU with the game. When the source cannot sustain its frame-rate cap
+// (cadence EMA over target) or the game thread is stalling behind the GPU
+// (block EMA), repeated slots take the cheap blit path instead so the headroom
+// goes back to the game; full warps resume once both signals recover.
+void AReproj_Dx12::EvaluateRepeatWarpShed(double nowMs, double sourcePeriodMs)
+{
+    const auto sourceCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
+    // Shedding only makes sense behind a source frame-rate cap: it hands GPU
+    // time back to the game so the cap holds. An uncapped source runs flat-out
+    // (its own pacing is already "as fast as the GPU allows"), so warps on
+    // repeated slots are pure display smoothness with no source to protect.
+    if (!(sourceCap > 1.0))
+    {
+        _repeatWarpShed.store(false, std::memory_order_relaxed);
+        return;
+    }
+    const auto targetPeriodMs = 1000.0 / sourceCap;
+
+    // Stall samples arrive at the game's present cadence (every source frame,
+    // regardless of the display slot rate). Feeding the EMA only when a newer
+    // sample exists keeps one slot from double-counting the same stall value.
+    const float stallMs = _latestGameStallMs.load(std::memory_order_relaxed);
+    const bool haveFreshSample = stallMs >= 0.0f && stallMs < 500.0f;
+    const double stallAgeMs = _lastStallSampleMs > 0.0 ? nowMs - _lastStallSampleMs : 0.0;
+    double stallEma = _stallEmaMs.load(std::memory_order_relaxed);
+    if (haveFreshSample && (stallMs != _lastStallSampleValue || stallAgeMs > 120.0))
+    {
+        stallEma = stallEma > 0.0 ? stallEma * 0.7 + stallMs * 0.3 : stallMs;
+        _lastStallSampleMs = nowMs;
+        _lastStallSampleValue = stallMs;
+    }
+    else
+    {
+        // No fresh stall sample (game thread paused or stalled). Decay the EMA
+        // so a stale stall spike does not keep the shed engaged forever.
+        const double elapsedMs = _lastShedEvaluateMs > 0.0 ? std::max(0.0, nowMs - _lastShedEvaluateMs) : 8.0;
+        const double decay = std::exp(-elapsedMs / 400.0);
+        stallEma *= decay;
+    }
+    _stallEmaMs.store(stallEma, std::memory_order_relaxed);
+
+    // Smooth the source period (the game's own EMA already rejects pacing
+    // outliers, so a light filter here is enough to drive the shed decision).
+    if (sourcePeriodMs > 0.0 && sourcePeriodMs < 500.0)
+        _cadenceEmaMs = _cadenceEmaMs > 0.0 ? _cadenceEmaMs * 0.6 + sourcePeriodMs * 0.4 : sourcePeriodMs;
+
+    // Hysteresis: engage at 1.15x the target period (a 60 Hz cap sheds when
+    // the source cannot hold ~52 FPS), release back at the cap. The cadence EMA
+    // converges to the cap period from above when the source recovers, so the
+    // release band sits slightly above 1.0x or the shed would never lift. A
+    // sustained game-thread stall (block, pacing sleep excluded) engages too
+    // and also demands cadence recovery before warps return.
+    constexpr double CADENCE_ENGAGE_RATIO = 1.15;
+    constexpr double CADENCE_RELEASE_RATIO = 1.03;
+    constexpr double STALL_ENGAGE_MS = 8.0;
+    constexpr double STALL_RELEASE_MS = 6.0; // block decays back to its ~1-6 ms floor once warps shed
+    constexpr double MIN_SHED_MS = 400.0; // prevent warp/shed oscillation around the boundary
+
+    const bool cadenceEngage = _cadenceEmaMs > targetPeriodMs * CADENCE_ENGAGE_RATIO;
+    const bool stallEngage = _stallEmaMs.load(std::memory_order_relaxed) > STALL_ENGAGE_MS;
+    const bool engage = cadenceEngage || stallEngage;
+
+    if (engage && !_repeatWarpShed.load(std::memory_order_relaxed))
+    {
+        _repeatWarpShed.store(true, std::memory_order_relaxed);
+        _shedEngagedAtMs = nowMs;
+    }
+    else if (_repeatWarpShed.load(std::memory_order_relaxed))
+    {
+        const bool heldMinimum = (nowMs - _shedEngagedAtMs) >= MIN_SHED_MS;
+        const bool cadenceRecovered = _cadenceEmaMs <= targetPeriodMs * CADENCE_RELEASE_RATIO;
+        const bool stallCleared = _stallEmaMs.load(std::memory_order_relaxed) <= STALL_RELEASE_MS;
+        if (heldMinimum && cadenceRecovered && stallCleared)
+            _repeatWarpShed.store(false, std::memory_order_relaxed);
+    }
+    _lastShedEvaluateMs = nowMs;
+}
+
 void AReproj_Dx12::PresenterMain()
 {
     int activePacketIndex = -1;
@@ -500,6 +580,16 @@ void AReproj_Dx12::PresenterMain()
         _presentIntervalCursor = 0;
         std::fill(_presentIntervals, _presentIntervals + _countof(_presentIntervals), 0.0);
     };
+
+    // Reset the adaptive shed controller on each presenter start so a shed
+    // carried over from a previous session cannot suppress warps after a restart.
+    _repeatWarpShed.store(false, std::memory_order_relaxed);
+    _cadenceEmaMs = 0.0;
+    _stallEmaMs.store(0.0, std::memory_order_relaxed);
+    _lastStallSampleMs = 0.0;
+    _lastStallSampleValue = -1.0f;
+    _lastShedEvaluateMs = 0.0;
+    _shedEngagedAtMs = 0.0;
 
     while (!_stopPresenter.load())
     {
@@ -723,8 +813,18 @@ void AReproj_Dx12::PresenterMain()
         // No per-slot telemetry: timeStep inputs stay local, the 1 Hz log line aggregates.
         constexpr uint32_t queryStart = UINT32_MAX;
 
+        // Adaptive repeat-warp shed: repeated display slots are normally warped
+        // for a full display-cadence image. When the source cannot sustain its
+        // frame-rate cap or the game thread stalls behind the GPU, the shed
+        // takes the cheap blit path so warp compute stops stealing the source's
+        // frame budget. It re-engages warps as soon as the source is healthy
+        // again, so full 120 Hz feel returns in easy scenes.
+        EvaluateRepeatWarpShed(targetDisplayMs, packet.frameDelta);
+        const bool repeatWarp =
+            Config::Instance()->ReprojRepeatWarp.value_or_default() &&
+            !_repeatWarpShed.load(std::memory_order_relaxed);
         const bool shouldWarp =
-            packet.warpAllowed && !focusLost && (newContent || Config::Instance()->ReprojRepeatWarp.value_or_default());
+            packet.warpAllowed && !focusLost && (newContent || repeatWarp);
         const bool dispatched = shouldWarp
                                     ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
                                     : DisplayPacket(activePacketIndex, true, queryStart);

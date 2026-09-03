@@ -113,6 +113,85 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("_realPeriodEmaMs", capture)
         self.assertIn("packet.frameDelta = _realPeriodEmaMs", capture)
 
+    def test_repeat_warp_shed_engages_on_source_cadence_and_recovers(self):
+        # The adaptive shed exists so a 60 Hz source keeps full-warp repeats
+        # while it holds the cap, and hands the GPU back to the game (blit
+        # repeats) only when the source falls behind or the game thread stalls.
+        root = Path(__file__).resolve().parents[2]
+        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        whole = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
+        self.assertIn("void AReproj_Dx12::EvaluateRepeatWarpShed", presenter)
+        decision = presenter.split("const bool shouldWarp =", 1)[1].split("const bool dispatched = shouldWarp", 1)[0]
+        # The shed flag suppresses warps on repeated slots only: new anchors and
+        # a healthy source still get full-warp repeats.
+        self.assertIn("newContent || repeatWarp", decision)
+        self.assertIn("ReprojRepeatWarp.value_or_default()", presenter)
+        self.assertIn("!_repeatWarpShed.load(std::memory_order_relaxed)", presenter)
+        # Hysteresis with an engage band above the cap and a release back at it.
+        self.assertIn("CADENCE_ENGAGE_RATIO", presenter)
+        self.assertIn("CADENCE_RELEASE_RATIO", presenter)
+        self.assertIn("MIN_SHED_MS", presenter)
+        self.assertIn("STALL_ENGAGE_MS", presenter)
+        # The game present path publishes the per-frame stall the shed consumes.
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        self.assertIn("_latestGameStallMs.store", reproj)
+        self.assertIn("std::atomic<float> _latestGameStallMs", whole)
+
+    def test_shed_controller_hysteresis_model(self):
+        # Model EvaluateRepeatWarpShed: cadence EMA + stall EMA with engage at
+        # 1.15x the cap period and release at 1.0x once the stall clears. A
+        # source holding its cap keeps warping repeats; a sustained drop sheds
+        # them and recovery re-engages warps (with the minimum shed dwell).
+        target_period = 1000.0 / 60.0
+        cadence_ema = 0.0
+        stall_ema = 0.0
+        shed = False
+        engaged_at = None
+
+        def slot(now_ms, period_ms, stall_ms):
+            nonlocal cadence_ema, stall_ema, shed, engaged_at
+            if cadence_ema <= 0.0:
+                cadence_ema = period_ms
+            else:
+                cadence_ema = cadence_ema * 0.6 + period_ms * 0.4
+            if stall_ema <= 0.0:
+                stall_ema = stall_ms
+            else:
+                stall_ema = stall_ema * 0.7 + stall_ms * 0.3
+            engage = cadence_ema > target_period * 1.15 or stall_ema > 8.0
+            if engage and not shed:
+                shed = True
+                engaged_at = now_ms
+            elif shed:
+                recovered = (cadence_ema <= target_period * 1.03 and stall_ema <= 6.0 and
+                             (now_ms - engaged_at) >= 400.0)
+                if recovered:
+                    shed = False
+            return shed
+
+        # Healthy 60 Hz source, modest stall: warps stay on.
+        now = 0.0
+        for i in range(120):
+            self.assertFalse(slot(now, target_period, 3.0))
+            now += 8.333
+        # Sustained 48 FPS source with a rising stall: the shed engages and sticks.
+        shed_at = None
+        for i in range(120):
+            s = slot(now, 20.8, 8.0)
+            if s and shed_at is None:
+                shed_at = now
+            now += 8.333
+        self.assertIsNotNone(shed_at)
+        # Recovery to the cap with a cleared stall re-engages warps after the dwell.
+        recovered_at = None
+        for i in range(240):
+            s = slot(now, target_period, 2.0)
+            if not s and recovered_at is None:
+                recovered_at = now
+            now += 8.333
+        self.assertIsNotNone(recovered_at)
+        self.assertGreater(recovered_at - shed_at, 400.0)
+
     def test_presenter_uses_present_completion_clock(self):
         root = Path(__file__).resolve().parents[2]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")

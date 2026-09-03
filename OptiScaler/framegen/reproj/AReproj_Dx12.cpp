@@ -1109,6 +1109,7 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
         std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStartMs));
     _metricsGamePresentPaceMaxMs =
         std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
+    _latestGameStallMs.store(static_cast<float>(paceStart - presentStartMs), std::memory_order_relaxed);
 }
 
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
@@ -2155,6 +2156,8 @@ void AReproj_Dx12::LogMetricsIfDue()
     _runtimeMetrics.droppedAnchors = _metricsSkippedAnchorSamples;
     _runtimeMetrics.directCaptures = _metricsDirectCaptures;
     _runtimeMetrics.captureNotReady = _metricsCaptureNotReady;
+    _runtimeMetrics.repeatWarpShed = _repeatWarpShed.load(std::memory_order_relaxed);
+    _runtimeMetrics.stallEmaMs = static_cast<float>(_stallEmaMs.load(std::memory_order_relaxed));
     // block/pace report the worst game-thread cost in the one-second window.
     // Reporting the last sample hid exactly the intermittent handoff stalls
     // that pull an otherwise 60+ FPS source into the mid-50s.
@@ -2175,14 +2178,15 @@ void AReproj_Dx12::LogMetricsIfDue()
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} latch={}/{}/{} lateAge={:.1f}ms "
-             "sensX={:.7f} hold={} ({}, block={:.2f}ms pace={:.2f}ms)",
+             "sensX={:.7f} hold={} shed={} stallEma={:.1f}ms ({}, block={:.2f}ms pace={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
              _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, _metricsLateCamHits,
              _metricsPacketBaseHits, _metricsLateFallbacks, lateCamAge,
-             _trackedMouseSensitivityX.load(std::memory_order_relaxed), _metricsHitchHolds, presenter,
+             _trackedMouseSensitivityX.load(std::memory_order_relaxed), _metricsHitchHolds,
+             _repeatWarpShed.load(std::memory_order_relaxed), _stallEmaMs.load(std::memory_order_relaxed), presenter,
              _runtimeMetrics.gamePresentBlockMs, _runtimeMetrics.gamePresentPaceMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
@@ -2451,6 +2455,7 @@ bool AReproj_Dx12::Present()
                 std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStart));
             _metricsGamePresentPaceMaxMs =
                 std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
+            _latestGameStallMs.store(static_cast<float>(paceStart - presentStart), std::memory_order_relaxed);
             return advanced;
         }
 
@@ -2519,6 +2524,7 @@ bool AReproj_Dx12::Present()
                 std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStart));
             _metricsGamePresentPaceMaxMs =
                 std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
+            _latestGameStallMs.store(static_cast<float>(paceStart - presentStart), std::memory_order_relaxed);
             return true;
         }
 

@@ -4115,10 +4115,11 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
                 ImGui::TextDisabled("Present interval mean %.2f ms / p95 %.2f ms | missed %u | lead %.2f ms",
                                     metrics.meanPresentIntervalMs, metrics.p95PresentIntervalMs,
                                     metrics.missedDisplaySlots, metrics.dispatchLeadMs);
-                ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s", metrics.poseAgeMs,
+                ImGui::TextDisabled("Anchor age %.1f ms | queue %u (%s) | game block %.2f ms%s%s", metrics.poseAgeMs,
                                     metrics.queueDepth,
                                     metrics.asyncPresenter ? "async virtual swapchain" : "safe synchronous",
-                                    metrics.gamePresentBlockMs, metrics.depthReady ? " | depth ready" : "");
+                                    metrics.gamePresentBlockMs, metrics.depthReady ? " | depth ready" : "",
+                                    metrics.repeatWarpShed ? " | repeat-warp shed" : "");
                 ImGui::TextDisabled("Pose prediction uses the last two rendered camera poses.");
                 if (metrics.focusLost || metrics.anchorStale || !metrics.depthReady)
                     ImGui::TextColored(toneMapColor(ImVec4(1.f, 0.8f, 0.f, 1.f)), "Warp paused: %s%s%s",

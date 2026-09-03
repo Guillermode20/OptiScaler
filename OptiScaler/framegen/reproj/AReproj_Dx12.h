@@ -36,6 +36,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool rotationOnly = false;
         bool hudWarped = true;
         bool asyncPresenter = false;
+        bool repeatWarpShed = false; // adaptive shed is currently active
+        float stallEmaMs = 0.0f;     // smoothed game-thread GPU stall feeding the shed
         float gamePresentBlockMs = 0.0f; // game-thread Present() work, pacing sleep excluded
         float gamePresentPaceMs = 0.0f;  // SourceFramerateLimit pacing sleep after the last published anchor
         float meanPresentIntervalMs = 0.0f;
@@ -215,6 +217,11 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool StartAsyncPresenter();
     void StopAsyncPresenter();
     void PresenterMain();
+    // Adaptive repeat-warp shed: when the source cannot sustain its frame-rate
+    // cap (cadence) or the game thread is stalling behind the GPU (block), the
+    // presenter skips the full warp on repeated display slots so GPU headroom
+    // goes back to the game. Restores full warps once both signals recover.
+    void EvaluateRepeatWarpShed(double nowMs, double sourcePeriodMs);
     HRESULT WaitForPresentSlot();
     HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot = true);
     bool SampleDisplayClock(double nowMs); // lock pacing to DXGI_FRAME_STATISTICS vblanks
@@ -268,6 +275,23 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
     float _metricsGamePresentPaceMaxMs = 0.0f;
+    // Per-frame game-thread stall (ms of GPU wait in the virtual handoff,
+    // pacing sleep excluded). Written relaxed by the game present path, read
+    // by the presenter's adaptive repeat-warp shed — single-float telemetry,
+    // no ordering contract.
+    std::atomic<float> _latestGameStallMs { 0.0f };
+    // Adaptive repeat-warp shed state (presenter thread only). When the source
+    // cannot sustain its frame-rate cap (cadence EMA over target) or the game
+    // thread is stalling behind the GPU (stall EMA), repeated display slots
+    // take the cheap blit path instead of a full warp so the GPU headroom goes
+    // back to the game; full warps resume once both recover.
+    std::atomic<bool> _repeatWarpShed { false }; // currently shedding repeated-slot warps
+    double _lastShedEvaluateMs = 0.0; // stall EMA decay clock
+    double _cadenceEmaMs = 0.0;       // smoothed source publish period
+    std::atomic<double> _stallEmaMs { 0.0 }; // smoothed game-thread GPU stall
+    double _lastStallSampleMs = 0.0;  // when the stall EMA was last fed
+    float _lastStallSampleValue = -1.0f; // last stall sample seen (dedupe repeats)
+    double _shedEngagedAtMs = 0.0;    // when the current shed began
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;
