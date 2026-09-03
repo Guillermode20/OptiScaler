@@ -1033,6 +1033,67 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     _runtimeMetrics.gamePresentPaceMs = 0.0f;
 }
 
+static const char* ReprojProbeFormatName(DXGI_FORMAT format)
+{
+    switch (format)
+    {
+    case DXGI_FORMAT_R32G32B32A32_FLOAT: return "RGBA32F";
+    case DXGI_FORMAT_R16G16B16A16_FLOAT: return "RGBA16F";
+    case DXGI_FORMAT_R32G32_FLOAT: return "RG32F";
+    case DXGI_FORMAT_R16G16_FLOAT: return "RG16F";
+    case DXGI_FORMAT_R32_FLOAT: return "R32F";
+    case DXGI_FORMAT_D32_FLOAT: return "D32F";
+    case DXGI_FORMAT_R32_TYPELESS: return "R32T";
+    case DXGI_FORMAT_D24_UNORM_S8_UINT: return "D24S8";
+    case DXGI_FORMAT_R24G8_TYPELESS: return "R24G8T";
+    case DXGI_FORMAT_R8G8B8A8_UNORM: return "RGBA8";
+    default: break;
+    }
+    return "?";
+}
+
+void AReproj_Dx12::ProbeCaptureInputs(int sourceIndex, ID3D12Resource* gameBackBuffer)
+{
+    // Depth/MV availability survey for the depth-warp decision. Game thread
+    // only (called from CaptureFramePacket). Logs the first sighting, any
+    // signature change, and a 30 s heartbeat. No behavior change.
+    auto describe = [](LockedDx12Resource& res, bool ready)
+    {
+        if (!res || res->GetResource() == nullptr)
+            return std::format("absent");
+        const auto desc = res->GetResource()->GetDesc();
+        return std::format(
+            "{} WxH={}x{}(res{}x{}) fmt={}({}) mips={} samples={} state=0x{:X} validity={} {}",
+            ready ? "ready" : "NOTREADY", desc.Width, desc.Height, res->width, res->height,
+            ReprojProbeFormatName(desc.Format), static_cast<int>(desc.Format), desc.MipLevels,
+            desc.SampleDesc.Count, static_cast<UINT>(res->state), static_cast<UINT>(res->validity),
+            res->copy != nullptr ? "copy" : "direct");
+    };
+
+    auto depth = GetResource(FG_ResourceType::Depth, sourceIndex);
+    auto velocity = GetResource(FG_ResourceType::Velocity, sourceIndex);
+    const bool depthReady = depth ? IsResourceReady(FG_ResourceType::Depth, sourceIndex) : false;
+    const bool velocityReady = velocity ? IsResourceReady(FG_ResourceType::Velocity, sourceIndex) : false;
+    const auto bbDesc = gameBackBuffer != nullptr ? gameBackBuffer->GetDesc() : D3D12_RESOURCE_DESC {};
+    const auto line = std::format(
+        "Reproj probe: bb={}x{} fmt={}({}) depth=[{}] velocity=[{}] "
+        "mvScale={:.4f}/{:.4f} jitter={:.5f}/{:.5f} invDepth={} legacyNearFar={:.4f}/{:.1f}",
+        bbDesc.Width, bbDesc.Height, ReprojProbeFormatName(bbDesc.Format), static_cast<int>(bbDesc.Format),
+        describe(depth, depthReady), describe(velocity, velocityReady), _mvScaleX[sourceIndex],
+        _mvScaleY[sourceIndex], _jitterX[sourceIndex], _jitterY[sourceIndex], IsInvertedDepth() ? 1 : 0,
+        _cameraNear[sourceIndex], _cameraFar[sourceIndex]);
+
+    static std::string lastLine;
+    static double lastLogMs = 0.0;
+    const auto nowMs = Util::MillisecondsNow();
+    if (line != lastLine || nowMs - lastLogMs > 30000.0)
+    {
+        lastLine = line;
+        lastLogMs = nowMs;
+        LOG_INFO("{}", line);
+    }
+}
+
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
                                       UINT virtualBufferIndex, bool warpAllowed)
 {
@@ -1063,6 +1124,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     ID3D12Resource* color = gameBackBuffer;
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
+
+    ProbeCaptureInputs(sourceIndex, gameBackBuffer);
 
     if (hudlessResource && uiResource && hudlessReady && uiReady)
     {

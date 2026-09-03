@@ -167,6 +167,7 @@ When the game stops publishing anchors for more than ~2.5 source periods (stream
 
 ### Current status
 
+- v10.0.1-pre23 (2026-09-03): depth/MV availability probe (throttled `Reproj probe:` line, zero behavior change) to de-risk the depth-warp decision for walking/hill translation judder.
 - v10.0.1-pre22 (2026-09-03): non-blocking capture skip + rotation ceiling 0.08→0.11 rad. Live data showed the old ceiling binding (three windows at exactly 4.58°) and game-thread `block` spikes >2 ms during loads (allocator pressure). Fast pans additionally stream content, compounding the stale-anchor disease — pure rotation itself is provably fine (slow pans smooth).
 - v10.0.1-pre21 (2026-09-03): hitch hold + latch-path diagnostics. KCD2 castle walk: steady state is healthy (source 85–105, display ~118–121, missed 0–4, lateCam steering, lateAge ~5 ms) but walking/loading judder persists. `hold` stays 0 (publishes never stall: 74–104/s — the game thread is fine, the GPU queue runs deep, so captures complete 1–3 frames late: poseAge 25–46 ms, capWait 25–39 even when healthy). Working model: stale anchors + walking translation that a rotation-only warp cannot represent + snaps on anchor update. `sensX` finally calibrated but wanders ±4% (0.00047–0.00051, never settles) — side-show, not the cause (residual tails are small). Remaining real fixes are Phase-4 capture latency and/or depth warp for translation (both big), or less game GPU load for fresher anchors. KCD2 runs uncapped (cap=60 regressed feel); do not re-impose without a live A/B.
 

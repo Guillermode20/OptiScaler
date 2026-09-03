@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.23 (2026-09-03)
+* Depth/MV availability probe: throttled capture-path survey of depth/velocity format, dims, state, validity plus MV metadata
+
 ## v10.0.1.22 (2026-09-03)
 * Non-blocking capture skip under allocator pressure (never stall game thread); late rotation ceiling 0.08 to 0.11 rad after live clamp hits
 

@@ -148,6 +148,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] rotation warp -> current backbuffer
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
+    void ProbeCaptureInputs(int sourceIndex, ID3D12Resource* gameBackBuffer); // throttled depth/MV survey, no effects
     bool CaptureAllocatorReady(int packetIndex); // game thread: non-blocking UI-allocator poll, never waits
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
