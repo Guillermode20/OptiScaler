@@ -744,7 +744,10 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     }
 
     if (deltaX == 0.0 && deltaY == 0.0 && !haveLateCamera)
+    {
+        ++_metricsLateFallbacks;
         return false;
+    }
 
     float sensX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
     float sensY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();
@@ -761,7 +764,10 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     double pitch = -deltaY * sensY;
 
     if (!std::isfinite(yaw) || !std::isfinite(pitch))
+    {
+        ++_metricsLateFallbacks;
         return false;
+    }
 
     constexpr double maxRotation = 0.08; // ~4.58 degrees maximum warp per slot
     const double rotation = std::hypot(yaw, pitch);
@@ -773,6 +779,14 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
 
     PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch),
                              pBaseRight, pBaseUp, pBaseForward);
+    if (haveLateCamera)
+    {
+        ++_metricsLateCamHits;
+        _metricsLateCamAgeTotalMs += std::max(0.0, Util::MillisecondsNow() - latestCamera.timestampMs);
+        ++_metricsLateCamAgeSamples;
+    }
+    else
+        ++_metricsPacketBaseHits;
     ++_metricsLateInputApplied;
     _metricsLateInputMaxDegrees = std::max(
         _metricsLateInputMaxDegrees,
@@ -1648,14 +1662,20 @@ void AReproj_Dx12::LogMetricsIfDue()
         _runtimeMetrics.p95PresentIntervalMs = static_cast<float>(*p95);
     }
     const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
+    const double lateCamAge = _metricsLateCamAgeSamples > 0
+                                    ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples
+                                    : 0.0;
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} ({}, block={:.2f}ms pace={:.2f}ms)",
+             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} latch={}/{}/{} lateAge={:.1f}ms "
+             "sensX={:.7f} ({}, block={:.2f}ms pace={:.2f}ms)",
              _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
              _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
              _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, poseAge, _runtimeMetrics.queueDepth,
              _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
-             _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, presenter,
+             _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, _metricsLateCamHits,
+             _metricsPacketBaseHits, _metricsLateFallbacks, lateCamAge,
+             _trackedMouseSensitivityX.load(std::memory_order_relaxed), presenter,
              _runtimeMetrics.gamePresentBlockMs, _runtimeMetrics.gamePresentPaceMs);
     _metricsTimestamp = now;
     _metricsRealFrames = 0;
@@ -1670,6 +1690,11 @@ void AReproj_Dx12::LogMetricsIfDue()
     _metricsMissedDisplaySlots = 0;
     _metricsLateInputSamples = 0;
     _metricsLateInputApplied = 0;
+    _metricsLateCamHits = 0;
+    _metricsPacketBaseHits = 0;
+    _metricsLateFallbacks = 0;
+    _metricsLateCamAgeTotalMs = 0.0;
+    _metricsLateCamAgeSamples = 0;
     _metricsHudComposites = 0;
     _metricsDirectCaptures = 0;
     _metricsCaptureNotReady = 0;
@@ -2139,6 +2164,11 @@ void AReproj_Dx12::Activate()
         _metricsSkippedAnchorSamples = 0;
         _metricsLateInputSamples = 0;
         _metricsLateInputApplied = 0;
+        _metricsLateCamHits = 0;
+        _metricsPacketBaseHits = 0;
+        _metricsLateFallbacks = 0;
+        _metricsLateCamAgeTotalMs = 0.0;
+        _metricsLateCamAgeSamples = 0;
         _metricsHudComposites = 0;
         _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;

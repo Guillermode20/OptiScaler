@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.20 (2026-09-03)
+* Latch path diagnostics: per-second late-camera/packet-base/fallback counts, late pose age, tracked sensitivity
+
 ## v10.0.1.19 (2026-09-03)
 * Async capture/presenter queue decoupling: capture copies run on the game DIRECT queue with no per-anchor game pin, presenter claims only completed anchors and re-warps its active anchor otherwise
 

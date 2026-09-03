@@ -131,8 +131,8 @@ Hardcoded constants agents must know: warp timestep clamp `2.5`; late-latch lead
 
 ### Reading the once-per-second log line
 
-`Reproj: source=… display=… (new=… repeat=…) missed=… interval=mean/p95 lead=… poseAge=… queue=… late=applied/sampled maxDeg=… hud=… dropAnchor=… capC=… capWait=… (async virtual swapchain|safe sync, block=… pace=…)`.
-Healthy at 60 Hz source / 120 Hz display: source 59–60, display ≥ 117, `missed` < 2/s after warm-up, roughly equal `new`/`repeat`, `dropAnchor=0`, low `block` (`pace` is the intentional cap sleep, reported separately), `late` applied and nonzero during motion, `hud` tracking displayed outputs. `capC` = DIRECT captures; `capWait` = slots that reused the active anchor because the newest capture was unfinished (nonzero is fine as long as the warp queue never stalls).
+`Reproj: source=… display=… (new=… repeat=…) missed=… interval=mean/p95 lead=… poseAge=… queue=… late=applied/sampled maxDeg=… hud=… dropAnchor=… capC=… capWait=… latch=lateCam/packetBase/fallback lateAge=…ms sensX=… (async virtual swapchain|safe sync, block=… pace=…)`.
+Healthy at 60 Hz source / 120 Hz display: source 59–60, display ≥ 117, `missed` < 2/s after warm-up, roughly equal `new`/`repeat`, `dropAnchor=0`, low `block` (`pace` is the intentional cap sleep, reported separately), `late` applied and nonzero during motion, `hud` tracking displayed outputs. `capC` = DIRECT captures; `capWait` = slots that reused the active anchor because the newest capture was unfinished (nonzero is fine as long as the warp queue never stalls). `latch=` splits applied steering into late-camera-pose / packet-baseline / velocity-fallback slots; `lateAge` is the mean age of the late pose at use; `sensX` is the auto-tracked radians/count (sanity: stable, ~1–3e-4).
 
 ### Invariants (do not break)
 

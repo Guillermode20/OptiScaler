@@ -200,6 +200,14 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsMissedDisplaySlots = 0;
     uint32_t _metricsLateInputSamples = 0;
     uint32_t _metricsLateInputApplied = 0;
+    // Steering-path distribution per second: authoritative late-camera pose +
+    // residual mouse, packet-baseline mouse, or rendered-velocity fallback.
+    // Mean age of the late-camera pose at use discriminates a laggy pose pipe.
+    uint32_t _metricsLateCamHits = 0;
+    uint32_t _metricsPacketBaseHits = 0;
+    uint32_t _metricsLateFallbacks = 0;
+    double _metricsLateCamAgeTotalMs = 0.0;
+    uint32_t _metricsLateCamAgeSamples = 0;
     uint32_t _metricsHudComposites = 0;
     uint32_t _metricsDirectCaptures = 0;
     uint32_t _metricsCaptureNotReady = 0;
