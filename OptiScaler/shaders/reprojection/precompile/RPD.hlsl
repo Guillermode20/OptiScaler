@@ -28,10 +28,12 @@ cbuffer RP_Constants : register(b0)
     float4 TargetRight;
     float4 TargetUp;
     float4 TargetForward;
+    uint2 DepthSize;
 };
 
 Texture2D<float4> LastColor : register(t0);
 Texture2D<float4> UI : register(t1);
+Texture2D<float4> Depth : register(t2);
 RWTexture2D<float4> Output : register(u0);
 SamplerState Bilinear : register(s0);
 
@@ -71,12 +73,69 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     {
         world = LastColor.Load(int3(dtid.xy, 0)).rgb;
     }
+
+    // Depth-corrected translation (Mode 1). The rotation homography above
+    // assumes infinite depth, so walking/hills parallax is wrong by design.
+    // One Newton-style correction step: unproject the anchor-depth point seen
+    // along the rotation-approximated ray with the ANCHOR camera, reproject it
+    // with the TARGET camera, and shift the sample by the residual. Exact for
+    // planar surfaces and for pure rotation (residual ~0, reduces to the
+    // rotation result); first-order otherwise, which suffices for per-slot
+    // translations of a few centimeters. Silhouettes and large residuals break
+    // the smooth-surface assumption and keep the rotation result.
+    // Thresholds (silhouette discontinuity, residual pixels) are starting
+    // points for footage tuning.
+    bool saneDepthCfg = DepthSize.x > 0 && DepthSize.y > 0 && CameraNear > 0.0f && CameraFar > CameraNear &&
+                        CameraVFov > 0.01f && CameraVFov < 3.0f && CameraAspect > 0.01f;
+    if (Mode == 1 && saneDepthCfg && covered)
+    {
+        // Depth is point-sampled (Load): depth SRVs have no filtering
+        // guarantee, and derivatives need SM 6.6+ while this stays cs_6_0.
+        int2 dmax = int2(DepthSize) - int2(1, 1);
+        int2 dpx = int2(min(max(sourceUv * float2(DepthSize), float2(0.0f, 0.0f)), float2(dmax)));
+        float d = Depth.Load(int3(dpx, 0)).x;
+        float denom = CameraNear + d * (CameraFar - CameraNear);
+        float viewZ = denom > 1.0e-6f ? CameraNear * CameraFar / denom : CameraFar;
+        float tanHalf = tan(CameraVFov * 0.5f);
+        if (tanHalf > 1.0e-6f)
+        {
+            float2 ndcA = float2(sourceUv.x * 2.0f - 1.0f, 1.0f - sourceUv.y * 2.0f);
+            float3 dirA = (ndcA.x * tanHalf * CameraAspect) * CameraRight.xyz + (ndcA.y * tanHalf) * CameraUp.xyz +
+                          CameraForward.xyz;
+            float3 W = CameraPos.xyz + dirA * viewZ;
+            float3 vT = W - TargetPosition.xyz;
+            float tx = dot(vT, TargetRight.xyz);
+            float ty = dot(vT, TargetUp.xyz);
+            float tz = dot(vT, TargetForward.xyz);
+            float2 ndcT = float2(tx, ty) / max(tz, 1.0e-6f) / float2(tanHalf * CameraAspect, tanHalf);
+            float2 uvT = float2(ndcT.x * 0.5f + 0.5f, 0.5f - ndcT.y * 0.5f);
+            float2 outUv = (float2(dtid.xy) + 0.5f) / float2(DisplaySize);
+            float2 corrUv = sourceUv + (outUv - uvT);
+            float dx = abs(Depth.Load(int3(min(dpx + int2(1, 0), dmax), 0)).x -
+                           Depth.Load(int3(max(dpx - int2(1, 0), int2(0, 0)), 0)).x);
+            float dy = abs(Depth.Load(int3(min(dpx + int2(0, 1), dmax), 0)).x -
+                           Depth.Load(int3(max(dpx - int2(0, 1), int2(0, 0)), 0)).x);
+            float disc = max(dx, dy) / max(d, 1.0e-3f);
+            float resid = length((outUv - uvT) * float2(DisplaySize));
+            bool confident = tz > 1.0e-6f && disc < 0.5f && resid < 24.0f;
+            bool covered1 = all(corrUv >= 0.0f) && all(corrUv <= 1.0f);
+            if (confident && covered1)
+            {
+                float2 e1 = min(corrUv, 1.0f - corrUv) * float2(DisplaySize);
+                float cov1 = saturate(min(e1.x, e1.y) * 0.5f);
+                float3 dc = LastColor.SampleLevel(Bilinear, corrUv, 0).rgb;
+                if (cov1 < 1.0f)
+                    dc = lerp(LastColor.Load(int3(dtid.xy, 0)).rgb, dc, cov1);
+                world = dc;
+            }
+        }
+    }
     if (HudlessSource != 0)
     {
         float4 ui = UI.Load(int3(dtid.xy, 0));
         float alpha = saturate(ui.a);
         float3 uiRgb = HudlessSource == 1 ? ui.rgb : ui.rgb * alpha;
-        world = uiRgb + world * (1.0f - alpha);
+        world = uiRgb + world * (1.0 - alpha);
     }
     Output[dtid.xy] = float4(world, 1.0f);
 }

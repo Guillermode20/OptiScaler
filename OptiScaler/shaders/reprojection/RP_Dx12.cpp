@@ -24,7 +24,8 @@ void RP_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource
 
 bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor,
                        D3D12_RESOURCE_STATES lastColorState, ID3D12Resource* output, RP_Constants& constants,
-                       int constantSlot, bool deferConstants, ID3D12Resource* ui, D3D12_RESOURCE_STATES uiState)
+                       int constantSlot, bool deferConstants, ID3D12Resource* ui, D3D12_RESOURCE_STATES uiState,
+                       ID3D12Resource* depth, D3D12_RESOURCE_STATES depthState)
 {
     if (!_init || _device == nullptr || cmdList == nullptr || lastColor == nullptr || output == nullptr)
     {
@@ -44,6 +45,8 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     ResourceBarrier(cmdList, lastColor, lastColorState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if (ui != nullptr)
         ResourceBarrier(cmdList, ui, uiState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (depth != nullptr)
+        ResourceBarrier(cmdList, depth, depthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
     ResourceBarrier(cmdList, output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -67,6 +70,17 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
         CreateShaderResourceView(_device, ui, currentHeap.GetSrvCPU(1));
     else
         CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(1), lastColorViewFormat);
+    if (depth != nullptr)
+    {
+        // Anchor depth arrives typeless (KCD2: R24G8_TYPELESS); view the depth
+        // plane as normalized float, mirroring the sRGB->UNORM handling above.
+        DXGI_FORMAT depthViewFormat = DXGI_FORMAT_UNKNOWN;
+        if (depth->GetDesc().Format == DXGI_FORMAT_R24G8_TYPELESS)
+            depthViewFormat = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+        CreateShaderResourceView(_device, depth, currentHeap.GetSrvCPU(2), depthViewFormat);
+    }
+    else
+        CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(2), lastColorViewFormat);
 
     CreateUnorderedAccessView(_device, output, currentHeap.GetUavCPU(0), 0);
 
@@ -92,6 +106,8 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
 
     if (ui != nullptr)
         ResourceBarrier(cmdList, ui, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, uiState);
+    if (depth != nullptr)
+        ResourceBarrier(cmdList, depth, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depthState);
 
     return true;
 }
@@ -118,7 +134,7 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
 
-    if (!SetupRootSignature(InDevice, 2, 1, 1, 0, 0, 1, &sampler))
+    if (!SetupRootSignature(InDevice, 3, 1, 1, 0, 0, 1, &sampler)))
     {
         LOG_ERROR("Failed to setup root signature");
         return;

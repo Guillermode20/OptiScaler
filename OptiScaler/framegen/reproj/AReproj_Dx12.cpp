@@ -595,9 +595,10 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
                               float latePitch = 0.0f, const ReprojVec3* targetBaseRight = nullptr,
                               const ReprojVec3* targetBaseUp = nullptr, const ReprojVec3* targetBaseForward = nullptr)
 {
-    // Mode 1 takes the input-predicted rotation as an explicit warp target:
-    // the shader composes it onto the current pose and keeps the rendered
-    // velocity for the position lerp. Mode 2 rotates the predicted basis here.
+    // Mode 1 is depth-corrected translation: the shader reprojects the anchor
+    // with its depth buffer around the predicted (Target*) pose and falls back
+    // per pixel to the rotation homography baked below. Mode 2 is pure
+    // rotation. Both share the predicted basis; only the shader path differs.
     constants.targetPosition[3] = 0.0f;
 
     const auto sourceRight = NormalizeReprojVec3(LoadReprojVec3(constants.cameraRight));
@@ -627,7 +628,7 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
         predictedUp = NormalizeReprojVec3(RotateReprojVec3(yawUp, yawRight, latePitch));
         predictedForward = NormalizeReprojVec3(RotateReprojVec3(yawForward, yawRight, latePitch));
     }
-    else if (constants.mode == 2)
+    else if (constants.mode == 2 || constants.mode == 1)
     {
         if (targetBaseRight != nullptr)
         {
@@ -643,21 +644,6 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
         }
     }
 
-    if (inputLatched && constants.mode == 1)
-    {
-        StoreReprojVec3(constants.targetRight, predictedRight);
-        StoreReprojVec3(constants.targetUp, predictedUp);
-        StoreReprojVec3(constants.targetForward, predictedForward);
-        std::memcpy(constants.targetPosition, constants.cameraPosition, 3 * sizeof(float));
-        constants.targetPosition[3] = 1.0f;
-        return;
-    }
-
-    if (constants.mode != 2)
-        return;
-
-    const auto sourceX = ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward);
-    const auto sourceY = ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward);
     const auto sourceZ = ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward);
     const float tanHalfFov = std::tan(constants.cameraVFov * 0.5f);
     const float focalX = constants.cameraAspect * tanHalfFov;
@@ -693,6 +679,26 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
     StoreReprojVec3(constants.prevCameraRight, pixelRow(uvNumeratorX));
     StoreReprojVec3(constants.prevCameraUp, pixelRow(uvNumeratorY));
     StoreReprojVec3(constants.prevCameraForward, pixelRow(denominator));
+
+    // Depth target pose (mode 1): the predicted basis becomes the shader's
+    // target orientation and the anchor position advances linearly by the pair
+    // delta scaled to this slot (exact linear extrapolation; the interval
+    // cancels, so varying source cadence cannot skew it). The homography rows
+    // baked above stay as the per-pixel disocclusion fallback. Gated on
+    // DepthSize — set by the caller only with a captured depth and sane
+    // near/far — never on mode, so mode 0 (no camera) can never reach here.
+    if (constants.depthWidth != 0 && constants.depthHeight != 0 && constants.mode == 2)
+    {
+        StoreReprojVec3(constants.targetRight, predictedRight);
+        StoreReprojVec3(constants.targetUp, predictedUp);
+        StoreReprojVec3(constants.targetForward, predictedForward);
+        const auto anchorPos = LoadReprojVec3(constants.cameraPosition);
+        const auto prevPos = LoadReprojVec3(constants.prevCameraPosition);
+        StoreReprojVec3(constants.targetPosition,
+                        CombineReprojVec3(anchorPos, 1.0f + constants.timeStep, prevPos, -constants.timeStep));
+        constants.targetPosition[3] = 1.0f;
+        constants.mode = 1;
+    }
 }
 
 } // namespace
@@ -1075,20 +1081,22 @@ void AReproj_Dx12::ProbeCaptureInputs(int sourceIndex, ID3D12Resource* gameBackB
     const bool depthReady = depth ? IsResourceReady(FG_ResourceType::Depth, sourceIndex) : false;
     const bool velocityReady = velocity ? IsResourceReady(FG_ResourceType::Velocity, sourceIndex) : false;
     const auto bbDesc = gameBackBuffer != nullptr ? gameBackBuffer->GetDesc() : D3D12_RESOURCE_DESC {};
-    const auto line = std::format(
-        "Reproj probe: bb={}x{} fmt={}({}) depth=[{}] velocity=[{}] "
-        "mvScale={:.4f}/{:.4f} jitter={:.5f}/{:.5f} invDepth={} legacyNearFar={:.4f}/{:.1f}",
+    // Structural signature drives change logging; the FSR2 jitter terms vary
+    // every frame by design and are reported in the line but never trigger it.
+    const auto sig = std::format(
+        "bb={}x{} fmt={}({}) depth=[{}] velocity=[{}] mvScale={:.4f}/{:.4f} invDepth={} legacyNearFar={:.4f}/{:.1f}",
         bbDesc.Width, bbDesc.Height, ReprojProbeFormatName(bbDesc.Format), static_cast<int>(bbDesc.Format),
         describe(depth, depthReady), describe(velocity, velocityReady), _mvScaleX[sourceIndex],
-        _mvScaleY[sourceIndex], _jitterX[sourceIndex], _jitterY[sourceIndex], IsInvertedDepth() ? 1 : 0,
-        _cameraNear[sourceIndex], _cameraFar[sourceIndex]);
+        _mvScaleY[sourceIndex], IsInvertedDepth() ? 1 : 0, _cameraNear[sourceIndex], _cameraFar[sourceIndex]);
+    const auto line = std::format("Reproj probe: {} jitter={:.5f}/{:.5f}", sig, _jitterX[sourceIndex],
+                                   _jitterY[sourceIndex]);
 
-    static std::string lastLine;
+    static std::string lastSig;
     static double lastLogMs = 0.0;
     const auto nowMs = Util::MillisecondsNow();
-    if (line != lastLine || nowMs - lastLogMs > 30000.0)
+    if (sig != lastSig || nowMs - lastLogMs > 30000.0)
     {
-        lastLine = line;
+        lastSig = sig;
         lastLogMs = nowMs;
         LOG_INFO("{}", line);
     }
@@ -1124,6 +1132,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     ID3D12Resource* color = gameBackBuffer;
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
+    packet.hasDepth = false;
 
     ProbeCaptureInputs(sourceIndex, gameBackBuffer);
 
@@ -1156,6 +1165,19 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             LOG_WARN("Reproj: UI capture failed; using the composed game frame for this packet");
             ok = CopyPacketResource(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
                                     packet.colorState, L"Reproj_PacketColor");
+        }
+    }
+
+    // Anchor depth for the translation warp. Failure only drops back to the
+    // rotation homography for this packet — never fail the anchor over it.
+    if (ok)
+    {
+        auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
+        if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) &&
+            depthRes->GetResource() != nullptr)
+        {
+            packet.hasDepth = CopyPacketResource(cmdList, depthRes->GetResource(), depthRes->state, &packet.depth,
+                                                 packet.depthState, L"Reproj_PacketDepth");
         }
     }
 
@@ -1481,6 +1503,28 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = content.constants;
     constants.timeStep = timeStep;
+    // Depth-corrected translation (mode 1): needs the INI switch, a captured
+    // anchor depth, and sane near/far. DepthSize on the constants is the
+    // contract PrepareRotationConstants reads to store the target pose and
+    // flip to mode 1; zero keeps rotation-only. Per-pixel failures still fall
+    // back to the rotation homography inside the shader.
+    const bool depthSane = content.constants.cameraNear > 0.0f &&
+                           content.constants.cameraFar > content.constants.cameraNear;
+    bool useDepth =
+        Config::Instance()->ReprojDepthWarp.value_or_default() && packet.hasDepth && packet.depth != nullptr &&
+        depthSane;
+    if (useDepth)
+    {
+        const auto depthDesc = packet.depth->GetDesc();
+        if (depthDesc.Width == 0 || depthDesc.Height == 0 || depthDesc.Width > UINT32_MAX ||
+            depthDesc.Height > UINT32_MAX)
+            useDepth = false;
+        else
+        {
+            constants.depthWidth = static_cast<uint32_t>(depthDesc.Width);
+            constants.depthHeight = static_cast<uint32_t>(depthDesc.Height);
+        }
+    }
     // The independent COMPUTE queue can safely wait for a CPU fence without
     // being serialized behind KCD2's DIRECT queue. Sample at scanout instead
     // of four milliseconds early; DIRECT fallback stays immediate.
@@ -1490,8 +1534,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         if (!ApplyLateInput(constants, packet))
             PrepareRotationConstants(constants, false);
     }
-    const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
-                                    outputIndex, deferredLateLatch, packet.ui, packet.uiState);
+    const bool ok =
+        _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants, outputIndex,
+                        deferredLateLatch, packet.ui, packet.uiState, packet.hasDepth ? packet.depth : nullptr,
+                        packet.depthState);
     if (!ok)
     {
         backBuffer->Release();
@@ -1504,6 +1550,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
 
     content.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (packet.depth != nullptr)
+        content.depthState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     ResourceBarrier(cmdList, _warpOutput[outputIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_COPY_SOURCE);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1569,6 +1617,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         WaitForPresenterDeadline(scanoutDeadlineMs - LATE_SAMPLE_LEAD_MS);
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
+        // Same depth contract as the dispatch-time constants above: the late
+        // application recomputes the target pose from fresh input.
+        lateConstants.depthWidth = constants.depthWidth;
+        lateConstants.depthHeight = constants.depthHeight;
         if (!ApplyLateInput(lateConstants, packet))
             PrepareRotationConstants(lateConstants, false);
 
@@ -2323,6 +2375,7 @@ void AReproj_Dx12::Deactivate()
             pkt.frameId = 0;
             pkt.hasCamera = false;
             pkt.hasUi = false;
+            pkt.hasDepth = false;
             pkt.warpAllowed = false;
         }
     }
@@ -3012,12 +3065,14 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_warpOutput[i]);
         SAFE_RELEASE(_packets[i].color);
         SAFE_RELEASE(_packets[i].ui);
+        SAFE_RELEASE(_packets[i].depth);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _syncHasUi[i] = false;
         _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].uiState = D3D12_RESOURCE_STATE_COMMON;
+        _packets[i].depthState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].captureFenceValue = 0;
         _packets[i].completionFence = nullptr;
         _packets[i].completionFenceValue = 0;

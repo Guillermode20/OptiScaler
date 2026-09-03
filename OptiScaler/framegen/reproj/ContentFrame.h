@@ -13,8 +13,10 @@ struct ContentFrame
 {
     ID3D12Resource* color = nullptr;
     ID3D12Resource* ui = nullptr;
+    ID3D12Resource* depth = nullptr; // render-res anchor depth for the translation warp (mode 1)
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON;
     RP_Constants constants {};
     double renderTimestamp = 0.0;
     double sourcePoseTimestamp = 0.0;

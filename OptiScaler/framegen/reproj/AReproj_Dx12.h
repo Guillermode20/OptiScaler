@@ -85,6 +85,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool inputLatchReady = false;
         bool hasCamera = false;
         bool hasUi = false;
+        bool hasDepth = false;
         bool warpAllowed = false;
         std::atomic<PacketState> state { PacketState::Free };
     };
