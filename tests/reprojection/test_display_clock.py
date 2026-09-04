@@ -136,34 +136,42 @@ class ReprojectionTests(unittest.TestCase):
         # self-locking behavior.
         self.assertEqual(redirect.count("MarkWorldSnapshotCl(commandList)"), 1)
 
-    def test_adaptive_sample_lead_controller_is_removed(self):
-        # async-simple P3: the adaptive late-latch sample-lead hunt lived on the
-        # compute deferred-latch path, which is deleted (warps are dispatched on
-        # the presenter DIRECT queue with constants baked at dispatch time). No
-        # lead controller or SAMPLE_LEAD_* constants remain.
+    def test_adaptive_sample_lead_controller_rides_the_presenter_direct_queue(self):
+        # HUD-fix/late-latch rollover: the adaptive sample-lead hunt is back,
+        # but it rides the presenter's single DIRECT queue instead of the
+        # deleted compute deferred-latch path. DispatchPacketWarp waits for the
+        # warp on _scFence (its own queue), measures headroom to the present
+        # deadline, and slides _lateSampleLeadMs; PresenterMain uses that lead
+        # for the next slot's dispatch so the mouse is sampled as late as the
+        # warp allows. ReprojLateSampleLead > 0.5 overrides with a constant.
         root = Path(__file__).resolve().parents[2]
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         dispatch = reproj.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
-            "bool AReproj_Dx12::DispatchWarp", 1)[0]
-        self.assertNotIn("adaptiveLateSample", dispatch)
-        self.assertNotIn("SAMPLE_LEAD_MIN_MS", dispatch)
-        self.assertNotIn("SAMPLE_LEAD_MAX_MS", dispatch)
-        self.assertNotIn("SAMPLE_LEAD_REDUCE_HEADROOM_MS", dispatch)
-        self.assertNotIn("SAMPLE_LEAD_GROW_HEADROOM_MS", dispatch)
-        self.assertNotIn("lateLeadCfg", dispatch)
+            "bool AReproj_Dx12::DrainGpuWork", 1)[0]
+        self.assertIn("adaptiveLateSample", dispatch)
+        self.assertIn("SAMPLE_LEAD_MIN_MS", dispatch)
+        self.assertIn("SAMPLE_LEAD_MAX_MS", dispatch)
+        self.assertIn("SAMPLE_LEAD_REDUCE_HEADROOM_MS", dispatch)
+        self.assertIn("SAMPLE_LEAD_GROW_HEADROOM_MS", dispatch)
+        self.assertIn("lateLeadCfg", dispatch)
+        # Post-warp headroom is measured on the presenter's own fence: no
+        # deferred constant rewrite, no compute path.
+        self.assertIn("WaitForSingleObject(_scFenceEvent, 5000)", dispatch)
+        self.assertIn("scanoutDeadlineMs - Util::MillisecondsNow()", dispatch)
         self.assertNotIn("lateLatchValue", dispatch)
         self.assertNotIn("WriteConstants", dispatch)
         self.assertNotIn("WaitForPresenterDeadline", dispatch)
-        # P4: the sampLead= key is gone with the controller; the fixed lead=
-        # constant is the only lead value the 1 Hz log reports.
+        # The 1 Hz log reports the effective (adaptive) lead, not a constant.
         log = reproj.split("void AReproj_Dx12::LogMetricsIfDue", 1)[1]
         self.assertNotIn("sampLead=", log)
-        self.assertNotIn("_lastLateSampleLeadMs", log)
+        self.assertIn("_lastLateSampleLeadMs.load(std::memory_order_relaxed)", log)
         self.assertIn("lead={:.2f}ms", log)
-        # The constants themselves are gone from the class definition.
+        # The controller constants and state live on the class definition.
         header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
-        self.assertNotIn("SAMPLE_LEAD", header)
-        self.assertNotIn("_lateSampleLeadMs", header)
+        self.assertIn("SAMPLE_LEAD_MIN_MS", header)
+        self.assertIn("SAMPLE_LEAD_MAX_MS", header)
+        self.assertIn("_lateSampleLeadMs", header)
+        self.assertIn("_lastLateSampleLeadMs", header)
         # INI key stays readable; auto still resolves to the 0 default.
         config_h = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
         block = config_h.split("CustomOptional<float> ReprojLateSampleLead", 1)[1]
@@ -264,20 +272,30 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("constexpr bool captureThisPresent = true", source)
         self.assertNotIn("FrameLimit::paceReprojectionSource", source)
 
-    def test_minimal_path_captures_the_composed_frame_only(self):
-        # async-simple P2: CaptureFramePacket copies exactly one composed frame
-        # (HUD included) via the game DIRECT UI command list. No isolation, no
-        # separate UI texture, no AllowComposedWarp gate — composed is the model.
+    def test_hud_isolation_split_capture_rides_the_single_inline_submit(self):
+        # HUD-fix rollover: when Kcd2HudIsolation redirected the HUD into an
+        # isolated UI texture this frame, CaptureFramePacket copies the HUD-less
+        # world snapshot AND the UI in the same inline submit on the game DIRECT
+        # queue (one list, one fence — the UI is as fresh as the color, so no
+        # borrow). Falls back to the composed frame otherwise. No
+        # AllowComposedWarp gate on this branch.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket", 1)[0]
         self.assertNotIn("allowComposed", capture)
-        self.assertNotIn("Kcd2HudIsolation", capture)
+        self.assertIn("Kcd2HudIsolation::GetHudlessColor(gameBackBuffer", capture)
+        self.assertIn("Kcd2HudIsolation::GetUIColor(gameBackBuffer", capture)
+        self.assertIn("packet.hasUi = true", capture)
+        self.assertIn("CopyPacketResource(cmdList, ui, kcd2UiState", capture)
         self.assertNotIn("GetResource(FG_ResourceType::HudlessColor", capture)
         self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera;", capture)
         self.assertNotIn("CopyPacketResource(cmdList, velocity", capture)
         self.assertIn("packet.constants.mode = 2", capture)
+        # The UI alpha mode is baked into the warp constants (premultiplied by
+        # default) exactly like the parent branch.
+        self.assertIn("FGUIPremultipliedAlpha", capture)
+        self.assertIn("hudlessSource", capture)
 
     def test_async_warp_dispatches_on_the_presenter_direct_queue(self):
         # async-simple P3: DispatchPacketWarp records the warp + copy-to-
@@ -289,13 +307,15 @@ class ReprojectionTests(unittest.TestCase):
         shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
         dispatch = source.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
             "bool AReproj_Dx12::DrainGpuWork", 1)[0]
-        # The warp is a single SC-list dispatch on _presentQueue (no UI packet —
-        # the captured frame is composed, so the warp dispatches ui == nullptr).
+        # The warp is a single SC-list dispatch on _presentQueue; the isolated
+        # UI (when captured) is composited unwarped by the same dispatch, and a
+        # composed capture dispatches ui == nullptr (RPD samples color twice).
         self.assertIn("GetSCCommandList(outputIndex)", dispatch)
         self.assertIn("SubmitSCCommandList(outputIndex)", dispatch)
         self.assertIn("_scAllocatorFenceValues[outputIndex] = ++_scFenceValue;", dispatch)
         self.assertIn("packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];", dispatch)
-        self.assertIn("outputIndex, false, nullptr", dispatch)
+        self.assertIn("outputIndex, false, packet.hasUi ? packet.ui : nullptr,", dispatch)
+        self.assertIn("packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON", dispatch)
         # No COMPUTE queue, no deferred latch, no RUI composite on the warp path.
         self.assertNotIn("uiPacket", dispatch)
         self.assertNotIn("composeUi", dispatch)
@@ -321,10 +341,11 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("GetComputeCommandList", header)
         self.assertNotIn("SubmitComputeCommandList", header)
         self.assertNotIn("WaitForComputeAllocator", header)
-        # RPD still carries the (now unused) isolated-UI texture: capture is
-        # composed, so ui == nullptr every slot.
+        # RPD carries the isolated-UI texture and composites it unwarped when
+        # HudlessSource != 0 (the HUD-fix rollover path).
         self.assertIn("Texture2D<float4> UI : register(t1)", shader)
         self.assertIn("UI.Load(int3(dtid.xy, 0))", shader)
+        self.assertIn("if (HudlessSource != 0)", shader)
 
     def test_kcd2_late_input_uses_camera_callback_baseline(self):
         root = Path(__file__).resolve().parents[2]
@@ -336,17 +357,21 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("current.TotalX - latestCamera.mouseTotalX", late_input)
         self.assertNotIn("GetRawMouseMotionAt(latestCamera.timestampMs)", late_input)
 
-    def test_kcd2_isolation_no_longer_feeds_packet_capture(self):
-        # async-simple P2: the Kcd2HudIsolation code remains compiled but is
-        # never consumed by CaptureFramePacket — capture is the composed frame.
+    def test_kcd2_isolation_feeds_packet_capture_on_the_single_submit(self):
+        # HUD-fix rollover: CaptureFramePacket consumes the Kcd2HudIsolation
+        # world/UI textures when they are valid for this backbuffer. The packet
+        # copies own their resources (color+UI in one submit on the game queue),
+        # so the isolation generation needs no MarkFrameCaptured fence here —
+        # same-queue ordering already protects the copies.
         root = Path(__file__).resolve().parents[2]
         isolation = (root / "OptiScaler/framegen/reproj/Kcd2HudIsolation.cpp").read_text(encoding="utf-8")
         capture = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8").split(
             "bool AReproj_Dx12::CaptureFramePacket", 1)[1].split("bool AReproj_Dx12::DisplayPacket", 1)[0]
         self.assertIn("completed < slot.captureFenceValue", isolation)
-        self.assertNotIn("Kcd2HudIsolation", capture)
+        self.assertIn("Kcd2HudIsolation::GetHudlessColor", capture)
+        self.assertIn("Kcd2HudIsolation::GetUIColor", capture)
         self.assertNotIn("MarkFrameCaptured", capture)
-        self.assertNotIn("GetHudlessColor", capture)
+        self.assertIn("GetHudlessColor", capture)
 
     def test_goal_telemetry_survives_without_present_path_info_logs(self):
         # async-simple: the once-per-second goal line is the only INFO logger
@@ -387,8 +412,12 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("nextDeadlineMs = presentedAt + refreshPeriodMs", presenter)
         self.assertNotIn("SampleDisplayClock(", presenter)
         self.assertIn("maxUsableLeadMs", presenter)
-        # Fixed 3 ms dispatch lead (kDispatchLeadMs), clamped into the slot window.
-        self.assertIn("std::min(kDispatchLeadMs, maxUsableLeadMs)", presenter)
+        # Adaptive dispatch lead (SAMPLE_LEAD band, ReprojLateSampleLead
+        # override), clamped into the slot window; the effective lead is what
+        # the 1 Hz log reports.
+        self.assertIn("std::min(adaptiveLeadMs, maxUsableLeadMs)", presenter)
+        self.assertIn("std::clamp(_lateSampleLeadMs, SAMPLE_LEAD_MIN_MS, SAMPLE_LEAD_MAX_MS)", presenter)
+        self.assertIn("_lastLateSampleLeadMs.store(dispatchLeadMs", presenter)
 
     def test_experimental_control_surface_is_removed(self):
         root = Path(__file__).resolve().parents[2]
@@ -494,9 +523,10 @@ class ReprojectionTests(unittest.TestCase):
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket(", 1)[0]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        # No UI-split bookkeeping survives on the packet: hasUi is removed.
-        self.assertNotIn("hasUi", capture)
-        self.assertNotIn("hasUi", (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8"))
+        # Color and UI are one submit, so the single _uiFence value gates the
+        # whole anchor — hasUi just marks the split-capture variant.
+        self.assertIn("packet.hasUi = false", capture)
+        self.assertIn("bool hasUi = false", (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8"))
         self.assertIn("packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex]", capture)
         self.assertNotIn("colorFenceValue", capture)
         self.assertNotIn("worldFenceValue", capture)
@@ -505,16 +535,16 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("captureFenceValue == 0", presenter)
         self.assertIn("captureComplete", presenter)
 
-    def test_ui_borrow_hold_is_removed_with_the_isolated_ui_path(self):
-        # async-simple P3.4: capture is composed (no isolated UI), so the UI
-        # borrow hold that shared _heldPacketIndex is deleted along with the
-        # swap-blend machinery it once paired with. The previous anchor is
-        # retired immediately on a real switch.
+    def test_ui_borrow_hold_is_removed_with_the_single_submit_capture(self):
+        # HUD-fix rollover: the isolated UI is back, but color and UI are one
+        # inline submit, so the UI is always as fresh as the color — the UI
+        # borrow hold that shared _heldPacketIndex stays deleted. The previous
+        # anchor is retired immediately on a real switch.
         root = Path(__file__).resolve().parents[2]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
         dispatch = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8").split(
-            "bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split("bool AReproj_Dx12::DispatchWarp", 1)[0]
+            "bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split("bool AReproj_Dx12::DrainGpuWork", 1)[0]
         shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
         common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")
         self.assertNotIn("_heldPacketIndex", presenter + header)

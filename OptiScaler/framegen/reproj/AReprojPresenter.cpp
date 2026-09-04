@@ -238,10 +238,18 @@ void AReproj_Dx12::PresenterMain()
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
         // A serial Present(1) loop cannot make a preparation lead longer than
         // one refresh useful: after Present returns, an older grid deadline can
-        // already be in the past. Fixed 3 ms dispatch lead (kDispatchLeadMs),
-        // kept inside the current slot with a small safety margin.
+        // already be in the past. The dispatch lead is adaptive by default:
+        // DispatchPacketWarp slides _lateSampleLeadMs from post-warp headroom
+        // so the mouse sample lands as late as the warp allows, then the lead
+        // is capped at 75% of the refresh period with a small safety margin.
+        // ReprojLateSampleLead > 0.5 overrides with a constant lead.
         const auto maxUsableLeadMs = std::max(3.0, std::min(20.0, refreshPeriodMs * 0.75));
-        const auto dispatchLeadMs = std::min(kDispatchLeadMs, maxUsableLeadMs);
+        const auto lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
+        const auto adaptiveLeadMs =
+            lateLeadCfg > 0.5f ? static_cast<double>(lateLeadCfg)
+                               : std::clamp(_lateSampleLeadMs, SAMPLE_LEAD_MIN_MS, SAMPLE_LEAD_MAX_MS);
+        const auto dispatchLeadMs = std::min(adaptiveLeadMs, maxUsableLeadMs);
+        _lastLateSampleLeadMs.store(dispatchLeadMs, std::memory_order_relaxed);
 
         // Handle TargetRefresh change without restart: reset the grid so a
         // 240→120 switch doesn't stay stuck at the old period.

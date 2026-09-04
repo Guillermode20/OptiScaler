@@ -620,10 +620,10 @@ class Config
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojSmoothing { 0.25f };            // EMA filter on camera angular velocity (0=off)
-    CustomOptional<bool> ReprojHudIsolation { false }; // inert: composed capture; Kcd2HudIsolation reads it and stays off
+    CustomOptional<bool> ReprojHudIsolation { true }; // separate Scaleform HUD from 3D world (KCD2), composited unwarped
     CustomOptional<float> ReprojLateSampleLead {
         0.0f
-    }; // inert compat read; constants are baked at dispatch time on the DIRECT queue
+    }; // 0/auto = adaptive: sample mouse input as late as the warp allows; fixed float >0.5 overrides
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

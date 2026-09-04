@@ -821,22 +821,46 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     if (gameBackBuffer == nullptr)
         return false;
 
-    // async-simple: exactly one composed capture per anchor — the full frame
-    // (HUD included) becomes the warp source. No HUD isolation, no separate UI.
+    // HUD isolation (KCD2 Scaleform, live-validated on the parent branch): the
+    // OM hook redirected the HUD into an isolated UI texture this frame, so the
+    // warp source is the HUD-less world snapshot and the isolated UI is
+    // composited unwarped by the warp shader. Both are copied in the same
+    // inline submit below (on the queue the Scaleform CL ran on), so the UI is
+    // always as fresh as the color — no borrow, no separate UI gate. Falls
+    // back to the composed frame (HUD warps) when isolation is unavailable.
     ID3D12Resource* color = gameBackBuffer;
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
+    packet.hasUi = false;
+    D3D12_RESOURCE_STATES kcd2HudlessState = D3D12_RESOURCE_STATE_COMMON;
+    auto* hudless = Kcd2HudIsolation::GetHudlessColor(gameBackBuffer, &kcd2HudlessState);
+    D3D12_RESOURCE_STATES kcd2UiState = D3D12_RESOURCE_STATE_COMMON;
+    auto* ui = Kcd2HudIsolation::GetUIColor(gameBackBuffer, &kcd2UiState);
+    if (hudless != nullptr && ui != nullptr)
+    {
+        const auto hudlessDesc = hudless->GetDesc();
+        const auto backBufferDesc = gameBackBuffer->GetDesc();
+        if (hudlessDesc.Width == backBufferDesc.Width && hudlessDesc.Height == backBufferDesc.Height &&
+            NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(backBufferDesc.Format))
+        {
+            color = hudless;
+            colorState = kcd2HudlessState;
+            packet.hasUi = true;
+        }
+    }
 
-    // Record the composed color copy on the packet's UI command list. It is
-    // submitted on the game DIRECT queue below — the same queue the frame
-    // rendered on, so the copy is GPU-ordered after the frame's work and before
-    // any later render into this virtual buffer. No handoff fence needed.
+    // Record the color (and, with isolation, the UI) copies on the packet's UI
+    // command list. It is submitted on the game DIRECT queue below — the same
+    // queue the frame rendered on, so the copies are GPU-ordered after the
+    // frame's work (Scaleform CL included) and before any later render into
+    // this virtual buffer. No handoff fence needed.
     bool ok = false;
     packet.completionFence = nullptr;
     packet.completionFenceValue = 0;
     packet.captureFenceValue = 0;
     auto cmdList = GetUICommandList(packetIndex);
     ok = cmdList != nullptr &&
-         CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
+         CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor") &&
+         (!packet.hasUi || CopyPacketResource(cmdList, ui, kcd2UiState, &packet.ui, packet.uiState, L"Reproj_PacketUI"));
     if (!ok)
         return false;
 
@@ -855,9 +879,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     _lastRealFrameTimestamp = now;
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
-    // hudlessSource stays 0: the composed frame is warped as-is (no UI overlay).
-    // Derive the fallback aspect from the composed source (identical resource
-    // and resolution to the copy target).
+    // 0 = no isolated UI, 1 = premultiplied alpha, 2 = straight alpha (parent
+    // branch semantics). The warp shader composites the UI unwarped after the
+    // rotation warp. Derive the fallback aspect from the pinned source
+    // (identical resource and resolution to the copy target).
+    packet.constants.hudlessSource =
+        packet.hasUi ? (Config::Instance()->FGUIPremultipliedAlpha.value_or_default() ? 1u : 2u) : 0u;
     const auto colorDesc = color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
     double kcd2PoseIntervalMs = 0.0;
@@ -903,8 +930,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.inputLatchReady = true;
     if (kcd2CameraTimestamp <= 0.0)
         UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
-    // async-simple: a captured composed frame is always warpable (no separate
-    // UI gate); the anchor still needs a valid camera pose.
+    // An anchor is warpable when a valid camera pose exists. HUD isolation
+    // never gates the anchor: color and UI are one submit, so both are equally
+    // fresh by the time the capture fence completes.
     packet.warpAllowed = warpAllowed && packet.hasCamera;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
@@ -1001,12 +1029,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     if (FAILED(realSwapChain->GetBuffer(outputIndex, IID_PPV_ARGS(&backBuffer))))
         return false;
 
-    (void) scanoutDeadlineMs; // no deferred late latch on the minimal path
-
     // async-simple: the presenter's one DIRECT queue (_presentQueue) owns the
     // warp. The warp and the final copy-to-backbuffer are recorded on the same
     // SC command list, and _scFence is the single retirement fence. There is no
-    // COMPUTE queue and no deferred late-latch fence.
+    // COMPUTE queue and no deferred late-latch fence — input is baked into the
+    // constants at dispatch time, so the adaptive lead below makes the sample
+    // happen as close to the present deadline as the warp allows.
     if (!CreateWarpOutput(outputIndex, backBuffer) || !WaitForSCAllocator(outputIndex))
     {
         backBuffer->Release();
@@ -1031,10 +1059,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // deferred GPU-side constant rewrite on the minimal path.
     if (!ApplyLateInput(constants, packet))
         PrepareRotationConstants(constants, false);
-    // No isolated-UI composite: the captured frame is composed, so the warp
-    // dispatches with ui == nullptr (RPD then samples color for both SRVs).
+    // The isolated UI (when the anchor was captured with HUD isolation) is
+    // composited unwarped in the same dispatch; a composed capture dispatches
+    // with ui == nullptr (RPD then samples color for both SRVs).
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
-                                    outputIndex, false, nullptr);
+                                    outputIndex, false, packet.hasUi ? packet.ui : nullptr,
+                                    packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON);
     if (!ok)
     {
         backBuffer->Release();
@@ -1057,6 +1087,31 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // async-simple: _scFence is the single retirement fence — SubmitSCCommandList
     // signaled it after the warp+copy dispatch on _presentQueue.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
+
+    // Adaptive late sample (late-latch as late as possible): wait on the
+    // presenter's own queue for the warp to complete, then measure the headroom
+    // to the present deadline. Reduce the next slot's dispatch/sample lead when
+    // the warp finished early (this slot's sample was taken too soon), grow it
+    // when the warp is crowding the vblank. The lead settles at warp+copy cost
+    // plus ~1.5 ms of CPU wake/Present margin, so the mouse is sampled as close
+    // to scanout as the hardware allows. A fixed ReprojLateSampleLead > 0.5 ms
+    // overrides the controller (parent-branch semantics).
+    const auto lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
+    const bool adaptiveLateSample = !(lateLeadCfg > 0.5f);
+    if (adaptiveLateSample && _scFence != nullptr && _scFenceEvent != nullptr)
+    {
+        const auto warpFenceValue = _scAllocatorFenceValues[outputIndex];
+        if (_scFence->GetCompletedValue() < warpFenceValue)
+        {
+            if (SUCCEEDED(_scFence->SetEventOnCompletion(warpFenceValue, _scFenceEvent)))
+                WaitForSingleObject(_scFenceEvent, 5000);
+        }
+        const double headroomMs = scanoutDeadlineMs - Util::MillisecondsNow();
+        if (headroomMs > SAMPLE_LEAD_REDUCE_HEADROOM_MS)
+            _lateSampleLeadMs = std::max(SAMPLE_LEAD_MIN_MS, _lateSampleLeadMs - SAMPLE_LEAD_STEP_MS);
+        else if (headroomMs < SAMPLE_LEAD_GROW_HEADROOM_MS)
+            _lateSampleLeadMs = std::min(SAMPLE_LEAD_MAX_MS, _lateSampleLeadMs + SAMPLE_LEAD_STEP_MS);
+    }
     return true;
 }
 
@@ -1226,7 +1281,7 @@ void AReproj_Dx12::LogMetricsIfDue()
              "({}, block={:.2f}ms)",
              realFrames * scale, warpFrames * scale, newAnchorDisplays,
              repeatedAnchorDisplays, missedDisplaySlots, meanPresentIntervalMs,
-             p95PresentIntervalMs, kDispatchLeadMs, poseAge, queueDepth,
+             p95PresentIntervalMs, _lastLateSampleLeadMs.load(std::memory_order_relaxed), poseAge, queueDepth,
              lateInputApplied, lateInputSamples, lateInputMaxDegrees,
              skippedAnchorSamples, directCaptures, captureNotReady,
              presenter, gamePresentBlockMaxMs);

@@ -70,6 +70,26 @@
   `ReprojAsyncComputeWarp` removed from Config.h/Config.cpp;
   `ReprojHudIsolation`/`ReprojLateSampleLead`/`ReprojSourceFramerateLimit` stay as inert
   compat reads (Kcd2HudIsolation.cpp compiles reads of the first; tests pin the latter two).
+- **P6 (HUD fix + adaptive late-sample rollover): landed.** The two pieces of parent
+  machinery the user asked back are re-rolled onto the single-queue model.
+  (a) **HUD isolation is live again**: `ReprojHudIsolation` defaults back to `true`
+  (INI `HudIsolation=auto`; the stale `AllowComposedWarp`/`NonBlockingHandoff`/
+  `RepeatWarp`/`AsyncComputeWarp` keys are dropped from the shipped INI).
+  `CaptureFramePacket` queries `Kcd2HudIsolation::GetHudlessColor/GetUIColor` and, when
+  valid for this backbuffer, copies the HUD-less world → `packet.color` AND the isolated
+  UI → `packet.ui` in the **same inline submit** (one list, one `_uiFence` gate — the UI
+  is always as fresh as the color, so no borrow, no world fence, no MarkFrameCaptured:
+  same-queue ordering protects the copies). Composed capture remains the fallback.
+  `DispatchPacketWarp` passes `packet.ui` to the warp so RPD composites the UI unwarped
+  after the rotation warp (`hudlessSource` = premultiplied by default, parent semantics).
+  (b) **Adaptive late-sample lead is back**: the `SAMPLE_LEAD_*` constants and
+  `_lateSampleLeadMs` return, but the controller rides the presenter's own DIRECT queue —
+  after submit the presenter waits for the warp on `_scFence`, measures headroom to the
+  present deadline, and slides the next slot's dispatch/sample lead ±0.25 ms within
+  [2.0, 6.0] (reduce > 2.0 ms headroom, grow < 0.9 ms), so the mouse is sampled as late
+  as the warp allows. `ReprojLateSampleLead` > 0.5 overrides with a constant; `lead=` in
+  the 1 Hz line reports the effective value. Parser tests re-pinned (isolation/controller
+  pins inverted back to presence); 35/35 pass.
 
 ## 1. Goal
 
@@ -118,13 +138,13 @@ AReproj
 ### Non-goals (cut, not ported)
 
 - Source pacing of any kind (`paceReprojectionSource`, `SourceFramerateLimit`).
-- HUD isolation (Scaleform world/UI split, `Kcd2HudIsolation`/`Kcd2Scaleform` consumption).
 - Depth / MV warping. Already gone on the parent branch; stays gone.
 - Translation warp. Rotation-only, exactly like the parent's proven baseline.
 - Dedicated COPY capture queue + capture worker thread + world fence (mid-frame gating).
 - Deferred COMPUTE warp + late-latch fence (CPU `_lateLatchFence` constant rewrite).
-- Adaptive controllers: repeat-warp shed, adaptive sample lead, adaptive dispatch lead,
-  auto-tracked mouse sensitivity, KCD2 calibration. All become constants or disappear.
+- Adaptive controllers: repeat-warp shed, adaptive dispatch lead, auto-tracked mouse
+  sensitivity, KCD2 calibration. The adaptive **sample** lead is back (P6) — it rides the
+  presenter's own DIRECT queue instead of the deleted compute deferred-latch path.
 - Per-slot telemetry and the `ReprojPipe v=1` aggregate line (keep only the 1 Hz `Reproj:` line).
 - Synchronous generated-frame fallback (`PresentVirtualFrameSync`, `DispatchWarp`,
   `_lastColor`/`_uiColor` sync capture). Non-virtualized → plain passthrough present.
@@ -137,9 +157,14 @@ are **not** up for debate on this branch — they are the pieces that work.
 
 ### Deliberate deviations from mainline `AGENTS.md` invariants (branch-local)
 
-1. **A composed frame (world + HUD) IS warped.** Mainline never warps a composed HUD;
-   async-simple does, because HUD isolation is out of scope. This is the biggest visual
-   regression risk and the first thing to revert if the branch ever merges back.
+1. **The HUD is composited unwarped via parent-validated isolation (P6).**
+   `ReprojHudIsolation` defaults to `true`; when the KCD2 Scaleform split is live,
+   CaptureFramePacket copies the HUD-less world + isolated UI in one submit and RPD
+   composites the UI after the rotation warp — the parent's validated behavior on the
+   simplified single-submit model (no borrow, no world fence). A composed frame (world +
+   HUD) is warped only as the isolation-unavailable fallback; that fallback remains a
+   deliberate deviation from mainline (mainline never warps a composed HUD) but is now
+   the exception rather than the rule.
 2. **The game thread is never paced by OptiScaler in reproj mode.** `SourceFramerateLimit`
    effectively becomes 0; KCD2's own limiter (or an external cap) owns source cadence.
 3. **The packet ring is 3 slots** (`FrameSlot[3]`), not `BUFFER_COUNT == 4`.
@@ -189,13 +214,13 @@ late-latch phase), `state`.
 | Source pacing | `FrameLimit.cpp:174–259` (`paceReprojectionSource`), call sites `AReproj_Dx12.cpp:1118, 2536, 2566, 2659, 2739, 2795`; `ReprojSourceFramerateLimit` (Config.h:616) | delete calls; drop default to 0; keep `FrameLimit.cpp` helpers only for presenter sleeps |
 | FG half-rate | `FG_Hooks.cpp:1395–1403` (`FrameLimit::sleep(reprojActive)`) | reproj passes `false` (or is excluded) so `min_interval_us *= 2` (`FrameLimit.cpp:108`) never applies |
 | Capture worker path | `CaptureFramePacket` (1128–1496): isolation lookup (1138–1166), worker enqueue (1432–1467), UI fallback; `EnqueueCapture`/`ProcessCapturePacket`/`FailCapturePacket` | rewrite to: composed `gameBackBuffer` only → `SubmitUICommandList(packetIndex)` on `_uiFence` |
-| World fence / mid-frame gate | `Kcd2HudIsolation::TakeWorldSignalValue/MarkFrameCaptured/SetWorldSignalContext`, `_worldFence` | delete from AReproj; files stay compiled but inert (`ReprojHudIsolation=false` gates every entry — see §6) |
-| HUD isolation per-draw | `ResTrack_dx12.cpp:1144–1178`, `Hudfix_Dx12.cpp:464`, `dllmain.cpp:2101` | untouched code; inert via `HudIsolation=false` config default |
+| World fence / mid-frame gate | `Kcd2HudIsolation::TakeWorldSignalValue/MarkFrameCaptured/SetWorldSignalContext`, `_worldFence` | stays deleted from AReproj (inline same-queue capture needs no mid-frame gate); the isolation files' world-fence code is inert — AReproj never calls `SetWorldSignalContext` |
+| HUD isolation per-draw | `ResTrack_dx12.cpp:1144–1178`, `Hudfix_Dx12.cpp:464`, `dllmain.cpp:2101`, `CaptureFramePacket` | live: `ReprojHudIsolation=true` default; ResTrack OM hook + Hudfix `ArmForFrame` drive the split; capture copies world+UI in one submit (P6) |
 | Presenter selection + capWait/uiBorrow/hold | `PresenterMain` (AReprojPresenter.cpp:575–988) | rewrite: newest READY w/ completed fence, else reuse active |
 | Repeat-warp shed | `EvaluateRepeatWarpShed` (AReprojPresenter.cpp:501–573) + state in header | delete (always full warps on repeats) |
 | Adaptive dispatch lead | `PresenterMain` lead control (~604–630) | constant lead (§5.5) |
-| Adaptive sample lead | `SAMPLE_LEAD_*` consts + `DispatchPacketWarp` (~1923–1978) | delete (v0: no deferred latch) |
-| Deferred late latch | `DispatchPacketWarp` (~1896–1978) | inline only or none |
+| Adaptive sample lead | `SAMPLE_LEAD_*` consts + `DispatchPacketWarp` post-warp headroom | back (P6): rides the presenter DIRECT queue — `_scFence` wait after submit, ±0.25 ms in [2.0, 6.0] |
+| Deferred late latch | `DispatchPacketWarp` | inline only: constants baked at dispatch; the adaptive lead makes the dispatch (and so the mouse sample) land as late as the warp allows |
 | Sensitivity tracking/calibration | `UpdateMouseSensitivity` (868), `_kcd2Calibration*` fields | delete for v0 |
 | Hitches/hold | `PresenterMain` `hitchHold` (~790) | omit in v0 |
 | Sync fallback presentation | `PresentVirtualFrameSync` (2446), `CopyLastFrame` (320), `DispatchWarp` (1982), `_lastColor`/`_uiColor`/`_syncHasUi`/`_warpOutput` sync uses | delete; non-virtualized ⇒ `PresentFrame` passthrough only |
@@ -253,13 +278,16 @@ Concretely:
    beyond what `PrepareRotationConstants` already does from the captured pose pair.
 4. **Warp gate = capture completion:** a slot only switches to a new anchor whose
    `captureFenceValue` is already `<= _uiFence->GetCompletedValue()` (CPU check, never a
-   presenter-queue wait). Otherwise it re-warps the active anchor. No `uiBorrow`, no `hold`,
-   no `capWait` bookkeeping beyond the log counters.
-5. **Late input:** none in v0 (rotation extrapolation from rendered pose pairs only). Mouse
-   pump, sensitivity, calibration, inline latch are later phases — keep `ApplyLateInput` +
-   packet mouse fields in the struct so that phase is additive.
-6. **Fixed dispatch lead:** `3.0 ms` before the slot deadline (presenter-only tuning constant).
-   Occlusion backoff and watchdog stay as-is.
+   presenter-queue wait). Color and UI are one submit, so the single value gates the whole
+   anchor (`hasUi` only marks the split-capture variant). Otherwise it re-warps the active
+   anchor. No `uiBorrow` (UI is always as fresh as color), no `hold`.
+5. **Late input:** `ApplyLateInput` runs inline at dispatch (freshest raw mouse + latest
+   KCD2 camera pose). The dispatch lead is **adaptive** (P6): the presenter waits for the
+   warp on `_scFence` after submit, measures headroom to the present deadline, and slides
+   the next slot's lead ±0.25 ms within `[2.0, 6.0]` ms (`SAMPLE_LEAD_*`), so the sample is
+   taken as late as the warp allows. `ReprojLateSampleLead` > 0.5 overrides.
+6. **Dispatch lead bounds:** adaptive lead clamped into the slot window
+   (`min(lead, max(3, min(20, 0.75·period)))`). Occlusion backoff and watchdog stay as-is.
 7. **Capture:** on every game `Present`, `CopyResource` the composed virtual backbuffer into
    `FrameSlot[k].color` on the game DIRECT queue (one `_uiCommandList` submit, one `_uiFence`
    signal). If the slot's allocator is still busy (previous frame in flight), **skip

@@ -84,6 +84,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool inputLatchReady = false;
         bool hasCamera = false;
         bool warpAllowed = false;
+        bool hasUi = false; // true: packet.ui is an isolated HUD composited unwarped after the warp
         std::atomic<PacketState> state { PacketState::Free };
     };
 
@@ -99,9 +100,19 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     //   Live-validated at 1 on KCD2 (2026-09-04): the async presenter held
     //   ~100-115 display FPS with zero errors/downgrades in a full session.
     static constexpr int kAsyncSimpleStage = 1;
-    // Fixed dispatch lead: every slot wakes to dispatch its warp 3 ms before
-    // the present deadline (plans/async_simple.md §3.6). No adaptive control.
-    static constexpr double kDispatchLeadMs = 3.0;
+    // Adaptive late-sample lead (late-latch as late as possible, parent-branch
+    // tuning): every slot wakes to dispatch its warp `lead` ms before the
+    // present deadline, and the lead hunts the sample as late as the warp
+    // allows. DispatchPacketWarp measures post-warp headroom to the deadline
+    // and slides the lead ±SAMPLE_LEAD_STEP_MS: reduce when the warp left
+    // > REDUCE_HEADROOM slack (sample taken too soon), grow when it crowds the
+    // vblank below GROW_HEADROOM. Settles at warp+copy cost plus ~1.5 ms of
+    // CPU wake/Present margin (plans/async_simple.md §3.6).
+    static constexpr double SAMPLE_LEAD_MIN_MS = 2.0;
+    static constexpr double SAMPLE_LEAD_MAX_MS = 6.0;
+    static constexpr double SAMPLE_LEAD_STEP_MS = 0.25;
+    static constexpr double SAMPLE_LEAD_REDUCE_HEADROOM_MS = 2.0;
+    static constexpr double SAMPLE_LEAD_GROW_HEADROOM_MS = 0.9;
     // FrameSlot[3]: three capture slots for the composed color + source camera
     // + fence. Distinct from BUFFER_COUNT (real-chain/output arrays stay 4).
     static constexpr int kReprojFrameSlots = 3;
@@ -194,9 +205,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
 
-    // Fixed 3 ms dispatch lead (presenter-only tuning constant, see
-    // plans/async_simple.md): every slot wakes to dispatch its warp 3 ms before
-    // the present deadline. No adaptive lead controller on the minimal path.
+    // Adaptive late-sample controller state. _lateSampleLeadMs is written by
+    // the presenter thread only (DispatchPacketWarp); _lastLateSampleLeadMs is
+    // the effective per-slot lead the 1 Hz log line reports (written by
+    // PresenterMain, read by LogMetricsIfDue on the game thread).
+    double _lateSampleLeadMs = 4.0; // presenter thread only; starts at the parent's initial constant
+    std::atomic<double> _lastLateSampleLeadMs { 4.0 };
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;
