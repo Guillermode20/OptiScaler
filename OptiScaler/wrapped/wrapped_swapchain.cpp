@@ -634,12 +634,26 @@ HRESULT WrappedIDXGISwapChain4::AdvanceReprojectionBuffer()
         // previous capture is complete. This is ownership back-pressure, not a
         // display wait; keep the bounded wait here so the game never renders
         // into a resource still read by the capture queue.
+        const auto waitStartMs = Util::MillisecondsNow();
         HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (event == nullptr || FAILED(fence->SetEventOnCompletion(fenceValue, event)) ||
             WaitForSingleObject(event, 5000) != WAIT_OBJECT_0)
             result = DXGI_ERROR_WAS_STILL_DRAWING;
         SAFE_CLOSE_HANDLE(event);
         fence->Release();
+
+        // Do not infer this from AdvanceReprojectionBuffer's total CPU time:
+        // VKD3D mutex/submission overhead is diagnostically distinct from a
+        // real virtual-buffer fence wait.
+        const auto elapsedUs = (Util::MillisecondsNow() - waitStartMs) * 1000.0;
+        const auto waitUs = static_cast<uint64_t>(elapsedUs > 0.0 ? elapsedUs : 0.0);
+        _reprojectionAdvanceWaitCount.fetch_add(1, std::memory_order_relaxed);
+        _reprojectionAdvanceWaitTotalUs.fetch_add(waitUs, std::memory_order_relaxed);
+        auto maxUs = _reprojectionAdvanceWaitMaxUs.load(std::memory_order_relaxed);
+        while (waitUs > maxUs && !_reprojectionAdvanceWaitMaxUs.compare_exchange_weak(
+                                     maxUs, waitUs, std::memory_order_relaxed, std::memory_order_relaxed))
+        {
+        }
     }
     else
         SAFE_RELEASE(fence);
@@ -673,6 +687,13 @@ HRESULT WrappedIDXGISwapChain4::AdvanceReprojectionBuffer()
     _reprojectionIndex = next;
     finishAdvance();
     return S_OK;
+}
+
+WrappedIDXGISwapChain4::ReprojectionAdvanceWaitStats WrappedIDXGISwapChain4::ConsumeReprojectionAdvanceWaitStats()
+{
+    return { _reprojectionAdvanceWaitCount.exchange(0, std::memory_order_relaxed),
+             _reprojectionAdvanceWaitTotalUs.exchange(0, std::memory_order_relaxed),
+             _reprojectionAdvanceWaitMaxUs.exchange(0, std::memory_order_relaxed) };
 }
 
 void WrappedIDXGISwapChain4::AbortReprojectionBuffer(UINT index)

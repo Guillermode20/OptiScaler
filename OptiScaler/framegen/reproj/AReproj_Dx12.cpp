@@ -1077,12 +1077,20 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     // returning a virtual resource to the game while capture still owns it.
     const auto fenceValue = ++_uiFenceValue;
     _uiAllocatorFenceValues[fIndex] = fenceValue;
-    bool ok = _gameCommandQueue != nullptr && _uiFence != nullptr && wrapped != nullptr &&
-              SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue)) &&
+    const auto signalStartMs = Util::MillisecondsNow();
+    const bool signaled = _gameCommandQueue != nullptr && _uiFence != nullptr &&
+                          SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue));
+    RecordPipelineGameSignal(Util::MillisecondsNow() - signalStartMs);
+    const auto submitStartMs = Util::MillisecondsNow();
+    bool ok = signaled && wrapped != nullptr &&
               SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue));
+    const auto submitMs = Util::MillisecondsNow() - submitStartMs;
+    double advanceMs = 0.0;
     if (ok)
     {
+        const auto advanceStartMs = Util::MillisecondsNow();
         const auto advanceHr = wrapped->AdvanceReprojectionBuffer();
+        advanceMs = Util::MillisecondsNow() - advanceStartMs;
         if (FAILED(advanceHr))
         {
             if (advanceHr == DXGI_ERROR_WAS_STILL_DRAWING)
@@ -1093,6 +1101,7 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     }
     else
         _presenterState.store(PresenterState::Failed);
+    RecordPipelinePublication(Util::MillisecondsNow() - presentStartMs, 0.0, submitMs, advanceMs, true);
     RecordWarpFrame(false, true, 0.0f);
     SAFE_RELEASE(gameBackBuffer);
     const auto paceStart = Util::MillisecondsNow();
@@ -1102,8 +1111,7 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     ++_metricsSkippedAnchorSamples;
     _metricsGamePresentBlockMaxMs =
         std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStartMs));
-    _metricsGamePresentPaceMaxMs =
-        std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
+    _metricsGamePresentPaceMaxMs = std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
     _latestGameStallMs.store(static_cast<float>(paceStart - presentStartMs), std::memory_order_relaxed);
 }
 
@@ -1193,8 +1201,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             packet.colorFenceValue = ++_captureFenceValue;
             packet.captureFenceValue = ++_captureFenceValue;
             packet.worldFenceValue = Kcd2HudIsolation::TakeWorldSignalValue(gameBackBuffer);
-            if (_gameCommandQueue == nullptr || _captureInputFence == nullptr ||
-                FAILED(_gameCommandQueue->Signal(_captureInputFence, packet.captureInputFenceValue)))
+            const auto inputSignalStartMs = Util::MillisecondsNow();
+            const bool inputSignaled =
+                _gameCommandQueue != nullptr && _captureInputFence != nullptr &&
+                SUCCEEDED(_gameCommandQueue->Signal(_captureInputFence, packet.captureInputFenceValue));
+            RecordPipelineGameSignal(Util::MillisecondsNow() - inputSignalStartMs);
+            if (!inputSignaled)
                 return false;
             // Fail-safe world gate: the CL-submit hook signals this value
             // mid-frame on per-pass renderers; the present-time signal below
@@ -1203,7 +1215,11 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             // before this signal on the same queue, so the color copy can
             // never read a half-written hudless texture).
             if (packet.worldFenceValue != 0 && _worldFence != nullptr)
+            {
+                const auto worldSignalStartMs = Util::MillisecondsNow();
                 _gameCommandQueue->Signal(_worldFence, packet.worldFenceValue);
+                RecordPipelineGameSignal(Util::MillisecondsNow() - worldSignalStartMs);
+            }
             usedCaptureQueue = true;
             ok = true;
         }
@@ -1213,9 +1229,11 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
             // ownership to the capture queue; without this wait, alt-tab/loads can
             // expose a partially-rendered backbuffer to the copy engine.
             gameReadyFenceValue = ++_captureInputFenceValue;
-            if (_gameCommandQueue == nullptr || _captureInputFence == nullptr ||
-                FAILED(_gameCommandQueue->Signal(_captureInputFence, gameReadyFenceValue)) ||
-                FAILED(_captureQueue->Wait(_captureInputFence, gameReadyFenceValue)))
+            const auto inputSignalStartMs = Util::MillisecondsNow();
+            const bool inputSignaled = _gameCommandQueue != nullptr && _captureInputFence != nullptr &&
+                                       SUCCEEDED(_gameCommandQueue->Signal(_captureInputFence, gameReadyFenceValue));
+            RecordPipelineGameSignal(Util::MillisecondsNow() - inputSignalStartMs);
+            if (!inputSignaled || FAILED(_captureQueue->Wait(_captureInputFence, gameReadyFenceValue)))
                 return false;
 
             auto capList = GetCaptureCommandList(packetIndex);
@@ -1229,6 +1247,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                                                       L"Reproj_PacketUI");
                     if (!packet.hasUi)
                     {
+                        RecordPipelineComposedFallback();
                         LOG_WARN("Reproj: UI capture failed; using composed frame");
                         ok = CopyPacketResource(capList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
                                                 packet.colorState, L"Reproj_PacketColor");
@@ -1249,6 +1268,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                 CopyPacketResource(cmdList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
             if (!packet.hasUi)
             {
+                RecordPipelineComposedFallback();
                 LOG_WARN("Reproj: UI capture failed; using the composed game frame for this packet");
                 ok = CopyPacketResource(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
                                         packet.colorState, L"Reproj_PacketColor");
@@ -1392,6 +1412,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.presentFlags = FGHooks::LastPresentFlags();
 
     const bool nonBlockingHandoff = Config::Instance()->ReprojNonBlockingHandoff.value_or_default();
+    const bool nonBlockingThisPacket = packet.hasUi && nonBlockingHandoff;
+    RecordPipelineCapturePath(usingKcd2Isolation, nonBlockingThisPacket, !nonBlockingThisPacket);
     bool submitted = false;
     if (usedCaptureQueue)
     {
@@ -1414,8 +1436,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         // UI copy trails on the same fence timeline behind captureFenceValue.
         // Inline path: color+UI are one submission, so the single value is the
         // gate (colorFenceValue is 0 there and must not bypass the capture).
-        packet.completionFenceValue =
-            captureViaWorker ? packet.colorFenceValue : packet.captureFenceValue;
+        packet.completionFenceValue = captureViaWorker ? packet.colorFenceValue : packet.captureFenceValue;
         // With separate HUD-less world/UI resources the COPY queue never reads
         // the virtual game backbuffer. When nonBlockingHandoff is enabled,
         // release the virtual backbuffer immediately without GPU wait.
@@ -1468,6 +1489,7 @@ bool AReproj_Dx12::EnqueueCapture(int packetIndex)
     if (_captureWorkStop || _captureWorkCount >= BUFFER_COUNT)
         return false;
     _captureWorkPending[_captureWorkCount++] = packetIndex;
+    RecordPipelineCaptureQueueDepth(static_cast<uint32_t>(_captureWorkCount));
     _captureWorkCv.notify_one();
     return true;
 }
@@ -1491,7 +1513,9 @@ void AReproj_Dx12::CaptureWorkerMain()
                 _captureWorkPending[i - 1] = _captureWorkPending[i];
             --_captureWorkCount;
         }
+        const auto workerStartMs = Util::MillisecondsNow();
         ProcessCapturePacket(packetIndex);
+        RecordPipelineCaptureWorker(Util::MillisecondsNow() - workerStartMs);
     }
 }
 
@@ -1598,6 +1622,10 @@ void AReproj_Dx12::ProcessCapturePacket(int packetIndex)
                                           packet.uiState, L"Reproj_PacketUI");
         if (!packet.hasUi)
         {
+            // This occurs after the game thread chose its virtual-buffer handoff.
+            // ReprojPipe exposes it explicitly; it must never be inferred from hud=.
+            RecordPipelineWorkerUiFallback();
+            RecordPipelineComposedFallback();
             LOG_WARN("Reproj: UI capture failed; using composed frame");
             ok = CopyPacketResource(capList, packet.captureSrcComposed, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
                                     packet.colorState, L"Reproj_PacketColor");
@@ -1733,8 +1761,11 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIn
     // copy/UI list runs on _presentQueue. Order Present on the actual swapchain
     // queue with a GPU-side wait; never CPU-wait here.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
-    if (_gameCommandQueue == nullptr || _scFence == nullptr ||
-        FAILED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
+    const auto directGateStartMs = Util::MillisecondsNow();
+    const bool directGateQueued = _gameCommandQueue != nullptr && _scFence != nullptr &&
+                                  SUCCEEDED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue));
+    RecordPipelineDirectGate(Util::MillisecondsNow() - directGateStartMs);
+    if (!directGateQueued)
         return false;
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
@@ -2057,6 +2088,156 @@ bool AReproj_Dx12::DrainGpuWork()
     return true;
 }
 
+namespace
+{
+uint64_t ReprojPipeUs(double elapsedMs) { return static_cast<uint64_t>(std::max(0.0, elapsedMs * 1000.0)); }
+
+void ReprojPipeMax(std::atomic<uint64_t>& target, uint64_t value)
+{
+    auto current = target.load(std::memory_order_relaxed);
+    while (value > current &&
+           !target.compare_exchange_weak(current, value, std::memory_order_relaxed, std::memory_order_relaxed))
+    {
+    }
+}
+} // namespace
+
+void AReproj_Dx12::RecordPipelinePublication(double totalMs, double captureSetupMs, double submitMs, double advanceMs,
+                                             bool skipped)
+{
+    const auto totalUs = ReprojPipeUs(totalMs);
+    _pipePubCount.fetch_add(1, std::memory_order_relaxed);
+    _pipePubSkipped.fetch_add(skipped, std::memory_order_relaxed);
+    _pipePubTotalUs.fetch_add(totalUs, std::memory_order_relaxed);
+    _pipeCaptureSetupTotalUs.fetch_add(ReprojPipeUs(captureSetupMs), std::memory_order_relaxed);
+    _pipeSubmitTotalUs.fetch_add(ReprojPipeUs(submitMs), std::memory_order_relaxed);
+    _pipeAdvanceTotalUs.fetch_add(ReprojPipeUs(advanceMs), std::memory_order_relaxed);
+    ReprojPipeMax(_pipePubMaxUs, totalUs);
+}
+
+void AReproj_Dx12::RecordPipelineGameSignal(double elapsedMs)
+{
+    const auto elapsedUs = ReprojPipeUs(elapsedMs);
+    _pipeGameSignalCount.fetch_add(1, std::memory_order_relaxed);
+    _pipeGameSignalTotalUs.fetch_add(elapsedUs, std::memory_order_relaxed);
+    ReprojPipeMax(_pipeGameSignalMaxUs, elapsedUs);
+}
+
+void AReproj_Dx12::RecordPipelineCaptureQueueDepth(uint32_t depth) { ReprojPipeMax(_pipeCaptureQueueHigh, depth); }
+
+void AReproj_Dx12::RecordPipelineCapturing(uint32_t count) { ReprojPipeMax(_pipeCapturingHigh, count); }
+
+void AReproj_Dx12::RecordPipelineCaptureWorker(double elapsedMs)
+{
+    const auto elapsedUs = ReprojPipeUs(elapsedMs);
+    _pipeCaptureWorkerCount.fetch_add(1, std::memory_order_relaxed);
+    _pipeCaptureWorkerTotalUs.fetch_add(elapsedUs, std::memory_order_relaxed);
+    ReprojPipeMax(_pipeCaptureWorkerMaxUs, elapsedUs);
+}
+
+void AReproj_Dx12::RecordPipelineCapturePath(bool isolated, bool nonBlocking, bool blocking)
+{
+    _pipeIsolated.fetch_add(isolated, std::memory_order_relaxed);
+    _pipeNonBlocking.fetch_add(nonBlocking, std::memory_order_relaxed);
+    _pipeBlocking.fetch_add(blocking, std::memory_order_relaxed);
+}
+
+void AReproj_Dx12::RecordPipelineWorkerUiFallback() { _pipeWorkerUiFallback.fetch_add(1, std::memory_order_relaxed); }
+
+void AReproj_Dx12::RecordPipelineComposedFallback() { _pipeComposedFallback.fetch_add(1, std::memory_order_relaxed); }
+
+void AReproj_Dx12::RecordPipelineOutput(bool warped, bool newContent)
+{
+    if (warped)
+        (newContent ? _pipeNewWarp : _pipeRepeatWarp).fetch_add(1, std::memory_order_relaxed);
+    else
+        (newContent ? _pipeNewBlit : _pipeRepeatBlit).fetch_add(1, std::memory_order_relaxed);
+}
+
+void AReproj_Dx12::RecordPipelineDirectGate(double elapsedMs)
+{
+    const auto elapsedUs = ReprojPipeUs(elapsedMs);
+    _pipeDirectGateCount.fetch_add(1, std::memory_order_relaxed);
+    _pipeDirectGateTotalUs.fetch_add(elapsedUs, std::memory_order_relaxed);
+    ReprojPipeMax(_pipeDirectGateMaxUs, elapsedUs);
+}
+
+void AReproj_Dx12::RecordPipelineFencePoll(bool colorPending, bool uiPending)
+{
+    _pipeFencePolls.fetch_add(1, std::memory_order_relaxed);
+    _pipeColorPending.fetch_add(colorPending, std::memory_order_relaxed);
+    _pipeUiPending.fetch_add(uiPending, std::memory_order_relaxed);
+}
+
+void AReproj_Dx12::LogPipelineMetricsIfDue()
+{
+    constexpr double PIPE_INTERVAL_MS = 250.0;
+    const auto now = Util::MillisecondsNow();
+    if (_pipeMetricsTimestamp == 0.0)
+    {
+        _pipeMetricsTimestamp = now;
+        return;
+    }
+    const auto elapsedMs = now - _pipeMetricsTimestamp;
+    if (elapsedMs < PIPE_INTERVAL_MS)
+        return;
+    _pipeMetricsTimestamp = now;
+
+    const auto take = [](std::atomic<uint64_t>& value) { return value.exchange(0, std::memory_order_relaxed); };
+    const auto pubCount = take(_pipePubCount);
+    const auto pubSkipped = take(_pipePubSkipped);
+    const auto pubTotalUs = take(_pipePubTotalUs);
+    const auto pubMaxUs = take(_pipePubMaxUs);
+    const auto captureSetupUs = take(_pipeCaptureSetupTotalUs);
+    const auto submitUs = take(_pipeSubmitTotalUs);
+    const auto advanceUs = take(_pipeAdvanceTotalUs);
+    const auto signalCount = take(_pipeGameSignalCount);
+    const auto signalTotalUs = take(_pipeGameSignalTotalUs);
+    const auto signalMaxUs = take(_pipeGameSignalMaxUs);
+    const auto capQueueHigh = take(_pipeCaptureQueueHigh);
+    const auto workerCount = take(_pipeCaptureWorkerCount);
+    const auto workerTotalUs = take(_pipeCaptureWorkerTotalUs);
+    const auto workerMaxUs = take(_pipeCaptureWorkerMaxUs);
+    const auto isolated = take(_pipeIsolated);
+    const auto nonBlocking = take(_pipeNonBlocking);
+    const auto blocking = take(_pipeBlocking);
+    const auto workerUiFallback = take(_pipeWorkerUiFallback);
+    const auto composedFallback = take(_pipeComposedFallback);
+    const auto newWarp = take(_pipeNewWarp);
+    const auto repeatWarp = take(_pipeRepeatWarp);
+    const auto newBlit = take(_pipeNewBlit);
+    const auto repeatBlit = take(_pipeRepeatBlit);
+    const auto directGateCount = take(_pipeDirectGateCount);
+    const auto directGateTotalUs = take(_pipeDirectGateTotalUs);
+    const auto directGateMaxUs = take(_pipeDirectGateMaxUs);
+    const auto capturingHigh = take(_pipeCapturingHigh);
+    const auto fencePolls = take(_pipeFencePolls);
+    const auto colorPending = take(_pipeColorPending);
+    const auto uiPending = take(_pipeUiPending);
+    const auto handoff = _wrappedSwapChain != nullptr ? _wrappedSwapChain->ConsumeReprojectionAdvanceWaitStats()
+                                                      : WrappedIDXGISwapChain4::ReprojectionAdvanceWaitStats {};
+    const auto meanMs = [](uint64_t totalUs, uint64_t count)
+    { return count != 0 ? static_cast<double>(totalUs) / count / 1000.0 : 0.0; };
+
+    // Flat key=value fields are intentionally stable for scripts; each line is
+    // a 250 ms aggregate, not an event trace. Units are encoded in key names.
+    LOG_INFO("ReprojPipe v=1 dtMs={:.0f} pubN={} pubSkip={} pubMeanMs={:.3f} pubMaxMs={:.3f} "
+             "pubCapMs={:.3f} pubSubmitMs={:.3f} pubAdvanceMs={:.3f} signalN={} signalMeanMs={:.3f} "
+             "signalMaxMs={:.3f} handoffWaitN={} handoffWaitMeanMs={:.3f} handoffWaitMaxMs={:.3f} "
+             "capQHi={} capWorkerN={} capWorkerMeanMs={:.3f} capWorkerMaxMs={:.3f} capCapturingHi={} "
+             "fencePollN={} colorPending={} uiPending={} iso={} handoffNB={} handoffBlock={} workerUiFail={} "
+             "composedFallback={} newWarp={} repeatWarp={} newBlit={} repeatBlit={} directGateN={} "
+             "directGateMeanMs={:.3f} directGateMaxMs={:.3f}",
+             elapsedMs, pubCount, pubSkipped, meanMs(pubTotalUs, pubCount), pubMaxUs / 1000.0,
+             meanMs(captureSetupUs, pubCount), meanMs(submitUs, pubCount), meanMs(advanceUs, pubCount), signalCount,
+             meanMs(signalTotalUs, signalCount), signalMaxUs / 1000.0, handoff.count,
+             meanMs(handoff.totalUs, handoff.count), handoff.maxUs / 1000.0, capQueueHigh, workerCount,
+             meanMs(workerTotalUs, workerCount), workerMaxUs / 1000.0, capturingHigh, fencePolls, colorPending,
+             uiPending, isolated, nonBlocking, blocking, workerUiFallback, composedFallback, newWarp, repeatWarp,
+             newBlit, repeatBlit, directGateCount, meanMs(directGateTotalUs, directGateCount),
+             directGateMaxUs / 1000.0);
+}
+
 void AReproj_Dx12::RecordRealFrame()
 {
     std::scoped_lock lock(_metricsMutex);
@@ -2080,6 +2261,7 @@ void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseA
 
 void AReproj_Dx12::LogMetricsIfDue()
 {
+    LogPipelineMetricsIfDue();
     const auto now = Util::MillisecondsNow();
     if (_metricsTimestamp == 0.0)
     {
@@ -2446,7 +2628,9 @@ bool AReproj_Dx12::Present()
             SkipAnchorPublication(fIndex, gameBackBuffer, virtualBufferIndex, wrapped, presentStart);
             return true;
         }
+        const auto captureSetupStartMs = Util::MillisecondsNow();
         const bool captured = CaptureFramePacket(fIndex, packetIndex, gameBackBuffer, virtualBufferIndex, warpAllowed);
+        const auto captureSetupMs = Util::MillisecondsNow() - captureSetupStartMs;
         // Packet readiness and virtual-buffer reuse have separate fences on the
         // isolated-HUD path: reuse need not wait for copies that only read the
         // separate HUD-less/UI resources.
@@ -2454,10 +2638,15 @@ bool AReproj_Dx12::Present()
         auto* handoffFence = packet.handoffFence != nullptr ? packet.handoffFence : captureFence;
         const auto handoffFenceValue =
             packet.handoffFenceValue != 0 ? packet.handoffFenceValue : packet.captureFenceValue;
+        const auto submitStartMs = Util::MillisecondsNow();
         const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence,
                                                                                        handoffFenceValue));
+        const auto submitMs = Util::MillisecondsNow() - submitStartMs;
         HRESULT advanceHr = E_FAIL;
+        const auto advanceStartMs = Util::MillisecondsNow();
         const bool advanced = submitted && SUCCEEDED(advanceHr = wrapped->AdvanceReprojectionBuffer());
+        const auto advanceMs = Util::MillisecondsNow() - advanceStartMs;
+        RecordPipelinePublication(Util::MillisecondsNow() - presentStart, captureSetupMs, submitMs, advanceMs, false);
         if (captured && submitted && advanced)
         {
             packet.state.store(PacketState::Ready);

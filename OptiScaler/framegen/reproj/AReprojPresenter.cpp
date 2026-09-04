@@ -719,9 +719,13 @@ void AReproj_Dx12::PresenterMain()
         // extrapolating); no fresh publish at all is a source hitch (hold).
         double newestReadyRenderMs = 0.0;
         uint32_t readyCount = 0;
+        uint32_t capturingCount = 0;
         for (int i = 0; i < BUFFER_COUNT; ++i)
         {
-            if (_packets[i].state.load() == PacketState::Ready)
+            const auto packetState = _packets[i].state.load();
+            if (packetState == PacketState::Capturing)
+                ++capturingCount;
+            if (packetState == PacketState::Ready)
             {
                 ++readyCount;
                 // New anchors remain queued until the next display slot rather
@@ -753,6 +757,7 @@ void AReproj_Dx12::PresenterMain()
                     uiComplete = prev.captureFenceValue == 0 || prevFence == nullptr ||
                                  prevFence->GetCompletedValue() >= prev.captureFenceValue;
                 }
+                RecordPipelineFencePoll(!colorComplete, !uiComplete);
                 if (colorComplete && uiComplete && _packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
@@ -760,6 +765,8 @@ void AReproj_Dx12::PresenterMain()
                 }
             }
         }
+
+        RecordPipelineCapturing(capturingCount);
 
         // The previous anchor stays Presenting until the NEXT new-anchor
         // switch (or loop exit): its UI is composited while the new anchor's
@@ -889,6 +896,7 @@ void AReproj_Dx12::PresenterMain()
             _presenterState.store(PresenterState::Failed);
             break;
         }
+        RecordPipelineOutput(shouldWarp, newContent);
 
         const auto presentCallStartMs = Util::MillisecondsNow();
         const auto result = PresentCompositorFrame(1, 0, !newContent, false);

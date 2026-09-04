@@ -7,6 +7,7 @@
 #include "dxgi1_6.h"
 #include "d3d12.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -91,6 +92,16 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     HRESULT GetReprojectionBuffer(UINT index, REFIID riid, void** resource);
     HRESULT SubmitReprojectionBuffer(UINT index, ID3D12Fence* captureFence, UINT64 captureFenceValue);
     HRESULT AdvanceReprojectionBuffer();
+    // Atomically drains actual CPU waits performed by AdvanceReprojectionBuffer.
+    // Kept here rather than inferred by the presenter so a slow mutex/API call
+    // is never misreported as virtual-buffer ownership back-pressure.
+    struct ReprojectionAdvanceWaitStats
+    {
+        uint64_t count = 0;
+        uint64_t totalUs = 0;
+        uint64_t maxUs = 0;
+    };
+    ReprojectionAdvanceWaitStats ConsumeReprojectionAdvanceWaitStats();
     void AbortReprojectionBuffer(UINT index);
     IDXGISwapChain3* RealSwapChain3() const { return _real3; }
     void ShutdownReprojectionVirtualization();
@@ -142,6 +153,11 @@ class DECLSPEC_UUID("3af622a3-82d0-49cd-994f-cce05122c222") WrappedIDXGISwapChai
     bool _reprojectionDegraded = false;
     bool _reprojectionShuttingDown = false;
     HANDLE _reprojectionWaitableObject = nullptr; // borrowed from the real swapchain
+    // Written only when AdvanceReprojectionBuffer actually enters its fence wait.
+    // The reprojection presenter drains these at 4 Hz for ReprojPipe v=1.
+    std::atomic<uint64_t> _reprojectionAdvanceWaitCount { 0 };
+    std::atomic<uint64_t> _reprojectionAdvanceWaitTotalUs { 0 };
+    std::atomic<uint64_t> _reprojectionAdvanceWaitMaxUs { 0 };
 
 #ifdef USE_LOCAL_MUTEX
     OwnedMutex _localMutex;

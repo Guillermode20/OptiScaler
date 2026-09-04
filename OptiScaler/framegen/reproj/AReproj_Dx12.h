@@ -275,6 +275,23 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs);
     void LogMetricsIfDue();
 
+    // ReprojPipe v=1 is intentionally aggregate-only: 4 Hz parser-stable
+    // snapshots diagnose queue topology without restoring per-slot telemetry,
+    // readbacks, allocations, or additional GPU waits.
+    void RecordPipelinePublication(double totalMs, double captureSetupMs, double submitMs, double advanceMs,
+                                   bool skipped);
+    void RecordPipelineGameSignal(double elapsedMs);
+    void RecordPipelineCaptureQueueDepth(uint32_t depth);
+    void RecordPipelineCapturing(uint32_t count);
+    void RecordPipelineCaptureWorker(double elapsedMs);
+    void RecordPipelineCapturePath(bool isolated, bool nonBlocking, bool blocking);
+    void RecordPipelineWorkerUiFallback();
+    void RecordPipelineComposedFallback();
+    void RecordPipelineOutput(bool warped, bool newContent);
+    void RecordPipelineDirectGate(double elapsedMs);
+    void RecordPipelineFencePoll(bool colorPending, bool uiPending);
+    void LogPipelineMetricsIfDue();
+
     double _metricsTimestamp = 0.0;
     uint32_t _metricsRealFrames = 0;
     uint32_t _metricsWarpFrames = 0;
@@ -302,6 +319,23 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
     float _metricsGamePresentPaceMaxMs = 0.0f;
+
+    // 4 Hz ReprojPipe v=1 accumulators. All writers are game, capture-worker,
+    // or presenter threads, so these use relaxed atomics and are drained with
+    // exchange by the existing metrics call sites.
+    std::atomic<uint64_t> _pipePubCount { 0 }, _pipePubSkipped { 0 }, _pipePubTotalUs { 0 }, _pipePubMaxUs { 0 };
+    std::atomic<uint64_t> _pipeCaptureSetupTotalUs { 0 }, _pipeSubmitTotalUs { 0 }, _pipeAdvanceTotalUs { 0 };
+    std::atomic<uint64_t> _pipeGameSignalCount { 0 }, _pipeGameSignalTotalUs { 0 }, _pipeGameSignalMaxUs { 0 };
+    std::atomic<uint64_t> _pipeCaptureQueueHigh { 0 }, _pipeCaptureWorkerCount { 0 }, _pipeCaptureWorkerTotalUs { 0 },
+        _pipeCaptureWorkerMaxUs { 0 };
+    std::atomic<uint64_t> _pipeIsolated { 0 }, _pipeNonBlocking { 0 }, _pipeBlocking { 0 }, _pipeWorkerUiFallback { 0 },
+        _pipeComposedFallback { 0 };
+    std::atomic<uint64_t> _pipeNewWarp { 0 }, _pipeRepeatWarp { 0 }, _pipeNewBlit { 0 }, _pipeRepeatBlit { 0 };
+    std::atomic<uint64_t> _pipeDirectGateCount { 0 }, _pipeDirectGateTotalUs { 0 }, _pipeDirectGateMaxUs { 0 };
+    std::atomic<uint64_t> _pipeCapturingHigh { 0 }, _pipeFencePolls { 0 }, _pipeColorPending { 0 },
+        _pipeUiPending { 0 };
+    double _pipeMetricsTimestamp = 0.0;
+
     // Per-frame game-thread stall (ms of GPU wait in the virtual handoff,
     // pacing sleep excluded). Written relaxed by the game present path, read
     // by the presenter's adaptive repeat-warp shed — single-float telemetry,
