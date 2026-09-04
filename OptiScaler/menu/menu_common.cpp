@@ -4147,63 +4147,22 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->FGEnabled = enabled;
             state.fgChanged = true;
         }
-        ImGui::TextDisabled("60 Hz world -> display-rate camera warp -> unwarped HUD");
+        // async-simple: one fixed pipeline — composed capture on the game DIRECT
+        // queue, rotation-only warp on the presenter's single DIRECT queue, always
+        // warp repeated slots, never pace the game. The experimental toggles that
+        // used to live here control machinery that no longer exists (COMPUTE warp
+        // queue, HUD isolation, adaptive late latch, source cap) and are removed.
+        ImGui::TextDisabled("composed frame -> display-rate rotation warp");
         ImGui::Spacing();
         ImGui::PushItemWidth(180.0f * menuResScale);
         float targetRefresh = config->ReprojTargetRefresh.value_or_default();
         if (ImGui::InputFloat("Target refresh##reproj-live", &targetRefresh, 1.0f, 10.0f, "%.0f Hz"))
             config->ReprojTargetRefresh = std::max(0.0f, targetRefresh);
         ShowHelpMarker("0 = display. Presenter slot cadence.");
-        float sourceCap = config->ReprojSourceFramerateLimit.value_or_default();
-        if (ImGui::InputFloat("Source FPS cap##reproj-live", &sourceCap, 1.0f, 10.0f, "%.1f Hz"))
-            config->ReprojSourceFramerateLimit = std::clamp(sourceCap, 0.0f, 1000.0f);
-        ShowHelpMarker("Caps virtualized game thread after publish. 60 on 120Hz ~ one new + one repeat. 0=uncapped.");
         float smooth = config->ReprojSmoothing.value_or_default();
         if (ImGui::SliderFloat("Smoothing##reproj-live", &smooth, 0.0f, 0.95f, "%.2f"))
             config->ReprojSmoothing = std::clamp(smooth, 0.0f, 0.95f);
         ShowHelpMarker("EMA on KCD2 camera angular velocity. 0=off. 0.25 default.");
-        bool hudIso = config->ReprojHudIsolation.value_or_default();
-        if (ImGui::Checkbox("HUD Isolation (KCD2)##reproj-live", &hudIso))
-            config->ReprojHudIsolation = hudIso;
-        ShowHelpMarker("Separates Scaleform HUD from 3D world to composite UI cleanly after warp.");
-
-        bool allowComposed = config->ReprojAllowComposedWarp.value_or_default();
-        if (ImGui::Checkbox("Allow Composed Warp##reproj-live", &allowComposed))
-            config->ReprojAllowComposedWarp = allowComposed;
-        ShowHelpMarker(
-            "Permits timewarping the full frame even when HUD cannot be isolated (HUD is warped with camera).");
-
-        bool repeatWarp = config->ReprojRepeatWarp.value_or_default();
-        if (ImGui::Checkbox("Warp Repeated Slots##reproj-live", &repeatWarp))
-            config->ReprojRepeatWarp = repeatWarp;
-        ShowHelpMarker("When disabled, only warps on new anchors and uses fast blits for repeated slots, saving GPU "
-                       "time for the game.");
-
-        bool computeQueue = config->ReprojAsyncComputeWarp.value_or_default();
-        if (ImGui::Checkbox("Async Compute Queue##reproj-live", &computeQueue))
-            config->ReprojAsyncComputeWarp = computeQueue;
-        ShowHelpMarker("When enabled, runs warps on dedicated COMPUTE queue. Disable on Proton if cross-queue "
-                       "contention drops game FPS.");
-
-        bool nonBlockHandoff = config->ReprojNonBlockingHandoff.value_or_default();
-        if (ImGui::Checkbox("Non-blocking handoff##reproj-live", &nonBlockHandoff))
-            config->ReprojNonBlockingHandoff = nonBlockHandoff;
-        ShowHelpMarker("Releases virtual backbuffer immediately without GPU wait when HUD isolation is active. "
-                       "Prevents game thread stalls.");
-
-        float lateLead = config->ReprojLateSampleLead.value_or_default();
-        bool adaptiveLead = !(lateLead > 0.5f);
-        if (ImGui::Checkbox("Adaptive late sample##reproj-live", &adaptiveLead))
-            config->ReprojLateSampleLead = adaptiveLead ? 0.0f : 4.0f;
-        ShowHelpMarker("auto = hunt the mouse sample as late as the warp allows (default). Uncheck to pin a fixed lead.");
-        if (!adaptiveLead)
-        {
-            float fixedLead = std::clamp(lateLead, 1.0f, 8.0f);
-            if (ImGui::SliderFloat("Late sample lead##reproj-live", &fixedLead, 1.0f, 8.0f, "%.1f ms"))
-                config->ReprojLateSampleLead = fixedLead;
-            ShowHelpMarker("Lead time before the present deadline to sample mouse input. Smaller = fresher input, "
-                           "larger = safer against warp overrunning the vblank.");
-        }
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {

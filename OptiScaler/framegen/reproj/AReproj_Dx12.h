@@ -92,14 +92,13 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool _forceBorderless = false;
 
     // async-simple development stage (see plans/async_simple.md):
-    //   0 = A0/A1/A2 collapsed: the async presenter is live (capture + real
-    //       swapchain ownership at display cadence) but the warp shader is never
-    //       dispatched — every display slot identity-blits the newest completed
-    //       anchor. Proves the async plumbing holds the source's natural
-    //       cadence before warp cost is introduced.
+    //   0 = identity blit only (no warp shader dispatch) — used to isolate
+    //       source-cadence impact of the async plumbing alone.
     //   >=1 = rotation warp enabled on the presenter's single DIRECT queue
     //       (_presentQueue, retirement on _scFence) — the P3 queue model.
-    static constexpr int kAsyncSimpleStage = 0;
+    //   Live-validated at 1 on KCD2 (2026-09-04): the async presenter held
+    //   ~100-115 display FPS with zero errors/downgrades in a full session.
+    static constexpr int kAsyncSimpleStage = 1;
     // Fixed dispatch lead: every slot wakes to dispatch its warp 3 ms before
     // the present deadline (plans/async_simple.md §3.6). No adaptive control.
     static constexpr double kDispatchLeadMs = 3.0;

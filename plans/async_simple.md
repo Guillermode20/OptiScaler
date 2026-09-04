@@ -55,8 +55,21 @@
   `Reproj: source=… display=… (new=… repeat=…) missed=… interval=mean/p95 lead=3.0 poseAge=… queue=… late=applied/samples maxDeg=… dropAnchor=… capC=… capWait=… (mode, block=…)`
   — dropped `sampLead`, `hud`, `latch/lateAge`, `sensX`, `pace` keys and their dead
   counters (`_metricsLateCam*`, `_metricsHudComposites`, `_metricsGamePresentPaceMaxMs`).
-  `_trackedMouseSensitivityX` stays (ApplyLateInput steering still uses it). Parser tests
+  `_trackedMouseSensitivityX` stays (ApplyLateInput steering still uses it).  Parser tests
   re-pinned (sampLead/hud/ReprojPipe → absence, new key set); 35/35 pass.
+- **P5 (menu/config sweep) + stage flip: landed.** Live KCD2 session (2026-09-04)
+  confirmed the A0 identity pipeline runs clean (async presenter ~100–115 display FPS,
+  zero errors/downgrades) but by design never dispatches the warp — the user-visible
+  "timewarp does nothing". `kAsyncSimpleStage` flipped **0 → 1**: rotation warps now run
+  on the single DIRECT queue. The live reproj menu block (menu_common.cpp, outside the
+  `#if 0` experimental block) toggled machinery deleted in P2/P3 — Source FPS cap,
+  HUD Isolation, Allow Composed Warp, Warp Repeated Slots, Async Compute Queue,
+  Non-blocking handoff, Adaptive late sample — and is trimmed to the real controls
+  (Enable, Target refresh, Smoothing + metrics line). Dead config keys
+  `ReprojAllowComposedWarp`/`ReprojNonBlockingHandoff`/`ReprojRepeatWarp`/
+  `ReprojAsyncComputeWarp` removed from Config.h/Config.cpp;
+  `ReprojHudIsolation`/`ReprojLateSampleLead`/`ReprojSourceFramerateLimit` stay as inert
+  compat reads (Kcd2HudIsolation.cpp compiles reads of the first; tests pin the latter two).
 
 ## 1. Goal
 
