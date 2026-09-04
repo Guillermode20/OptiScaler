@@ -938,7 +938,6 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     ++_metricsSkippedAnchorSamples;
     _metricsGamePresentBlockMaxMs =
         std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStartMs));
-    _latestGameStallMs.store(static_cast<float>(doneMs - presentStartMs), std::memory_order_relaxed);
 }
 
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
@@ -1565,8 +1564,6 @@ void AReproj_Dx12::LogMetricsIfDue()
     uint32_t skippedAnchorSamples = 0;
     uint32_t directCaptures = 0;
     uint32_t captureNotReady = 0;
-    uint32_t uiBorrows = 0;
-    uint32_t hitchHolds = 0;
     float lateInputMaxDegrees = 0.0f;
     float gamePresentBlockMaxMs = 0.0f;
     float gamePresentPaceMaxMs = 0.0f;
@@ -1603,8 +1600,6 @@ void AReproj_Dx12::LogMetricsIfDue()
         skippedAnchorSamples = _metricsSkippedAnchorSamples;
         directCaptures = _metricsDirectCaptures;
         captureNotReady = _metricsCaptureNotReady;
-        uiBorrows = _metricsUiBorrows;
-        hitchHolds = _metricsHitchHolds;
         lateInputMaxDegrees = _metricsLateInputMaxDegrees;
         gamePresentBlockMaxMs = _metricsGamePresentBlockMaxMs;
         gamePresentPaceMaxMs = _metricsGamePresentPaceMaxMs;
@@ -1627,9 +1622,6 @@ void AReproj_Dx12::LogMetricsIfDue()
         _runtimeMetrics.droppedAnchors = skippedAnchorSamples;
         _runtimeMetrics.directCaptures = directCaptures;
         _runtimeMetrics.captureNotReady = captureNotReady;
-        _runtimeMetrics.uiBorrows = uiBorrows;
-        _runtimeMetrics.repeatWarpShed = _repeatWarpShed.load(std::memory_order_relaxed);
-        _runtimeMetrics.stallEmaMs = static_cast<float>(_stallEmaMs.load(std::memory_order_relaxed));
         _runtimeMetrics.gamePresentBlockMs = gamePresentBlockMaxMs;
         _runtimeMetrics.gamePresentPaceMs = gamePresentPaceMaxMs;
 
@@ -1667,9 +1659,7 @@ void AReproj_Dx12::LogMetricsIfDue()
         _metricsLateCamAgeSamples = 0;
         _metricsHudComposites = 0;
         _metricsDirectCaptures = 0;
-        _metricsUiBorrows = 0;
         _metricsCaptureNotReady = 0;
-        _metricsHitchHolds = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _metricsGamePresentBlockMaxMs = 0.0f;
         _metricsGamePresentPaceMaxMs = 0.0f;
@@ -1677,17 +1667,16 @@ void AReproj_Dx12::LogMetricsIfDue()
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms sampLead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} uiBorrow={} latch={}/{}/{} "
-             "lateAge={:.1f}ms sensX={:.7f} hold={} shed={} stallEma={:.1f}ms ({}, block={:.2f}ms pace={:.2f}ms)",
+             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} latch={}/{}/{} "
+             "lateAge={:.1f}ms sensX={:.7f} ({}, block={:.2f}ms pace={:.2f}ms)",
              realFrames * scale, warpFrames * scale, newAnchorDisplays,
              repeatedAnchorDisplays, missedDisplaySlots, meanPresentIntervalMs,
-             p95PresentIntervalMs, _dispatchLeadMs, _lastLateSampleLeadMs.load(), poseAge,
+             p95PresentIntervalMs, kDispatchLeadMs, _lastLateSampleLeadMs.load(), poseAge,
              queueDepth,
              lateInputApplied, lateInputSamples, lateInputMaxDegrees, hudComposites,
-             skippedAnchorSamples, directCaptures, captureNotReady, uiBorrows,
+             skippedAnchorSamples, directCaptures, captureNotReady,
              lateCamHits, packetBaseHits, lateFallbacks, lateCamAge,
-             _trackedMouseSensitivityX.load(std::memory_order_relaxed), hitchHolds,
-             _repeatWarpShed.load(std::memory_order_relaxed), _stallEmaMs.load(std::memory_order_relaxed), presenter,
+             _trackedMouseSensitivityX.load(std::memory_order_relaxed), presenter,
              gamePresentBlockMaxMs, gamePresentPaceMaxMs);
 }
 
@@ -1918,7 +1907,6 @@ bool AReproj_Dx12::Present()
             const auto doneMs = Util::MillisecondsNow();
             _metricsGamePresentBlockMaxMs =
                 std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
-            _latestGameStallMs.store(static_cast<float>(doneMs - presentStart), std::memory_order_relaxed);
             return advanced;
         }
 
@@ -1984,7 +1972,6 @@ bool AReproj_Dx12::Present()
             const auto doneMs = Util::MillisecondsNow();
             _metricsGamePresentBlockMaxMs =
                 std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
-            _latestGameStallMs.store(static_cast<float>(doneMs - presentStart), std::memory_order_relaxed);
             return true;
         }
 
@@ -2155,7 +2142,6 @@ void AReproj_Dx12::Activate()
         _metricsHudComposites = 0;
         _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;
-        _metricsHitchHolds = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _runtimeMetrics = {};
     }

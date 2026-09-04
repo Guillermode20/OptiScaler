@@ -247,86 +247,6 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
     return result;
 }
 
-// Adaptive repeat-warp shed: the presenter normally warps every repeated
-// display slot for a full 120 Hz image cadence, but that warp compute shares
-// the GPU with the game. When the source cannot sustain its frame-rate cap
-// (cadence EMA over target) or the game thread is stalling behind the GPU
-// (block EMA), repeated slots take the cheap blit path instead so the headroom
-// goes back to the game; full warps resume once both signals recover.
-void AReproj_Dx12::EvaluateRepeatWarpShed(double nowMs, double sourcePeriodMs)
-{
-    const auto sourceCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
-    // Shedding only makes sense behind a source frame-rate cap: it hands GPU
-    // time back to the game so the cap holds. An uncapped source runs flat-out
-    // (its own pacing is already "as fast as the GPU allows"), so warps on
-    // repeated slots are pure display smoothness with no source to protect.
-    if (!(sourceCap > 1.0))
-    {
-        _repeatWarpShed.store(false, std::memory_order_relaxed);
-        return;
-    }
-    const auto targetPeriodMs = 1000.0 / sourceCap;
-
-    // Stall samples arrive at the game's present cadence (every source frame,
-    // regardless of the display slot rate). Feeding the EMA only when a newer
-    // sample exists keeps one slot from double-counting the same stall value.
-    const float stallMs = _latestGameStallMs.load(std::memory_order_relaxed);
-    const bool haveFreshSample = stallMs >= 0.0f && stallMs < 500.0f;
-    const double stallAgeMs = _lastStallSampleMs > 0.0 ? nowMs - _lastStallSampleMs : 0.0;
-    double stallEma = _stallEmaMs.load(std::memory_order_relaxed);
-    if (haveFreshSample && (stallMs != _lastStallSampleValue || stallAgeMs > 120.0))
-    {
-        stallEma = stallEma > 0.0 ? stallEma * 0.7 + stallMs * 0.3 : stallMs;
-        _lastStallSampleMs = nowMs;
-        _lastStallSampleValue = stallMs;
-    }
-    else
-    {
-        // No fresh stall sample (game thread paused or stalled). Decay the EMA
-        // so a stale stall spike does not keep the shed engaged forever.
-        const double elapsedMs = _lastShedEvaluateMs > 0.0 ? std::max(0.0, nowMs - _lastShedEvaluateMs) : 8.0;
-        const double decay = std::exp(-elapsedMs / 400.0);
-        stallEma *= decay;
-    }
-    _stallEmaMs.store(stallEma, std::memory_order_relaxed);
-
-    // Smooth the source period (the game's own EMA already rejects pacing
-    // outliers, so a light filter here is enough to drive the shed decision).
-    if (sourcePeriodMs > 0.0 && sourcePeriodMs < 500.0)
-        _cadenceEmaMs = _cadenceEmaMs > 0.0 ? _cadenceEmaMs * 0.6 + sourcePeriodMs * 0.4 : sourcePeriodMs;
-
-    // Hysteresis: engage at 1.15x the target period (a 60 Hz cap sheds when
-    // the source cannot hold ~52 FPS), release back at the cap. The cadence EMA
-    // converges to the cap period from above when the source recovers, so the
-    // release band sits slightly above 1.0x or the shed would never lift. A
-    // sustained game-thread stall (block, pacing sleep excluded) engages too
-    // and also demands cadence recovery before warps return.
-    constexpr double CADENCE_ENGAGE_RATIO = 1.15;
-    constexpr double CADENCE_RELEASE_RATIO = 1.03;
-    constexpr double STALL_ENGAGE_MS = 8.0;
-    constexpr double STALL_RELEASE_MS = 6.0; // block decays back to its ~1-6 ms floor once warps shed
-    constexpr double MIN_SHED_MS = 400.0; // prevent warp/shed oscillation around the boundary
-
-    const bool cadenceEngage = _cadenceEmaMs > targetPeriodMs * CADENCE_ENGAGE_RATIO;
-    const bool stallEngage = _stallEmaMs.load(std::memory_order_relaxed) > STALL_ENGAGE_MS;
-    const bool engage = cadenceEngage || stallEngage;
-
-    if (engage && !_repeatWarpShed.load(std::memory_order_relaxed))
-    {
-        _repeatWarpShed.store(true, std::memory_order_relaxed);
-        _shedEngagedAtMs = nowMs;
-    }
-    else if (_repeatWarpShed.load(std::memory_order_relaxed))
-    {
-        const bool heldMinimum = (nowMs - _shedEngagedAtMs) >= MIN_SHED_MS;
-        const bool cadenceRecovered = _cadenceEmaMs <= targetPeriodMs * CADENCE_RELEASE_RATIO;
-        const bool stallCleared = _stallEmaMs.load(std::memory_order_relaxed) <= STALL_RELEASE_MS;
-        if (heldMinimum && cadenceRecovered && stallCleared)
-            _repeatWarpShed.store(false, std::memory_order_relaxed);
-    }
-    _lastShedEvaluateMs = nowMs;
-}
-
 void AReproj_Dx12::PresenterMain()
 {
     int activePacketIndex = -1;
@@ -339,7 +259,6 @@ void AReproj_Dx12::PresenterMain()
     const auto resetPresentationClock = [&]
     {
         nextDeadlineMs = 0.0;
-        _dispatchLeadMs = 3.0;
         std::scoped_lock metricsLock(_metricsMutex);
         _lastDisplayPresentMs = 0.0;
         _presentIntervalCount = 0;
@@ -347,17 +266,6 @@ void AReproj_Dx12::PresenterMain()
         std::fill(_presentIntervals, _presentIntervals + _countof(_presentIntervals), 0.0);
     };
 
-    // Reset the adaptive shed controller on each presenter start so a shed
-    // carried over from a previous session cannot suppress warps after a restart.
-    _repeatWarpShed.store(false, std::memory_order_relaxed);
-    _cadenceEmaMs = 0.0;
-    _stallEmaMs.store(0.0, std::memory_order_relaxed);
-    _lastStallSampleMs = 0.0;
-    _lastStallSampleValue = -1.0f;
-    _lastShedEvaluateMs = 0.0;
-    _shedEngagedAtMs = 0.0;
-    _heldPacketIndex = -1;
-    _metricsUiBorrows = 0;
     _lastLateSampleLeadMs.store(4.0);
 
     while (!_stopPresenter.load())
@@ -366,19 +274,16 @@ void AReproj_Dx12::PresenterMain()
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
         // A serial Present(1) loop cannot make a preparation lead longer than
         // one refresh useful: after Present returns, an older grid deadline can
-        // already be in the past. Keep adaptive and manual leads inside the
-        // current slot while retaining a small safety margin.
+        // already be in the past. Fixed 3 ms dispatch lead (kDispatchLeadMs),
+        // kept inside the current slot with a small safety margin.
         const auto maxUsableLeadMs = std::max(3.0, std::min(20.0, refreshPeriodMs * 0.75));
-        const auto dispatchLeadMs = std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs);
+        const auto dispatchLeadMs = std::min(kDispatchLeadMs, maxUsableLeadMs);
 
         // Handle TargetRefresh change without restart: reset the grid so a
         // 240→120 switch doesn't stay stuck at the old period.
         static double lastSeenRefreshHz = 0.0;
         if (lastSeenRefreshHz > 1.0 && std::abs(refreshHz - lastSeenRefreshHz) > 0.5)
-        {
-            _dispatchLeadMs = 3.0;
             nextDeadlineMs = 0.0;
-        }
         lastSeenRefreshHz = refreshHz;
 
         // Per-slot telemetry is compiled out of the minimal path (see AGENTS.md):
@@ -432,18 +337,6 @@ void AReproj_Dx12::PresenterMain()
             }
 
             const bool deadlineOk = WaitForPresenterDeadline(nextDeadlineMs - dispatchLeadMs);
-            const auto wakeCompletedMs = Util::MillisecondsNow();
-
-            // Symmetric proportional lead control: grow when the wake lands too
-            // close to the deadline, relax when headroom is generous. The old
-            // +1.0/-0.05 ratchet stuck at the 8 ms cap and added latency.
-            const auto wakeHeadroomMs = nextDeadlineMs - wakeCompletedMs;
-            const double growCap = std::min(8.0, maxUsableLeadMs);
-            if (wakeHeadroomMs < 2.0)
-                _dispatchLeadMs = std::min(_dispatchLeadMs + 0.25, growCap);
-            else if (wakeHeadroomMs > 4.0)
-                _dispatchLeadMs = std::max(_dispatchLeadMs - 0.1, 3.0);
-
             if (!deadlineOk)
                 break;
         }
@@ -468,11 +361,6 @@ void AReproj_Dx12::PresenterMain()
         // the active anchor but no newer completed packet was claimed below,
         // this slot deliberately reuses the active anchor (counted as capWait).
         UINT64 newestReadyFrame = activeFrame;
-        // Freshest publish time over all READY packets, complete or not. A
-        // fresh publish with an incomplete capture is capture latency (keep
-        // extrapolating); no fresh publish at all is a source hitch (hold).
-        double newestReadyRenderMs = 0.0;
-        uint32_t readyCount = 0;
         uint32_t capturingCount = 0;
         for (int i = 0; i < kReprojFrameSlots; ++i)
         {
@@ -481,38 +369,18 @@ void AReproj_Dx12::PresenterMain()
                 ++capturingCount;
             if (packetState == PacketState::Ready)
             {
-                ++readyCount;
-                // New anchors remain queued until the next display slot rather
-                // than replacing the current real content with a burst.
-                newestReadyRenderMs = std::max(newestReadyRenderMs, _packets[i].renderTimestamp);
                 if (_packets[i].frameId > newestReadyFrame)
                     newestReadyFrame = _packets[i].frameId;
-                // Only completed anchors are eligible. The presenter must never
-                // block its warp queue behind an unfinished capture: an
-                // incomplete packet stays READY and is reconsidered next slot.
-                // Latency pass: the warp gate is the color copy (signaled
-                // first); the UI copy trails. Selection requires SOME complete
-                // UI - the packet's own or the current anchor's (borrowed for
-                // the first slot) - so a half-copied UI is never composited.
-                auto& cand = _packets[i];
-                auto* captureFence = cand.completionFence != nullptr ? cand.completionFence : _uiFence;
-                const auto captureValue =
-                    cand.completionFence != nullptr ? cand.completionFenceValue : cand.captureFenceValue;
-                const bool colorComplete =
-                    captureValue == 0 || captureFence == nullptr || captureFence->GetCompletedValue() >= captureValue;
-                const bool ownUiComplete =
-                    cand.captureFenceValue == 0 || captureFence == nullptr ||
-                    captureFence->GetCompletedValue() >= cand.captureFenceValue;
-                bool uiComplete = ownUiComplete;
-                if (!uiComplete && activePacketIndex >= 0)
-                {
-                    const auto& prev = _packets[activePacketIndex];
-                    auto* prevFence = prev.completionFence != nullptr ? prev.completionFence : _uiFence;
-                    uiComplete = prev.captureFenceValue == 0 || prevFence == nullptr ||
-                                 prevFence->GetCompletedValue() >= prev.captureFenceValue;
-                }
-                RecordPipelineFencePoll(!colorComplete, !uiComplete);
-                if (colorComplete && uiComplete && _packets[i].frameId > newestFrame)
+                // Only completed anchors are eligible. The warp gate is the
+                // single capture fence: the presenter must never block its warp
+                // queue behind an unfinished capture, so an incomplete packet
+                // stays READY and is reconsidered next slot (counted as capWait
+                // via the newestReadyFrame branch below).
+                const auto& cand = _packets[i];
+                const bool captureComplete = cand.captureFenceValue == 0 || _uiFence == nullptr ||
+                                             _uiFence->GetCompletedValue() >= cand.captureFenceValue;
+                RecordPipelineFencePoll(!captureComplete, !captureComplete);
+                if (captureComplete && _packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
                     newestPacketIndex = i;
@@ -522,13 +390,11 @@ void AReproj_Dx12::PresenterMain()
 
         RecordPipelineCapturing(capturingCount);
 
-        // The previous anchor stays Presenting until the NEXT new-anchor
-        // switch (or loop exit): its UI is composited while the new anchor's
-        // own UI copy trails, so the first slot of the new anchor borrows it.
-        // Tracked in _heldPacketIndex so every early exit path (occlusion,
-        // failure, stop) still retires it.
         bool newAnchor = false;
-        // A claimed packet is complete by construction above.
+        // A claimed packet is complete by construction above. On a real switch
+        // the previous anchor is retired immediately: nothing borrows it on the
+        // minimal path (no isolated-UI composite), and recycling waits on its
+        // _scFence retirement value before the slot is reused for capture.
         if (newestPacketIndex >= 0)
         {
             auto expected = PacketState::Ready;
@@ -539,13 +405,8 @@ void AReproj_Dx12::PresenterMain()
                 // immutable until retirement, so the warp queue needs no
                 // additional ordering against the game DIRECT queue.
                 auto& newest = _packets[newestPacketIndex];
-                if (_heldPacketIndex >= 0)
-                {
-                    _packets[_heldPacketIndex].state.store(PacketState::Retired);
-                    _heldPacketIndex = -1;
-                }
                 if (activePacketIndex >= 0)
-                    _heldPacketIndex = activePacketIndex; // held for the borrow/blend
+                    _packets[activePacketIndex].state.store(PacketState::Retired);
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
@@ -595,53 +456,23 @@ void AReproj_Dx12::PresenterMain()
         // Bare-bones warp step: anchor age / represented period, clamped only by
         // the absolute extrapolation cap. No velocity limiting.
         const auto unclampedStep = static_cast<float>(anchorAgeMs / realPeriodMs);
-        // Hitch hold: the game stopped publishing (streaming stall), so velocity
-        // extrapolation would dead-reckon far past the last known pose and snap
-        // back when publishing resumes. Hold the anchor's own pose instead.
-        // The late-latch mouse paths ignore timeStep, so aiming stays live
-        // through the hold. Gated on PUBLISH freshness, not anchor age: fresh
-        // publishes with lagging captures keep normal extrapolation.
-        const double publishAgeMs = std::max(0.0, targetDisplayMs - newestReadyRenderMs);
-        constexpr float HITCH_HOLD_PERIODS = 2.5f;
-        const bool hitchHold = newestReadyRenderMs > 0.0 && publishAgeMs > HITCH_HOLD_PERIODS * realPeriodMs;
-        auto timeStep = hitchHold ? 0.0f : std::clamp(unclampedStep, 0.0f, maxTimeStep);
-        if (hitchHold)
-        {
-            std::scoped_lock metricsLock(_metricsMutex);
-            ++_metricsHitchHolds;
-        }
-
+        // Rotation-only extrapolation step, clamped only by the absolute cap.
+        // No hitch hold on the minimal path: a stall simply clamps timeStep
+        // (extrapolation is bounded by the 2.5 cap either way).
+        const auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
         // No per-slot telemetry: timeStep inputs stay local, the 1 Hz log line aggregates.
         constexpr uint32_t queryStart = UINT32_MAX;
 
-        // Adaptive repeat-warp shed: repeated display slots are normally warped
-        // for a full display-cadence image. When the source cannot sustain its
-        // frame-rate cap or the game thread stalls behind the GPU, the shed
-        // takes the cheap blit path so warp compute stops stealing the source's
-        // frame budget. It re-engages warps as soon as the source is healthy
-        // again, so full 120 Hz feel returns in easy scenes.
-        EvaluateRepeatWarpShed(targetDisplayMs, packet.frameDelta);
-        const bool repeatWarp =
-            Config::Instance()->ReprojRepeatWarp.value_or_default() &&
-            !_repeatWarpShed.load(std::memory_order_relaxed);
         // A0 (kAsyncSimpleStage == 0): never dispatch the warp shader. Every
         // slot identity-blits the newest completed anchor so the source cadence
         // can be measured with zero warp cost (see plans/async_simple.md).
-        const bool shouldWarp =
-            kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost && (newContent || repeatWarp);
-        // Latency pass: composite the newest completed UI. The new anchor's own
-        // UI copy trails its color copy by a few ms, so the first display of a
-        // new anchor borrows the held previous anchor's UI (16 ms stale is
-        // invisible on HUD elements).
-        int uiPacketIndex = activePacketIndex;
-        if (newContent)
-        {
-            auto* uiFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
-            const bool ownUiReady = packet.captureFenceValue == 0 || uiFence == nullptr ||
-                                    uiFence->GetCompletedValue() >= packet.captureFenceValue;
-            if (!ownUiReady && _heldPacketIndex >= 0)
-                uiPacketIndex = _heldPacketIndex;
-        }
+        // >=1: every output is a warp of the newest completed anchor — repeated
+        // slots included (RepeatWarp is unconditional on this branch; no shed
+        // controller exists to take the blit path).
+        const bool shouldWarp = kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost;
+        // No isolated-UI composite on the minimal path: the composed frame is
+        // captured whole, so the warp never borrows another anchor's UI.
+        const int uiPacketIndex = activePacketIndex;
         const bool dispatched = shouldWarp
                                     ? DispatchPacketWarp(activePacketIndex, uiPacketIndex, timeStep, targetDisplayMs,
                                                          queryStart)
@@ -688,12 +519,6 @@ void AReproj_Dx12::PresenterMain()
         // become the very source-frame spike this diagnostic is measuring.
         LogPipelineMetricsIfDue();
 
-        {
-            std::scoped_lock metricsLock(_metricsMutex);
-            if (uiPacketIndex >= 0 && uiPacketIndex != activePacketIndex)
-                ++_metricsUiBorrows;
-        }
-
         constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;
         constexpr double WATCHDOG_WEDGE_MS = 2000.0;
         const bool jammedPresent = presentDurationMs > std::max(50.0, refreshPeriodMs * 3.0);
@@ -731,11 +556,6 @@ void AReproj_Dx12::PresenterMain()
             nextDeadlineMs += refreshPeriodMs;
     }
 
-    if (_heldPacketIndex >= 0)
-    {
-        _packets[_heldPacketIndex].state.store(PacketState::Retired);
-        _heldPacketIndex = -1;
-    }
     if (activePacketIndex >= 0)
         _packets[activePacketIndex].state.store(PacketState::Retired);
 

@@ -35,20 +35,16 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool rotationOnly = false;
         bool hudWarped = true;
         bool asyncPresenter = false;
-        bool repeatWarpShed = false; // adaptive shed is currently active
-        float stallEmaMs = 0.0f;     // smoothed game-thread GPU stall feeding the shed
         float gamePresentBlockMs = 0.0f; // game-thread Present() work, pacing sleep excluded
-        float gamePresentPaceMs = 0.0f;  // SourceFramerateLimit pacing sleep after the last published anchor
+        float gamePresentPaceMs = 0.0f;  // pacing sleep after the last published anchor (always 0: no source pacing)
         float meanPresentIntervalMs = 0.0f;
         float p95PresentIntervalMs = 0.0f;
-        float dispatchLeadMs = 3.0f;
         uint32_t newAnchorDisplays = 0;
         uint32_t repeatedAnchorDisplays = 0;
         uint32_t missedDisplaySlots = 0;
         uint32_t droppedAnchors = 0;
         uint32_t directCaptures = 0;
         uint32_t captureNotReady = 0;
-        uint32_t uiBorrows = 0; // slots that composited the previous anchor's UI
     };
 
   private:
@@ -110,6 +106,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     //   >=1 = rotation warp enabled on the presenter's single DIRECT queue
     //       (_presentQueue, retirement on _scFence) — the P3 queue model.
     static constexpr int kAsyncSimpleStage = 0;
+    // Fixed dispatch lead: every slot wakes to dispatch its warp 3 ms before
+    // the present deadline (plans/async_simple.md §3.6). No adaptive control.
+    static constexpr double kDispatchLeadMs = 3.0;
     // FrameSlot[3]: three capture slots for the composed color + source camera
     // + fence. Distinct from BUFFER_COUNT (real-chain/output arrays stay 4).
     static constexpr int kReprojFrameSlots = 3;
@@ -144,8 +143,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     // makes the virtual-buffer handoff fence-free.
     float _metricsTxCmTotal = 0.0f;
     uint32_t _metricsTxSamples = 0;
-    uint32_t _metricsUiBorrows = 0; // slots that composited the held previous anchor's UI
-    int _heldPacketIndex = -1;      // previous anchor held one extra slot for the UI borrow
 
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
@@ -181,11 +178,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool StartAsyncPresenter();
     void StopAsyncPresenter();
     void PresenterMain();
-    // Adaptive repeat-warp shed: when the source cannot sustain its frame-rate
-    // cap (cadence) or the game thread is stalling behind the GPU (block), the
-    // presenter skips the full warp on repeated display slots so GPU headroom
-    // goes back to the game. Restores full warps once both signals recover.
-    void EvaluateRepeatWarpShed(double nowMs, double sourcePeriodMs);
     HRESULT WaitForPresentSlot();
     HRESULT PresentCompositorFrame(UINT syncInterval, UINT flags, bool interpolated, bool waitForSlot = true);
     bool SampleDisplayClock(double nowMs); // lock pacing to DXGI_FRAME_STATISTICS vblanks
@@ -246,7 +238,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsHudComposites = 0;
     uint32_t _metricsDirectCaptures = 0;
     uint32_t _metricsCaptureNotReady = 0;
-    uint32_t _metricsHitchHolds = 0; // slots held at timeStep 0 during a publish stall
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
     float _metricsGamePresentPaceMaxMs = 0.0f;
@@ -267,29 +258,14 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         _pipeUiPending { 0 };
     double _pipeMetricsTimestamp = 0.0;
 
-    // Per-frame game-thread stall (ms of GPU wait in the virtual handoff,
-    // pacing sleep excluded). Written relaxed by the game present path, read
-    // by the presenter's adaptive repeat-warp shed — single-float telemetry,
-    // no ordering contract.
-    std::atomic<float> _latestGameStallMs { 0.0f };
-    // Adaptive repeat-warp shed state (presenter thread only). When the source
-    // cannot sustain its frame-rate cap (cadence EMA over target) or the game
-    // thread is stalling behind the GPU (stall EMA), repeated display slots
-    // take the cheap blit path instead of a full warp so the GPU headroom goes
-    // back to the game; full warps resume once both recover.
-    std::atomic<bool> _repeatWarpShed { false }; // currently shedding repeated-slot warps
-    double _lastShedEvaluateMs = 0.0; // stall EMA decay clock
-    double _cadenceEmaMs = 0.0;       // smoothed source publish period
-    std::atomic<double> _stallEmaMs { 0.0 }; // smoothed game-thread GPU stall
-    std::atomic<double> _lastLateSampleLeadMs { 4.0 }; // fixed nominal sample lead, for the 1 Hz log line (no adaptive controller)
-    double _lastStallSampleMs = 0.0;  // when the stall EMA was last fed
-    float _lastStallSampleValue = -1.0f; // last stall sample seen (dedupe repeats)
-    double _shedEngagedAtMs = 0.0;    // when the current shed began
+    // Fixed 3 ms dispatch lead (presenter-only tuning constant, see
+    // plans/async_simple.md): every slot wakes to dispatch its warp 3 ms before
+    // the present deadline. No adaptive lead controller on the minimal path.
+    std::atomic<double> _lastLateSampleLeadMs { 4.0 }; // fixed nominal sample lead, for the 1 Hz log line
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;
     double _lastDisplayPresentMs = 0.0;
-    double _dispatchLeadMs = 3.0;
     RuntimeMetrics _runtimeMetrics {};
     mutable std::mutex _metricsMutex;
     std::mutex _refreshMutex;

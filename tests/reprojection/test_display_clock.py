@@ -90,84 +90,28 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("_realPeriodEmaMs", capture)
         self.assertIn("packet.frameDelta = _realPeriodEmaMs", capture)
 
-    def test_repeat_warp_shed_engages_on_source_cadence_and_recovers(self):
-        # The adaptive shed exists so a 60 Hz source keeps full-warp repeats
-        # while it holds the cap, and hands the GPU back to the game (blit
-        # repeats) only when the source falls behind or the game thread stalls.
+    def test_repeat_warp_shed_and_ui_borrow_are_removed(self):
+        # async-simple P3.4: the adaptive repeat-warp shed (EvaluateRepeatWarpShed,
+        # its stall/cadence EMAs, and the _repeatWarpShed flag) is deleted — every
+        # slot is a full warp when the stage allows, unconditionally (no blit
+        # repeats to hand GPU headroom back to the game).
         root = Path(__file__).resolve().parents[2]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        whole = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
-        self.assertIn("void AReproj_Dx12::EvaluateRepeatWarpShed", presenter)
-        decision = presenter.split("const bool shouldWarp =", 1)[1].split("const bool dispatched = shouldWarp", 1)[0]
-        # The shed flag suppresses warps on repeated slots only: new anchors and
-        # a healthy source still get full-warp repeats.
-        self.assertIn("newContent || repeatWarp", decision)
-        self.assertIn("ReprojRepeatWarp.value_or_default()", presenter)
-        self.assertIn("!_repeatWarpShed.load(std::memory_order_relaxed)", presenter)
-        # Hysteresis with an engage band above the cap and a release back at it.
-        self.assertIn("CADENCE_ENGAGE_RATIO", presenter)
-        self.assertIn("CADENCE_RELEASE_RATIO", presenter)
-        self.assertIn("MIN_SHED_MS", presenter)
-        self.assertIn("STALL_ENGAGE_MS", presenter)
-        # The game present path publishes the per-frame stall the shed consumes.
+        header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        self.assertIn("_latestGameStallMs.store", reproj)
-        self.assertIn("std::atomic<float> _latestGameStallMs", whole)
-
-    def test_shed_controller_hysteresis_model(self):
-        # Model EvaluateRepeatWarpShed: cadence EMA + stall EMA with engage at
-        # 1.15x the cap period and release at 1.0x once the stall clears. A
-        # source holding its cap keeps warping repeats; a sustained drop sheds
-        # them and recovery re-engages warps (with the minimum shed dwell).
-        target_period = 1000.0 / 60.0
-        cadence_ema = 0.0
-        stall_ema = 0.0
-        shed = False
-        engaged_at = None
-
-        def slot(now_ms, period_ms, stall_ms):
-            nonlocal cadence_ema, stall_ema, shed, engaged_at
-            if cadence_ema <= 0.0:
-                cadence_ema = period_ms
-            else:
-                cadence_ema = cadence_ema * 0.6 + period_ms * 0.4
-            if stall_ema <= 0.0:
-                stall_ema = stall_ms
-            else:
-                stall_ema = stall_ema * 0.7 + stall_ms * 0.3
-            engage = cadence_ema > target_period * 1.15 or stall_ema > 8.0
-            if engage and not shed:
-                shed = True
-                engaged_at = now_ms
-            elif shed:
-                recovered = (cadence_ema <= target_period * 1.03 and stall_ema <= 6.0 and
-                             (now_ms - engaged_at) >= 400.0)
-                if recovered:
-                    shed = False
-            return shed
-
-        # Healthy 60 Hz source, modest stall: warps stay on.
-        now = 0.0
-        for i in range(120):
-            self.assertFalse(slot(now, target_period, 3.0))
-            now += 8.333
-        # Sustained 48 FPS source with a rising stall: the shed engages and sticks.
-        shed_at = None
-        for i in range(120):
-            s = slot(now, 20.8, 8.0)
-            if s and shed_at is None:
-                shed_at = now
-            now += 8.333
-        self.assertIsNotNone(shed_at)
-        # Recovery to the cap with a cleared stall re-engages warps after the dwell.
-        recovered_at = None
-        for i in range(240):
-            s = slot(now, target_period, 2.0)
-            if not s and recovered_at is None:
-                recovered_at = now
-            now += 8.333
-        self.assertIsNotNone(recovered_at)
-        self.assertGreater(recovered_at - shed_at, 400.0)
+        self.assertNotIn("EvaluateRepeatWarpShed", presenter)
+        self.assertNotIn("ReprojRepeatWarp", presenter)
+        self.assertNotIn("_repeatWarpShed", presenter + header)
+        self.assertNotIn("_latestGameStallMs", presenter + header + reproj)
+        self.assertNotIn("_stallEmaMs", header)
+        self.assertNotIn("_cadenceEmaMs", header)
+        # shouldWarp is unconditional per slot: stage >= 1 warps every output.
+        self.assertIn("const bool shouldWarp = kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost", presenter)
+        # The 1 Hz log no longer carries shed/stallEma/hold/uiBorrow keys.
+        self.assertNotIn("stallEma", reproj)
+        self.assertNotIn("shed=", reproj)
+        self.assertNotIn("hold=", reproj)
+        self.assertNotIn("uiBorrow={}", reproj)
 
     def test_world_fence_marker_does_not_relock_the_isolation_mutex(self):
         # Regression: TryRedirect holds the isolation g_mutex and calls
@@ -429,7 +373,8 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("nextDeadlineMs = presentedAt + refreshPeriodMs", presenter)
         self.assertNotIn("SampleDisplayClock(", presenter)
         self.assertIn("maxUsableLeadMs", presenter)
-        self.assertIn("std::clamp(_dispatchLeadMs, 3.0, maxUsableLeadMs)", presenter)
+        # Fixed 3 ms dispatch lead (kDispatchLeadMs), clamped into the slot window.
+        self.assertIn("std::min(kDispatchLeadMs, maxUsableLeadMs)", presenter)
 
     def test_experimental_control_surface_is_removed(self):
         root = Path(__file__).resolve().parents[2]
@@ -500,7 +445,10 @@ class ReprojectionTests(unittest.TestCase):
             "uint32_t AReproj_Dx12::PacketQueueDepth()", 1)[0]
         self.assertIn("packet.completionFence", retire)
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        self.assertIn("completionFence", presenter)
+        # P3.4: the presenter gates selection on the packet's own captureFenceValue
+        # against _uiFence directly — the completionFence alias is gone from the
+        # presenter; it survives only in capture/retire bookkeeping.
+        self.assertNotIn("completionFence", presenter)
         self.assertNotIn("_captureFence", presenter)
 
     def test_virtual_buffer_handoff_is_always_fence_free(self):
@@ -539,29 +487,27 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("ProcessCapturePacket", source)
         # The presenter still gates anchor selection on that capture value.
         self.assertIn("captureFenceValue == 0", presenter)
-        self.assertIn("colorComplete", presenter)
+        self.assertIn("captureComplete", presenter)
 
-    def test_ui_borrow_holds_previous_anchor_without_swap_blend(self):
-        # v37's swap blend sampled the PREVIOUS anchor's image with the CURRENT
-        # anchor's baked output-pixel -> source-UV homography. That misaligns the
-        # previous frame by the full inter-anchor rotation whenever the camera
-        # moves, ghosting/doubling on look-around. It was removed in v40; the
-        # UI-borrow hold that shared _heldPacketIndex must remain.
+    def test_ui_borrow_hold_is_removed_with_the_isolated_ui_path(self):
+        # async-simple P3.4: capture is composed (no isolated UI), so the UI
+        # borrow hold that shared _heldPacketIndex is deleted along with the
+        # swap-blend machinery it once paired with. The previous anchor is
+        # retired immediately on a real switch.
         root = Path(__file__).resolve().parents[2]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
+        header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
         dispatch = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8").split(
             "bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split("bool AReproj_Dx12::DispatchWarp", 1)[0]
         shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
         common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")
-        # UI borrow survives: the held previous anchor's UI composites while the
-        # new anchor's own UI copy trails, tracked/retired via _heldPacketIndex.
-        self.assertIn("_heldPacketIndex = activePacketIndex", presenter)
-        self.assertIn("uiPacketIndex = _heldPacketIndex", presenter)
-        self.assertIn("_metricsUiBorrows", presenter)
-        log = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        self.assertIn("uiBorrow={}", log)
-        # Swap blend fully removed: no prev-color dispatch wiring, no blend
-        # factor, no PrevColor SRV, no blend in either shader copy.
+        self.assertNotIn("_heldPacketIndex", presenter + header)
+        self.assertNotIn("_metricsUiBorrows", presenter + header)
+        self.assertNotIn("uiPacketIndex = _heldPacketIndex", presenter)
+        # On a real switch the previous anchor is retired immediately.
+        self.assertIn("_packets[activePacketIndex].state.store(PacketState::Retired)", presenter)
+        # Swap blend stays fully absent: no prev-color dispatch wiring, no
+        # blend factor, no PrevColor SRV, no blend in either shader copy.
         self.assertNotIn("prevPacketIndex", presenter)
         self.assertNotIn("prevPacketIndex", dispatch)
         self.assertNotIn("kSwapBlendFactor", dispatch)

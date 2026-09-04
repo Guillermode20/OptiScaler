@@ -22,19 +22,19 @@
   ordering makes it fence-free); `ReprojHudIsolation` defaults to `false` so the isolation
   code is inert. The packet ring is trimmed to `kReprojFrameSlots = 3` (`FrameSlot[3]`).
   Warping is still gated behind `kAsyncSimpleStage` (0 = A0 identity-blit; 1 = warps on).
-- **P3 (slim presenter: one queue + one fence): landed (queue/fence half).** The COMPUTE
-  warp queue, its allocators/lists/fence, and the deferred late-latch fence are deleted;
-  `DispatchPacketWarp` is now unconditional `GetSCCommandList(outputIndex)` on
-  `_presentQueue` with retirement on `_scFence` (the parent's DIRECT-fallback shape),
-  constants baked at dispatch time (no `WriteConstants`, no adaptive sample lead — the
-  `SAMPLE_LEAD_*` consts and `_lateSampleLeadMs` are gone too). `CreateAsyncPresenter`
-  creates only `_presentQueue`; `DrainGpuWork`/`VirtualAnchorReady`/`ReleaseObjects`/
-  `CreateObjects` no longer touch compute or late-latch resources. Parser tests pinned the
-  deletion (compute/adaptive-lead assertions inverted to absence). The **remaining P3.3–P3.5
-  half** — `DisplayPacket` RUI/query drop, `PresenterMain` slim (shed/ui-borrow/hold/lead
-  removal, always-warp repeats), sync-fallback (`PresentVirtualFrameSync`/`CopyLastFrame`/
-  `DispatchWarp`/`_lastColor`/`_uiColor`) deletion — is still open; warps stay gated behind
-  `kAsyncSimpleStage` (0 = blit) until a CI + KCD2 pass validates this queue model.
+- **P3.4 (PresenterMain slim): landed.** `EvaluateRepeatWarpShed` + all shed state
+  (`_repeatWarpShed`, stall/cadence EMAs, `_latestGameStallMs`, feed sites in the game
+  present path) are deleted; `shouldWarp` is unconditional per slot when `kAsyncSimpleStage
+  >= 1` (RepeatWarp absorbed — repeated slots always warp). ui-borrow (`_heldPacketIndex`,
+  `_metricsUiBorrows`) and hitch hold (`_metricsHitchHolds`) are gone — on a real switch the
+  previous anchor retires immediately. The dispatch lead is the fixed `kDispatchLeadMs =
+  3.0` constant (the `_dispatchLeadMs` adaptive controller is deleted); the 1 Hz log dropped
+  its `uiBorrow=`/`hold=`/`shed=`/`stallEma=` keys and `lead=` prints the constant. Parser
+  tests pinned the deletions (shed/borrow tests inverted to absence); 35/35 pass.
+  **Remaining P3.3/P3.5** — `DisplayPacket` RUI/query drop and the sync-fallback
+  (`PresentVirtualFrameSync`/`CopyLastFrame`/`DispatchWarp`/`_lastColor`/`_uiColor`)
+  deletion — are still open; warps stay gated behind `kAsyncSimpleStage` (0 = blit) until a
+  CI + KCD2 pass validates this queue model.
 
 ## 1. Goal
 
@@ -317,8 +317,8 @@ declarations in lockstep; delete dead includes.
 
 ### P3 — Slim presenter, one queue + one fence (A2)
 
-Status: **items 1–2 done** (queue/fence deletion); items 3–5 are the remaining presenter-slim
-work, deferred to the next pass (they do not change the queue model).
+Status: **items 1–2 + 4 done** (queue/fence deletion + PresenterMain slim); items 3 and 5
+remain (DisplayPacket RUI/query drop; sync-fallback deletion) and do not change the queue model.
 
 1. ✅ `CreateAsyncPresenter` (AReprojPresenter.cpp:18–300): delete the COMPUTE queue +
    allocators/lists/fence block (99–230) and the COPY capture queue block (231–300). Only
@@ -336,11 +336,13 @@ work, deferred to the next pass (they do not change the queue model).
    behavior); the raw-input pump is untouched.
 3. ⬜ `DisplayPacket`: drop RUI composite and telemetry queries — copy `packet.color` → real
    backbuffer on the same SC list; used only when warping is disallowed.
-4. ⬜ `PresenterMain`: delete `EvaluateRepeatWarpShed` call/state, ui-borrow selection, hitch
-   hold, adaptive lead updates. Fixed lead 3 ms; always-warp repeats; select newest READY
-   packet whose capture value completed, else reuse active; retire previous anchor only on a
-   real switch (drop `_heldPacketIndex`). Keep occlusion backoff, watchdog, completion clock,
-   `WaitForPresentSlot`, `PresentCompositorFrame` (minus waitable double-wait subtleties).
+4. ✅ `PresenterMain`: delete `EvaluateRepeatWarpShed` call/state, ui-borrow selection, hitch
+   hold, adaptive lead updates. Fixed lead 3 ms (`kDispatchLeadMs`); always-warp repeats;
+   select newest READY packet whose capture value completed, else reuse active; retire
+   previous anchor only on a real switch (drop `_heldPacketIndex`). Keep occlusion backoff,
+   watchdog, completion clock, `WaitForPresentSlot`, `PresentCompositorFrame` (minus
+   waitable double-wait subtleties). The 1 Hz `Reproj:` line lost its
+   `uiBorrow=`/`hold=`/`shed=`/`stallEma=` keys here (P4 trims the rest).
 5. ⬜ Delete the sync-fallback block: `PresentVirtualFrameSync`, `CopyLastFrame`,
    `DispatchWarp`, `_lastColor`/`_uiColor`/`_syncHasUi` sync arrays (keep `_warpOutput`
    per-output), RUI `_renderUI` creation, and their use in `Present()`. Non-virtualized /
