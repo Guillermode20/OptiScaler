@@ -494,23 +494,20 @@ HRESULT AReproj_Dx12::PresentCompositorFrame(UINT syncInterval, UINT flags, bool
 
 // Adaptive repeat-warp shed: the presenter normally warps every repeated
 // display slot for a full 120 Hz image cadence, but that warp compute shares
-// the GPU with the game. When the source cannot sustain its frame-rate cap
-// (cadence EMA over target) or the game thread is stalling behind the GPU
-// (block EMA), repeated slots take the cheap blit path instead so the headroom
-// goes back to the game; full warps resume once both signals recover.
+// the GPU with the game. When the source cannot sustain its configured cap (or
+// the 60 Hz floor for an uncapped source), or the game thread is stalling behind
+// the GPU (block EMA), repeated slots take the cheap blit path instead so the
+// headroom goes back to the game; full warps resume once both signals recover.
 void AReproj_Dx12::EvaluateRepeatWarpShed(double nowMs, double sourcePeriodMs)
 {
     const auto sourceCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
-    // Shedding only makes sense behind a source frame-rate cap: it hands GPU
-    // time back to the game so the cap holds. An uncapped source runs flat-out
-    // (its own pacing is already "as fast as the GPU allows"), so warps on
-    // repeated slots are pure display smoothness with no source to protect.
-    if (!(sourceCap > 1.0))
-    {
-        _repeatWarpShed.store(false, std::memory_order_relaxed);
-        return;
-    }
-    const auto targetPeriodMs = 1000.0 / sourceCap;
+    // An uncapped source still needs a protection target: without one, the
+    // controller keeps dispatching repeat warps while it falls through the
+    // intended 60 Hz source cadence. This is a floor, not a source limiter;
+    // the game remains uncapped and full repeat warps return above 60 Hz.
+    constexpr double UNCAPPED_SOURCE_FLOOR_HZ = 60.0;
+    const auto targetSourceHz = sourceCap > 1.0 ? sourceCap : UNCAPPED_SOURCE_FLOOR_HZ;
+    const auto targetPeriodMs = 1000.0 / targetSourceHz;
 
     // Stall samples arrive at the game's present cadence (every source frame,
     // regardless of the display slot rate). Feeding the EMA only when a newer
@@ -540,14 +537,12 @@ void AReproj_Dx12::EvaluateRepeatWarpShed(double nowMs, double sourcePeriodMs)
     if (sourcePeriodMs > 0.0 && sourcePeriodMs < 500.0)
         _cadenceEmaMs = _cadenceEmaMs > 0.0 ? _cadenceEmaMs * 0.6 + sourcePeriodMs * 0.4 : sourcePeriodMs;
 
-    // Hysteresis: engage at 1.15x the target period (a 60 Hz cap sheds when
-    // the source cannot hold ~52 FPS), release back at the cap. The cadence EMA
-    // converges to the cap period from above when the source recovers, so the
-    // release band sits slightly above 1.0x or the shed would never lift. A
-    // sustained game-thread stall (block, pacing sleep excluded) engages too
-    // and also demands cadence recovery before warps return.
-    constexpr double CADENCE_ENGAGE_RATIO = 1.15;
-    constexpr double CADENCE_RELEASE_RATIO = 1.03;
+    // Keep the source at its target rather than waiting for a deep GPU-bound
+    // drop: at 60 Hz 1.02x is ~58.8 FPS. The EMA rejects one-frame jitter;
+    // the 400 ms dwell below prevents fast warp/blit oscillation. Require a
+    // genuine return to the target cadence before restoring repeat warps.
+    constexpr double CADENCE_ENGAGE_RATIO = 1.02;
+    constexpr double CADENCE_RELEASE_RATIO = 1.00;
     constexpr double STALL_ENGAGE_MS = 8.0;
     constexpr double STALL_RELEASE_MS = 6.0; // block decays back to its ~1-6 ms floor once warps shed
     constexpr double MIN_SHED_MS = 400.0; // prevent warp/shed oscillation around the boundary
