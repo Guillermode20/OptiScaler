@@ -2261,7 +2261,6 @@ void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseA
 
 void AReproj_Dx12::LogMetricsIfDue()
 {
-    LogPipelineMetricsIfDue();
     const auto now = Util::MillisecondsNow();
     if (_metricsTimestamp == 0.0)
     {

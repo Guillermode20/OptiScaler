@@ -926,6 +926,10 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
         RecordWarpFrame(true, false, poseAge);
+        // ReprojPipe is intentionally emitted by the presenter, never the
+        // game Present thread: synchronous file logging at 4 Hz would otherwise
+        // become the very source-frame spike this diagnostic is measuring.
+        LogPipelineMetricsIfDue();
 
         {
             std::scoped_lock metricsLock(_metricsMutex);
