@@ -14,7 +14,15 @@
   defaults to `0` (INI `SourceFramerateLimit=0`); and `kAsyncSimpleStage = 0` implements the
   A0 identity stage below (presenter live, warp shader never dispatched). `ReprojTelemetry`
   reports no active source cap. Test pins updated (`tests/reprojection/test_display_clock.py`).
-- **P2+ (FrameSlot[3] single-queue capture, slim presenter): not started.**
+- **P2 (single-queue composed capture + FrameSlot[3]): landed.** `CaptureFramePacket` now
+  copies exactly one composed frame (HUD included) inline on the game DIRECT queue's UI
+  command list and records the `_uiFence` value as the single warp/readiness/recycle gate.
+  The capture COPY queue, its worker thread, the mid-frame world fence, and the deferred
+  handoff fences are deleted (`handoff` is unconditionally `nullptr/0` — same-queue
+  ordering makes it fence-free); `ReprojHudIsolation` defaults to `false` so the isolation
+  code is inert. The packet ring is trimmed to `kReprojFrameSlots = 3` (`FrameSlot[3]`).
+  Warping is still gated behind `kAsyncSimpleStage` (0 = A0 identity-blit; 1 = warps on).
+- **P3 (slim presenter: one queue + one fence, sync-path deletion): not started.**
 
 ## 1. Goal
 

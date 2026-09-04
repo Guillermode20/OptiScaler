@@ -617,7 +617,7 @@ class Config
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojSmoothing { 0.25f };            // EMA filter on camera angular velocity (0=off)
-    CustomOptional<bool> ReprojHudIsolation { true }; // separate Scaleform HUD from 3D world (KCD2)
+    CustomOptional<bool> ReprojHudIsolation { false }; // async-simple: composed capture; Scaleform isolation inert
     CustomOptional<bool> ReprojAllowComposedWarp {
         false
     }; // allow timewarping composed frame if HUD isolation is off/unavailable

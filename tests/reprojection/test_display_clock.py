@@ -358,12 +358,18 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("constexpr bool captureThisPresent = true", source)
         self.assertNotIn("FrameLimit::paceReprojectionSource", source)
 
-    def test_minimal_path_requires_camera_and_separate_hud(self):
+    def test_minimal_path_captures_the_composed_frame_only(self):
+        # async-simple P2: CaptureFramePacket copies exactly one composed frame
+        # (HUD included) via the game DIRECT UI command list. No isolation, no
+        # separate UI texture, no AllowComposedWarp gate — composed is the model.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket", 1)[0]
-        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && (packet.hasUi || allowComposed);", capture)
+        self.assertNotIn("allowComposed", capture)
+        self.assertNotIn("Kcd2HudIsolation", capture)
+        self.assertNotIn("GetResource(FG_ResourceType::HudlessColor", capture)
+        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera;", capture)
         self.assertNotIn("CopyPacketResource(cmdList, velocity", capture)
         self.assertIn("packet.constants.mode = 2", capture)
 
@@ -403,14 +409,17 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("current.TotalX - latestCamera.mouseTotalX", late_input)
         self.assertNotIn("GetRawMouseMotionAt(latestCamera.timestampMs)", late_input)
 
-    def test_kcd2_isolation_generations_are_fenced_until_capture_completes(self):
+    def test_kcd2_isolation_no_longer_feeds_packet_capture(self):
+        # async-simple P2: the Kcd2HudIsolation code remains compiled but is
+        # never consumed by CaptureFramePacket — capture is the composed frame.
         root = Path(__file__).resolve().parents[2]
         isolation = (root / "OptiScaler/framegen/reproj/Kcd2HudIsolation.cpp").read_text(encoding="utf-8")
         capture = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8").split(
             "bool AReproj_Dx12::CaptureFramePacket", 1)[1].split("bool AReproj_Dx12::DisplayPacket", 1)[0]
         self.assertIn("completed < slot.captureFenceValue", isolation)
-        self.assertIn("return nullptr", isolation)
-        self.assertIn("Kcd2HudIsolation::MarkFrameCaptured", capture)
+        self.assertNotIn("Kcd2HudIsolation", capture)
+        self.assertNotIn("MarkFrameCaptured", capture)
+        self.assertNotIn("GetHudlessColor", capture)
 
     def test_goal_telemetry_survives_without_per_frame_reproj_info_spam(self):
         root = Path(__file__).resolve().parents[2]
@@ -491,69 +500,67 @@ class ReprojectionTests(unittest.TestCase):
         self.assertGreaterEqual(exhaust.count("AcquirePacket()"), 1)
         self.assertIn("++_metricsSkippedAnchorSamples", exhaust)
 
-    def test_capture_copies_can_bypass_game_queue(self):
-        # Capture color/UI copies must be able to run on a dedicated queue so
-        # they overlap rendering; the game queue then only publishes its frame
-        # fence. Retirement/presenter/downgrade must follow the packet
-        # completion fence rather than assuming the UI fence.
+    def test_capture_is_one_inline_copy_on_the_game_queue(self):
+        # async-simple P2: the capture worker and COPY queue are gone. Capture
+        # records one composed CopyResource on the packet's UI command list and
+        # submits it on the game DIRECT queue; completion tracks on _uiFence.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket(", 1)[0]
-        self.assertIn("PollCaptureAllocator(packetIndex)", capture)
-        self.assertIn("GetCaptureCommandList(packetIndex)", capture)
-        self.assertIn("SubmitCaptureCommandList(packetIndex", capture)
-        self.assertIn("_captureInputFence", capture)
-        self.assertIn("packet.completionFence = _captureFence", capture)
-        # DIRECT fallback path is verbatim when compute capture is unavailable.
+        self.assertIn("CopyPacketResource(cmdList, color, colorState, &packet.color", capture)
+        self.assertIn("SubmitUICommandList((UINT) packetIndex)", capture)
         self.assertIn("packet.completionFence = _uiFence", capture)
-        # The composed-HUD check: only warp with UI unless AllowComposedWarp is enabled.
-        self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera && (packet.hasUi || allowComposed);", capture)
+        self.assertIn("packet.completionFenceValue = packet.captureFenceValue", capture)
+        # No capture queue / worker / fence remains anywhere in the subsystem.
+        self.assertNotIn("_captureFence", capture)
+        self.assertNotIn("_captureQueue", source)
+        self.assertNotIn("SubmitCaptureCommandList", source)
+        self.assertNotIn("ProcessCapturePacket", source)
         retire = source.split("void AReproj_Dx12::RetirePackets()", 1)[1].split(
             "uint32_t AReproj_Dx12::PacketQueueDepth()", 1)[0]
         self.assertIn("packet.completionFence", retire)
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         self.assertIn("completionFence", presenter)
-        self.assertIn("_captureFence", presenter)
+        self.assertNotIn("_captureFence", presenter)
 
-    def test_isolated_hud_releases_virtual_buffer_before_packet_copy_finishes(self):
+    def test_virtual_buffer_handoff_is_always_fence_free(self):
+        # async-simple: the capture copy is inline on the game DIRECT queue, so
+        # it is GPU-ordered before any later render into the same virtual
+        # buffer. The handoff therefore never carries a fence — publish, skip,
+        # and SkipAnchorPublication all pass nullptr/0 to the ring.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket(", 1)[0]
         present = source.split("bool AReproj_Dx12::Present()", 1)[1].split(
             "void AReproj_Dx12::Activate", 1)[0]
-        self.assertIn("packet.hasUi && nonBlockingHandoff", capture)
-        self.assertIn("packet.handoffFence = nullptr", capture)
-        self.assertIn("packet.handoffFence", present)
-        self.assertIn("packet.handoffFenceValue", present)
-        self.assertIn("SubmitReprojectionBuffer(virtualBufferIndex, handoffFence", present)
+        skip = source.split("void AReproj_Dx12::SkipAnchorPublication", 1)[1].split(
+            "bool AReproj_Dx12::CaptureFramePacket", 1)[0]
+        self.assertNotIn("handoffFence", capture)
+        self.assertNotIn("handoffFence", present)
+        self.assertNotIn("nonBlockingHandoff", source)
+        self.assertGreaterEqual(present.count("SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0)"), 1)
+        self.assertIn("SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0)", skip)
 
-    def test_capture_warp_gate_is_color_copy_with_trailing_ui(self):
-        # Latency pass: the warp gate is the color copy (colorFenceValue,
-        # signaled first, optionally gated on the mid-frame world fence); the
-        # UI copy trails on the present-time input fence. Selection requires
-        # SOME complete UI (own or the held previous anchor's) so a
-        # half-copied UI is never composited.
+    def test_capture_warp_gate_is_the_single_ui_fence_value(self):
+        # async-simple: capture is one inline submit, so the warp gate, the
+        # readiness gate, and the recycling gate are all the single _uiFence
+        # value recorded on the packet. No color/UI split, no world fence, no
+        # worker phases.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket(", 1)[0]
-        worker = source.split("void AReproj_Dx12::ProcessCapturePacket", 1)[1].split(
-            "void AReproj_Dx12::StopCaptureWorker", 1)[0]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        self.assertIn("packet.colorFenceValue = ++_captureFenceValue", capture)
-        self.assertIn("packet.worldFenceValue = Kcd2HudIsolation::TakeWorldSignalValue", capture)
-        self.assertIn("captureViaWorker ? packet.colorFenceValue : packet.captureFenceValue", capture)
-        self.assertIn("PHASE 1 - world (color) copy", worker)
-        self.assertIn("PHASE 2 - UI copy", worker)
-        self.assertIn("_captureQueue->Wait(_worldFence, packet.worldFenceValue)", worker)
-        # The composed-backbuffer fallback must stay on the present gate even
-        # when a world fence fired (its final composite is frame-late).
-        self.assertIn("packet.captureSrcColor != packet.captureSrcComposed", worker)
+        self.assertIn("packet.hasUi = false", capture)
+        self.assertIn("packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex]", capture)
+        self.assertNotIn("colorFenceValue", capture)
+        self.assertNotIn("worldFenceValue", capture)
+        self.assertNotIn("ProcessCapturePacket", source)
+        # The presenter still gates anchor selection on that capture value.
+        self.assertIn("captureFenceValue == 0", presenter)
         self.assertIn("colorComplete", presenter)
-        self.assertIn("ownUiComplete", presenter)
-        self.assertIn("_heldPacketIndex", presenter)
 
     def test_ui_borrow_holds_previous_anchor_without_swap_blend(self):
         # v37's swap blend sampled the PREVIOUS anchor's image with the CURRENT
@@ -600,8 +607,10 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("OnWorldSnapshotSubmitted", hook)
         self.assertIn("g_pendingWorldSignalCount = 0", isolation)
         self.assertIn("queue->Signal(g_worldFence, g_pendingWorldSignals[j].value)", isolation)
-        self.assertIn("Kcd2HudIsolation::SetWorldSignalContext(_worldFence)",
-                      (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8"))
+        # async-simple P2: AReproj no longer wires a world fence — the
+        # isolation machinery stays compiled but the presenter never feeds it.
+        self.assertNotIn("SetWorldSignalContext",
+                         (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8"))
 
     def test_phase_fit_selects_input_window_that_explains_camera_motion(self):
         # Model the C++ through-origin least-squares score. Camera response is

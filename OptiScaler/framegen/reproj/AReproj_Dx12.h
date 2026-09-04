@@ -75,35 +75,13 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     struct ReprojFramePacket : ContentFrame
     {
         UINT64 frameId = 0;
+        // async-simple: single capture fence value on the game DIRECT queue's
+        // _uiFence. It is the warp gate, the readiness gate, and the recycling
+        // gate (capture is one inline submit, no color/UI split).
         UINT64 captureFenceValue = 0;
-        // Latency pass: the capture worker submits the world (color) copy first,
-        // gated on the mid-frame world fence when one fired (0 = fall back to
-        // the present gate), then the UI copy gated on the present-time input
-        // fence. colorFenceValue is the warp gate; captureFenceValue (signaled
-        // last) gates the UI copy and packet recycling. Values are reserved in
-        // order so colorFenceValue < captureFenceValue on the same fence.
-        UINT64 colorFenceValue = 0;
-        UINT64 worldFenceValue = 0;
-        ID3D12Fence* handoffFence = nullptr; // non-owning; protects virtual-buffer reuse
-        UINT64 handoffFenceValue = 0;
         UINT64 retirementFenceValue = 0;
-        // Capture-worker handoff (COPY-queue path only). The game thread fills
-        // the sources the worker must copy from, reserves the capture fence
-        // value, and enqueues the packet; the worker records and submits so the
-        // per-frame VKD3D queue ops leave the game's present thread. The source
-        // lifetimes are pinned: isolation textures via MarkFrameCaptured, the
-        // composed game backbuffer via the handoff fence.
-        ID3D12Resource* captureSrcColor = nullptr;
-        D3D12_RESOURCE_STATES captureSrcColorState = D3D12_RESOURCE_STATE_COMMON;
-        ID3D12Resource* captureSrcUi = nullptr;
-        D3D12_RESOURCE_STATES captureSrcUiState = D3D12_RESOURCE_STATE_COMMON;
-        ID3D12Resource* captureSrcComposed = nullptr; // game backbuffer for the UI-fallback re-copy
-        UINT64 captureInputFenceValue = 0;
-        bool captureViaWorker = false;
         double frameDelta = 0.0;
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
-        UINT syncInterval = 0;
-        UINT presentFlags = 0;
         int64_t sourceMouseX = 0;
         int64_t sourceMouseY = 0;
         double sourceMouseTimestamp = 0.0;
@@ -144,8 +122,11 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     //   >=1 = parent-branch behavior (warp enabled). P2/P3 re-map stages 1-3
     //       onto capture / presenter / warp as the strip-down proceeds.
     static constexpr int kAsyncSimpleStage = 0;
+    // FrameSlot[3]: three capture slots for the composed color + source camera
+    // + fence. Distinct from BUFFER_COUNT (real-chain/output arrays stay 4).
+    static constexpr int kReprojFrameSlots = 3;
 
-    ReprojFramePacket _packets[BUFFER_COUNT];
+    ReprojFramePacket _packets[kReprojFrameSlots];
     std::atomic<UINT64> _publishedFrameId { 0 };
     std::atomic<UINT64> _readyFrameId { 0 };
     std::mutex _presentMutex;
@@ -177,38 +158,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT64 _computeFenceValue = 0;
     UINT64 _computeAllocatorFenceValues[BUFFER_COUNT] = {};
 
-    // Anchor capture runs on a dedicated COPY queue (fallback: game DIRECT) so
-    // the color/UI copies overlap rendering instead of extending the
-    // game's frame. _captureInputFence orders DIRECT producers before COPY;
-    // _captureFence tracks COPY completion for packet readiness. Keeping the
-    // fence timelines separate prevents a later DIRECT signal from falsely
-    // completing an earlier COPY packet. The async warp stays on COMPUTE.
-    ID3D12CommandQueue* _captureQueue = nullptr;
-    ID3D12CommandAllocator* _captureAllocator[BUFFER_COUNT] = {};
-    ID3D12GraphicsCommandList* _captureCommandList[BUFFER_COUNT] = {};
-    bool _captureCommandListResetted[BUFFER_COUNT] = {};
-    ID3D12Fence* _captureInputFence = nullptr;
-    UINT64 _captureInputFenceValue = 0;
-    ID3D12Fence* _captureFence = nullptr;
-    HANDLE _captureFenceEvent = nullptr;
-    UINT64 _captureFenceValue = 0;
-    UINT64 _captureAllocatorFenceValues[BUFFER_COUNT] = {};
-    // Mid-frame world-complete fence: signaled by the ResTrack command-list
-    // hook when the CL containing the KCD2 world snapshot is submitted, so the
-    // capture worker's color copy can start while the game still finishes its
-    // frame. 0 worldFenceValue on a packet = fall back to the present gate.
-    ID3D12Fence* _worldFence = nullptr;
-
-    // Capture worker: performs the COPY-queue Wait/Execute/Signal + allocator
-    // resets off the game's present thread. On Wine/VKD3D those queue ops cost
-    // several ms per frame; running them inline was the dominant part of the
-    // measured 4-12 ms gamePresentBlockMs and starved the 60 Hz source cap.
-    std::thread _captureThread;
-    std::mutex _captureWorkMutex;
-    std::condition_variable _captureWorkCv;
-    int _captureWorkPending[BUFFER_COUNT] = {};
-    int _captureWorkCount = 0;
-    bool _captureWorkStop = false;
+    // async-simple: anchor capture runs inline on the game's DIRECT queue via
+    // the base-class _uiCommandList/_uiFence. There is no dedicated capture
+    // queue, capture worker, or mid-frame world fence. Same-queue ordering
+    // makes the virtual-buffer handoff fence-free.
     float _metricsTxCmTotal = 0.0f;
     uint32_t _metricsTxSamples = 0;
     uint32_t _metricsUiBorrows = 0; // slots that composited the held previous anchor's UI
@@ -228,11 +181,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             bool warpAllowed);
     bool CaptureAllocatorReady(int packetIndex); // game thread: non-blocking UI-allocator poll, never waits
     bool PollCaptureAllocator(int packetIndex) { return CaptureAllocatorReady(packetIndex); }
-    void CaptureWorkerMain();
-    void StopCaptureWorker();
-    void ProcessCapturePacket(int packetIndex);
-    void FailCapturePacket(int packetIndex);
-    bool EnqueueCapture(int packetIndex);
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
     bool DispatchPacketWarp(int packetIndex, int uiPacketIndex, float timeStep, double scanoutDeadlineMs = 0.0,
@@ -273,9 +221,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12GraphicsCommandList* GetComputeCommandList(int fIndex);
     bool SubmitComputeCommandList(int fIndex);
     bool WaitForComputeAllocator(int fIndex);
-    ID3D12GraphicsCommandList* GetCaptureCommandList(int fIndex);
-    bool SubmitCaptureCommandList(int fIndex);
-    bool WaitForCaptureAllocator(int fIndex);
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
     bool IsCameraAllZero(int fIndex) const;
     bool IsPoseFresh(double timestamp, float* ageMs = nullptr) const;

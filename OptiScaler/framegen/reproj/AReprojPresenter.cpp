@@ -174,96 +174,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 
-    // Dedicated COPY queue for anchor capture so color/UI copies overlap
-    // rendering instead of extending the game's frame. COPY is a DMA engine:
-    // no shader cores, no contention with game/compute work. Falls back to
-    // a COMPUTE queue and finally to game DIRECT when COPY is unavailable.
-    {
-        D3D12_COMMAND_QUEUE_DESC capDesc {};
-        capDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
-        capDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-        auto capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
-        if (FAILED(capRes) || _captureQueue == nullptr)
-        {
-            capDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-            capRes = _device->CreateCommandQueue(&capDesc, IID_PPV_ARGS(&_captureQueue));
-        }
-        if (SUCCEEDED(capRes) && _captureQueue != nullptr)
-        {
-            _captureQueue->SetName(L"Reproj_CaptureQueue");
-            bool capReady = true;
-            for (size_t i = 0; i < BUFFER_COUNT; ++i)
-            {
-                auto ctype = capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? D3D12_COMMAND_LIST_TYPE_COPY
-                                                                          : D3D12_COMMAND_LIST_TYPE_COMPUTE;
-                auto ar = _device->CreateCommandAllocator(ctype, IID_PPV_ARGS(&_captureAllocator[i]));
-                if (FAILED(ar))
-                {
-                    capReady = false;
-                    break;
-                }
-                _captureAllocator[i]->SetName(std::format(L"Reproj_CaptureAllocator[{}]", i).c_str());
-                auto lr = _device->CreateCommandList(0, ctype, _captureAllocator[i], nullptr,
-                                                     IID_PPV_ARGS(&_captureCommandList[i]));
-                if (FAILED(lr))
-                {
-                    capReady = false;
-                    break;
-                }
-                _captureCommandList[i]->SetName(std::format(L"Reproj_CaptureList[{}]", i).c_str());
-                _captureCommandList[i]->Close();
-            }
-            if (!capReady)
-            {
-                for (size_t i = 0; i < BUFFER_COUNT; ++i)
-                {
-                    SAFE_RELEASE(_captureCommandList[i]);
-                    SAFE_RELEASE(_captureAllocator[i]);
-                }
-                SAFE_RELEASE(_captureQueue);
-                LOG_WARN("Reproj: capture queue allocators failed, fallback to game DIRECT");
-            }
-            else
-            {
-                auto fr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureFence));
-                auto inputFr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_captureInputFence));
-                auto worldFr = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_worldFence));
-                if (FAILED(fr) || FAILED(inputFr) || FAILED(worldFr))
-                {
-                    SAFE_RELEASE(_worldFence);
-                    SAFE_RELEASE(_captureFence);
-                    SAFE_RELEASE(_captureInputFence);
-                    for (size_t i = 0; i < BUFFER_COUNT; ++i)
-                    {
-                        SAFE_RELEASE(_captureCommandList[i]);
-                        SAFE_RELEASE(_captureAllocator[i]);
-                    }
-                    SAFE_RELEASE(_captureQueue);
-                    LOG_WARN("Reproj: capture fence failed, fallback to game DIRECT");
-                }
-                else
-                {
-                    _captureInputFence->SetName(L"Reproj_CaptureInputFence");
-                    _captureFence->SetName(L"Reproj_CaptureFence");
-                    _worldFence->SetName(L"Reproj_WorldFence");
-                    _captureFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                    // The ResTrack command-list hook signals this fence when the
-                    // CL containing the KCD2 world snapshot is submitted, so the
-                    // capture worker's color copy starts while the game still
-                    // finishes its frame.
-                    Kcd2HudIsolation::SetWorldSignalContext(_worldFence);
-                    LOG_INFO("Reproj: capture queue created ({})",
-                             capDesc.Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE");
-                }
-            }
-        }
-        else
-        {
-            LOG_INFO("Reproj: capture COPY queue unavailable, fallback to game DIRECT");
-        }
-    }
-
-    // Anchor capture now prefers the COPY queue (overlap), presenter polls capture fence.
+    // async-simple (P2): anchor capture runs inline on the game's DIRECT queue
+    // (base-class _uiCommandList/_uiFence) — no dedicated capture queue exists.
 
     // Telemetry uses the DIRECT queue for timestamp calibration (both queue types
     // support timestamp queries; DIRECT is the existing baseline for comparison).
@@ -290,10 +202,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 #endif
-    LOG_INFO("Reproj: async presenter created (capture: {}, warp: {})",
-             _captureQueue != nullptr
-                 ? (_captureQueue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_COPY ? "COPY" : "COMPUTE")
-                 : "game DIRECT",
+    LOG_INFO("Reproj: async presenter created (capture: game DIRECT, warp: {})",
              _computeQueue != nullptr ? "COMPUTE" : "DIRECT (fallback)");
     return true;
 }
@@ -305,37 +214,6 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     SAFE_RELEASE(_warpTimestampReadback);
     SAFE_RELEASE(_warpTimestampHeap);
     _presentTimestampFrequency = 0;
-    // Safety net: DestroyAsyncPresenter can be reached without StopAsyncPresenter
-    // (CreateAsyncPresenter failure paths); never release the COPY queue objects
-    // under a still-running capture worker.
-    if (_captureThread.joinable())
-    {
-        {
-            std::scoped_lock lock(_captureWorkMutex);
-            _captureWorkStop = true;
-            _captureWorkCv.notify_all();
-        }
-        _captureThread.join();
-    }
-    if (_captureFenceEvent)
-    {
-        CloseHandle(_captureFenceEvent);
-        _captureFenceEvent = nullptr;
-    }
-    Kcd2HudIsolation::SetWorldSignalContext(nullptr);
-    SAFE_RELEASE(_worldFence);
-    SAFE_RELEASE(_captureInputFence);
-    _captureInputFenceValue = 0;
-    SAFE_RELEASE(_captureFence);
-    for (size_t i = 0; i < BUFFER_COUNT; i++)
-    {
-        SAFE_RELEASE(_captureCommandList[i]);
-        SAFE_RELEASE(_captureAllocator[i]);
-        _captureCommandListResetted[i] = false;
-        _captureAllocatorFenceValues[i] = 0;
-    }
-    SAFE_RELEASE(_captureQueue);
-    _captureFenceValue = 0;
     SAFE_RELEASE(_computeFence);
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
@@ -374,18 +252,6 @@ bool AReproj_Dx12::StartAsyncPresenter()
         _presentIntervalCursor = 0;
         std::fill(_presentIntervals, _presentIntervals + _countof(_presentIntervals), 0.0);
     }
-    // Capture worker: performs the COPY-queue Wait/Execute/Signal + allocator
-    // resets off the game's present thread (measured 4-12 ms of block= per frame
-    // on Wine/VKD3D otherwise). Drains pending packets and exits on stop.
-    if (_captureQueue != nullptr)
-    {
-        {
-            std::scoped_lock lock(_captureWorkMutex);
-            _captureWorkStop = false;
-            _captureWorkCount = 0;
-        }
-        _captureThread = std::thread(&AReproj_Dx12::CaptureWorkerMain, this);
-    }
     _presenterState.store(PresenterState::Running);
     _presentThread = std::thread(&AReproj_Dx12::PresenterMain, this);
 
@@ -413,10 +279,6 @@ bool AReproj_Dx12::StartAsyncPresenter()
 void AReproj_Dx12::StopAsyncPresenter()
 {
     OptiInput::StopRawInputPump();
-    // Join the capture worker BEFORE draining/releasing GPU objects: it may be
-    // mid-submit on the COPY queue, and pending packets must be processed (or
-    // at least fence-completed) so no handoff wait is left dangling.
-    StopCaptureWorker();
 
     if (!_presentThread.joinable())
         return;
@@ -720,7 +582,7 @@ void AReproj_Dx12::PresenterMain()
         double newestReadyRenderMs = 0.0;
         uint32_t readyCount = 0;
         uint32_t capturingCount = 0;
-        for (int i = 0; i < BUFFER_COUNT; ++i)
+        for (int i = 0; i < kReprojFrameSlots; ++i)
         {
             const auto packetState = _packets[i].state.load();
             if (packetState == PacketState::Capturing)
@@ -795,7 +657,7 @@ void AReproj_Dx12::PresenterMain()
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
-                for (int i = 0; i < BUFFER_COUNT; ++i)
+                for (int i = 0; i < kReprojFrameSlots; ++i)
                     if (i != activePacketIndex && _packets[i].state.load() == PacketState::Ready &&
                         _packets[i].frameId < activeFrame)
                         _packets[i].state.store(PacketState::Retired);

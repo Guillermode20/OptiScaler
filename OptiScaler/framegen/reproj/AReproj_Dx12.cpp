@@ -237,75 +237,6 @@ bool AReproj_Dx12::WaitForComputeAllocator(int fIndex)
     return true;
 }
 
-ID3D12GraphicsCommandList* AReproj_Dx12::GetCaptureCommandList(int fIndex)
-{
-    if (fIndex < 0 || fIndex >= BUFFER_COUNT || _captureCommandList[fIndex] == nullptr)
-        return nullptr;
-    if (!_captureCommandListResetted[fIndex])
-    {
-        if (FAILED(_captureAllocator[fIndex]->Reset()))
-        {
-            LOG_ERROR("Reproj: capture allocator Reset failed slot {}", fIndex);
-            return nullptr;
-        }
-        if (FAILED(_captureCommandList[fIndex]->Reset(_captureAllocator[fIndex], nullptr)))
-        {
-            LOG_ERROR("Reproj: capture list Reset failed slot {}", fIndex);
-            return nullptr;
-        }
-        _captureCommandListResetted[fIndex] = true;
-    }
-    return _captureCommandList[fIndex];
-}
-
-bool AReproj_Dx12::SubmitCaptureCommandList(int fIndex)
-{
-    if (fIndex < 0 || fIndex >= BUFFER_COUNT || !_captureCommandListResetted[fIndex])
-        return true;
-    if (_captureQueue == nullptr)
-        return false;
-    auto closeResult = _captureCommandList[fIndex]->Close();
-    if (closeResult != S_OK)
-    {
-        LOG_ERROR("Reproj: capture list Close error {}: {:X}", fIndex, (UINT) closeResult);
-        return false;
-    }
-    _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_captureCommandList[fIndex]);
-    _captureCommandListResetted[fIndex] = false;
-    if (_captureFence != nullptr)
-    {
-        ++_captureFenceValue;
-        _captureAllocatorFenceValues[fIndex] = _captureFenceValue;
-        auto r = _captureQueue->Signal(_captureFence, _captureFenceValue);
-        if (FAILED(r))
-        {
-            LOG_ERROR("Reproj: capture Signal failed {:X}", (UINT) r);
-            return false;
-        }
-    }
-    return true;
-}
-
-bool AReproj_Dx12::WaitForCaptureAllocator(int fIndex)
-{
-    if (_captureFence == nullptr || fIndex < 0 || fIndex >= BUFFER_COUNT)
-        return true;
-    auto fv = _captureAllocatorFenceValues[fIndex];
-    if (fv == 0 || _captureFence->GetCompletedValue() >= fv)
-        return true;
-    HANDLE ev = _captureFenceEvent ? _captureFenceEvent : _scFenceEvent;
-    if (ev == nullptr)
-        return false;
-    if (FAILED(_captureFence->SetEventOnCompletion(fv, ev)))
-        return false;
-    if (WaitForSingleObject(ev, 5000) != WAIT_OBJECT_0)
-    {
-        LOG_ERROR("Reproj: capture wait failed {}", _captureFence->GetCompletedValue());
-        return false;
-    }
-    return true;
-}
-
 DXGI_FORMAT AReproj_Dx12::NormalizeReprojFormat(DXGI_FORMAT format)
 {
     format = WrappedIDXGISwapChain4::ReprojectionResourceFormat(format);
@@ -1006,7 +937,7 @@ bool AReproj_Dx12::CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12
 int AReproj_Dx12::AcquirePacket()
 {
     RetirePackets();
-    for (int i = 0; i < BUFFER_COUNT; ++i)
+    for (int i = 0; i < kReprojFrameSlots; ++i)
     {
         auto expected = PacketState::Free;
         if (_packets[i].state.compare_exchange_strong(expected, PacketState::Capturing))
@@ -1050,15 +981,12 @@ uint32_t AReproj_Dx12::PacketQueueDepth() const
 
 bool AReproj_Dx12::CaptureAllocatorReady(int packetIndex)
 {
-    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT)
+    // async-simple: capture is one inline submit on the game DIRECT queue's UI
+    // command list. Non-blocking poll of that allocator's fence — if the
+    // previous capture on this packet slot is still in flight the caller drops
+    // the anchor instead of stalling the game thread inside GetUICommandList.
+    if (packetIndex < 0 || packetIndex >= kReprojFrameSlots)
         return false;
-    if (_captureQueue != nullptr && _captureFence != nullptr)
-    {
-        if (_captureAllocator[packetIndex] == nullptr)
-            return true;
-        auto fv = _captureAllocatorFenceValues[packetIndex];
-        return fv == 0 || _captureFence->GetCompletedValue() >= fv;
-    }
     if (_uiCommandAllocator[packetIndex] == nullptr || _uiFence == nullptr)
         return true;
     const auto fenceValue = _uiAllocatorFenceValues[packetIndex];
@@ -1077,22 +1005,14 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     const auto fenceValue = ++_uiFenceValue;
     _uiAllocatorFenceValues[fIndex] = fenceValue;
     const auto signalStartMs = Util::MillisecondsNow();
-    const bool signaled = _gameCommandQueue != nullptr && _uiFence != nullptr &&
-                          SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue));
+    if (_gameCommandQueue != nullptr && _uiFence != nullptr)
+        _gameCommandQueue->Signal(_uiFence, fenceValue);
     RecordPipelineGameSignal(Util::MillisecondsNow() - signalStartMs);
     const auto submitStartMs = Util::MillisecondsNow();
-    // When nonBlockingHandoff is enabled (default true), never pass a GPU fence
-    // on skipped anchors so AdvanceReprojectionBuffer does not stall the game thread.
-    const bool nonBlockingHandoff = Config::Instance()->ReprojNonBlockingHandoff.value_or_default();
-    ID3D12Fence* handoffFence = nullptr;
-    UINT64 handoffFenceValue = 0;
-    if (!nonBlockingHandoff && signaled)
-    {
-        handoffFence = _uiFence;
-        handoffFenceValue = fenceValue;
-    }
-    bool ok = wrapped != nullptr &&
-              SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence, handoffFenceValue));
+    // async-simple: never pass a handoff fence — AdvanceReprojectionBuffer must
+    // not stall the game thread, and nothing reads the skipped buffer.
+    const bool ok = wrapped != nullptr &&
+                    SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0));
     const auto submitMs = Util::MillisecondsNow() - submitStartMs;
     double advanceMs = 0.0;
     if (ok)
@@ -1131,158 +1051,23 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     if (gameBackBuffer == nullptr)
         return false;
 
-    auto hudless = GetResource(FG_ResourceType::HudlessColor, sourceIndex);
-    D3D12_RESOURCE_STATES kcd2HudlessState {};
-    auto* kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(gameBackBuffer, &kcd2HudlessState);
-    if (!kcd2Hudless)
-        kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(sourceIndex, &kcd2HudlessState);
-    auto* hudlessResource = hudless ? hudless->GetResource() : kcd2Hudless;
-    const auto hudlessState = hudless ? hudless->state : kcd2HudlessState;
-    const bool hudlessReady =
-        hudless ? IsResourceReady(FG_ResourceType::HudlessColor, sourceIndex) : kcd2Hudless != nullptr;
-
-    auto ui = GetResource(FG_ResourceType::UIColor, sourceIndex);
-    D3D12_RESOURCE_STATES kcd2UiState {};
-    auto* kcd2Ui = Kcd2HudIsolation::GetUIColor(gameBackBuffer, &kcd2UiState);
-    if (!kcd2Ui)
-        kcd2Ui = Kcd2HudIsolation::GetUIColor(sourceIndex, &kcd2UiState);
-    auto* uiResource = ui ? ui->GetResource() : kcd2Ui;
-    const auto uiState = ui ? ui->state : kcd2UiState;
-    const bool uiReady = ui ? IsResourceReady(FG_ResourceType::UIColor, sourceIndex) : kcd2Ui != nullptr;
-
+    // async-simple: exactly one composed capture per anchor — the full frame
+    // (HUD included) becomes the warp source. No HUD isolation, no separate UI.
     ID3D12Resource* color = gameBackBuffer;
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
     packet.hasUi = false;
-    bool usingKcd2Isolation = false;
 
-    if (hudlessResource && uiResource && hudlessReady && uiReady)
-    {
-        const auto hudlessDesc = hudlessResource->GetDesc();
-        const auto backBufferDesc = gameBackBuffer->GetDesc();
-        if (hudlessDesc.Width == backBufferDesc.Width && hudlessDesc.Height == backBufferDesc.Height &&
-            NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(backBufferDesc.Format))
-        {
-            color = hudlessResource;
-            colorState = hudlessState;
-            packet.hasUi = true;
-            usingKcd2Isolation = !hudless && !ui && hudlessResource == kcd2Hudless && uiResource == kcd2Ui;
-        }
-    }
-
-    // PollCaptureAllocator(packetIndex) // kept for test invariant (see CaptureAllocatorReady)
-    // packet.constants.mode = 2 // rotation-only fallback literal for test invariant
-    // Prefer the dedicated capture queue (overlap) otherwise fallback to game DIRECT UI list.
+    // Record the composed color copy on the packet's UI command list. It is
+    // submitted on the game DIRECT queue below — the same queue the frame
+    // rendered on, so the copy is GPU-ordered after the frame's work and before
+    // any later render into this virtual buffer. No handoff fence needed.
     bool ok = false;
-    bool usedCaptureQueue = false;
-    bool captureViaWorker = false;
-    UINT64 gameReadyFenceValue = 0;
-    packet.handoffFence = nullptr;
-    packet.handoffFenceValue = 0;
     packet.completionFence = nullptr;
     packet.completionFenceValue = 0;
     packet.captureFenceValue = 0;
-    packet.colorFenceValue = 0;
-    packet.worldFenceValue = 0;
-    if (_captureQueue != nullptr && _captureFence != nullptr)
-    {
-        // Prefer the dedicated capture queue (overlap). When the copy sources
-        // are pinned for the frame — KCD2 isolation textures (fenced via
-        // MarkFrameCaptured) or the composed game backbuffer (fenced via the
-        // handoff fence) — the submit moves to the capture worker so the
-        // per-frame COPY-queue ops leave the game's present thread. The generic
-        // upscaler-resource path (DRG-style) stays inline;
-        // their source lifetimes are not pinned the same way.
-        const bool workerSafe = usingKcd2Isolation || color == gameBackBuffer;
-        captureViaWorker = workerSafe;
-        if (workerSafe)
-        {
-            packet.captureSrcColor = color;
-            packet.captureSrcColorState = colorState;
-            packet.captureSrcUi = uiResource;
-            packet.captureSrcUiState = uiState;
-            packet.captureSrcComposed = gameBackBuffer;
-            packet.captureInputFenceValue = ++_captureInputFenceValue;
-            // Reserve both capture values in signal order: color (signaled
-            // first, gated on the mid-frame world fence when one fired) then
-            // UI (signaled last, gated on the present-time input fence). The
-            // warp gate is color; the UI copy + packet recycling use UI.
-            packet.colorFenceValue = ++_captureFenceValue;
-            packet.captureFenceValue = ++_captureFenceValue;
-            packet.worldFenceValue = Kcd2HudIsolation::TakeWorldSignalValue(gameBackBuffer);
-            const auto inputSignalStartMs = Util::MillisecondsNow();
-            const bool inputSignaled =
-                _gameCommandQueue != nullptr && _captureInputFence != nullptr &&
-                SUCCEEDED(_gameCommandQueue->Signal(_captureInputFence, packet.captureInputFenceValue));
-            RecordPipelineGameSignal(Util::MillisecondsNow() - inputSignalStartMs);
-            if (!inputSignaled)
-                return false;
-            // Fail-safe world gate: the CL-submit hook signals this value
-            // mid-frame on per-pass renderers; the present-time signal below
-            // guarantees the value completes by present-execution even if the
-            // marked CL never submits (the frame's snapshot CL always executes
-            // before this signal on the same queue, so the color copy can
-            // never read a half-written hudless texture).
-            if (packet.worldFenceValue != 0 && _worldFence != nullptr)
-            {
-                const auto worldSignalStartMs = Util::MillisecondsNow();
-                _gameCommandQueue->Signal(_worldFence, packet.worldFenceValue);
-                RecordPipelineGameSignal(Util::MillisecondsNow() - worldSignalStartMs);
-            }
-            usedCaptureQueue = true;
-            ok = true;
-        }
-        else
-        {
-            // The source was rendered by the game's DIRECT queue. Explicitly hand
-            // ownership to the capture queue; without this wait, alt-tab/loads can
-            // expose a partially-rendered backbuffer to the copy engine.
-            gameReadyFenceValue = ++_captureInputFenceValue;
-            const auto inputSignalStartMs = Util::MillisecondsNow();
-            const bool inputSignaled = _gameCommandQueue != nullptr && _captureInputFence != nullptr &&
-                                       SUCCEEDED(_gameCommandQueue->Signal(_captureInputFence, gameReadyFenceValue));
-            RecordPipelineGameSignal(Util::MillisecondsNow() - inputSignalStartMs);
-            if (!inputSignaled || FAILED(_captureQueue->Wait(_captureInputFence, gameReadyFenceValue)))
-                return false;
-
-            auto capList = GetCaptureCommandList(packetIndex);
-            if (capList != nullptr)
-            {
-                ok = CopyPacketResource(capList, color, colorState, &packet.color, packet.colorState,
-                                        L"Reproj_PacketColor");
-                if (ok && packet.hasUi)
-                {
-                    packet.hasUi = CopyPacketResource(capList, uiResource, uiState, &packet.ui, packet.uiState,
-                                                      L"Reproj_PacketUI");
-                    if (!packet.hasUi)
-                    {
-                        RecordPipelineComposedFallback();
-                        LOG_WARN("Reproj: UI capture failed; using composed frame");
-                        ok = CopyPacketResource(capList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
-                                                packet.colorState, L"Reproj_PacketColor");
-                    }
-                }
-                usedCaptureQueue = true;
-            }
-        }
-    }
-    if (!usedCaptureQueue)
-    {
-        auto cmdList = GetUICommandList(packetIndex);
-        ok = cmdList != nullptr &&
-             CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
-        if (ok && packet.hasUi)
-        {
-            packet.hasUi =
-                CopyPacketResource(cmdList, uiResource, uiState, &packet.ui, packet.uiState, L"Reproj_PacketUI");
-            if (!packet.hasUi)
-            {
-                RecordPipelineComposedFallback();
-                LOG_WARN("Reproj: UI capture failed; using the composed game frame for this packet");
-                ok = CopyPacketResource(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
-                                        packet.colorState, L"Reproj_PacketColor");
-            }
-        }
-    }
+    auto cmdList = GetUICommandList(packetIndex);
+    ok = cmdList != nullptr &&
+         CopyPacketResource(cmdList, color, colorState, &packet.color, packet.colorState, L"Reproj_PacketColor");
     if (!ok)
         return false;
 
@@ -1301,81 +1086,21 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     _lastRealFrameTimestamp = now;
     packet.renderTimestamp = now;
     FillConstants(sourceIndex, packet.constants);
-    // 0 = no isolated UI, 1 = premultiplied alpha, 2 = straight alpha.
-    packet.constants.hudlessSource =
-        packet.hasUi ? (Config::Instance()->FGUIPremultipliedAlpha.value_or_default() ? 1u : 2u) : 0u;
-    // The capture-worker path fills packet.color asynchronously, so derive the
-    // fallback aspect from the pinned source the worker copies from instead of
-    // the still-empty copy target (identical resource and resolution).
+    // hudlessSource stays 0: the composed frame is warped as-is (no UI overlay).
+    // Derive the fallback aspect from the composed source (identical resource
+    // and resolution to the copy target).
     const auto colorDesc = color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
     double kcd2PoseIntervalMs = 0.0;
-    // Keep the HUD trace lazy: WHGame.dll is loaded after OptiScaler in KCD2. This is read-only
-    // and fails closed on an unknown game build.
-    Kcd2Scaleform::Initialize();
+    // async-simple: camera comes straight from the Kcd2Camera hook. No
+    // sensitivity-calibration accumulation on this branch — ApplyLateInput falls
+    // back to rendered-camera extrapolation until a later phase.
     const auto kcd2CameraTimestamp =
         Kcd2Camera::ApplyToConstants(packet.constants, fallbackAspect, &kcd2PoseIntervalMs);
     if (kcd2CameraTimestamp > 0.0)
     {
         SetCameraData(packet.constants.cameraPosition, packet.constants.cameraUp, packet.constants.cameraRight,
                       packet.constants.cameraForward, sourceIndex);
-
-        if (kcd2PoseIntervalMs > 1.0 && kcd2PoseIntervalMs < 100.0)
-        {
-            Kcd2Camera::Snapshot calibrationCurrent {};
-            Kcd2Camera::Snapshot calibrationPrevious {};
-            const bool haveCalibrationPair = Kcd2Camera::ReadSnapshots(calibrationCurrent, calibrationPrevious) &&
-                                             calibrationCurrent.timestampMs == kcd2CameraTimestamp;
-            float kcd2Yaw = 0.0f;
-            float kcd2Pitch = 0.0f;
-            if (haveCalibrationPair)
-                DecomposeCameraPairRotation(calibrationCurrent.forward, calibrationPrevious.forward,
-                                            calibrationPrevious.right, calibrationPrevious.up, &kcd2Yaw, &kcd2Pitch);
-            const double dX =
-                haveCalibrationPair
-                    ? static_cast<double>(calibrationCurrent.mouseTotalX - calibrationPrevious.mouseTotalX)
-                    : 0.0;
-            const double dY =
-                haveCalibrationPair
-                    ? static_cast<double>(calibrationCurrent.mouseTotalY - calibrationPrevious.mouseTotalY)
-                    : 0.0;
-
-            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && std::abs(dX) >= 4.0 &&
-                std::abs(kcd2Yaw) > 1e-4 && (dX * kcd2Yaw > 0.0))
-            {
-                _kcd2CalibrationYawRadians += std::abs(kcd2Yaw);
-                _kcd2CalibrationMouseX += static_cast<uint64_t>(std::abs(dX));
-            }
-            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && std::abs(dY) >= 4.0 &&
-                std::abs(kcd2Pitch) > 1e-4 && (-dY * kcd2Pitch > 0.0))
-            {
-                _kcd2CalibrationPitchRadians += std::abs(kcd2Pitch);
-                _kcd2CalibrationMouseY += static_cast<uint64_t>(std::abs(dY));
-            }
-            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && haveCalibrationPair &&
-                (std::abs(dX) >= 4.0 || std::abs(dY) >= 4.0))
-                ++_kcd2CalibrationSamples;
-
-            // Lock once from an aggregate fit.  The old per-frame EMA could move
-            // sensitivity by 4x in the middle of a pan, which is itself a visible
-            // reprojection discontinuity.
-            if (!_hasTrackedMouseSensitivity.load(std::memory_order_relaxed) && _kcd2CalibrationSamples >= 8 &&
-                _kcd2CalibrationMouseX >= 64)
-            {
-                const auto measuredX = static_cast<float>(_kcd2CalibrationYawRadians / _kcd2CalibrationMouseX);
-                const auto measuredY = _kcd2CalibrationMouseY >= 64
-                                           ? static_cast<float>(_kcd2CalibrationPitchRadians / _kcd2CalibrationMouseY)
-                                           : measuredX;
-                if (measuredX > 1e-5f && measuredX < 0.001f && measuredY > 1e-5f && measuredY < 0.001f)
-                {
-                    _trackedMouseSensitivityX.store(measuredX, std::memory_order_relaxed);
-                    _trackedMouseSensitivityY.store(measuredY, std::memory_order_relaxed);
-                    _hasTrackedMouseSensitivity.store(true, std::memory_order_relaxed);
-                    LOG_INFO("Reproj: KCD2 mouse sensitivity locked: sensX={:.7f} sensY={:.7f} samples={}", measuredX,
-                             measuredY, _kcd2CalibrationSamples);
-                }
-            }
-        }
         packet.constants.mode = 2;
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
@@ -1409,271 +1134,25 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.inputLatchReady = true;
     if (kcd2CameraTimestamp <= 0.0)
         UpdateMouseSensitivity(sourceIndex, sourceTimestamp);
-    // Never warp a composed frame unless explicitly enabled in config.
-    // Timewarp is intended for when a camera pose, HUD-less world, and separately composited UI are all available.
-    const bool allowComposed = Config::Instance()->ReprojAllowComposedWarp.value_or_default();
-    packet.warpAllowed = warpAllowed && packet.hasCamera && (packet.hasUi || allowComposed);
+    // async-simple: a captured composed frame is always warpable (no separate
+    // UI gate); the anchor still needs a valid camera pose.
+    packet.warpAllowed = warpAllowed && packet.hasCamera;
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
     packet.sourcePoseTimestamp = sourceTimestamp;
-    packet.syncInterval = FGHooks::LastPresentSyncInterval();
-    packet.presentFlags = FGHooks::LastPresentFlags();
 
-    const bool nonBlockingHandoff = Config::Instance()->ReprojNonBlockingHandoff.value_or_default();
-    const bool nonBlockingThisPacket = packet.hasUi && nonBlockingHandoff;
-    RecordPipelineCapturePath(usingKcd2Isolation, nonBlockingThisPacket, !nonBlockingThisPacket);
-    bool submitted = false;
-    if (usedCaptureQueue)
+    // Submit the inline capture on the game DIRECT queue and record the fence
+    // value the presenter waits on before warping this anchor.
+    const bool submitted = SubmitUICommandList((UINT) packetIndex);
+    packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
+    packet.completionFence = _uiFence;
+    packet.completionFenceValue = packet.captureFenceValue;
+    if (submitted)
     {
-        if (captureViaWorker)
-        {
-            // The worker records + submits and signals the reserved value; the
-            // game thread only enqueues so the COPY-queue ops leave its frame.
-            submitted = EnqueueCapture(packetIndex);
-            if (submitted && usingKcd2Isolation)
-                Kcd2HudIsolation::MarkFrameCaptured(gameBackBuffer, kcd2Hudless, kcd2Ui, _captureFence,
-                                                    packet.captureFenceValue);
-        }
-        else
-        {
-            submitted = SubmitCaptureCommandList(packetIndex);
-            packet.captureFenceValue = _captureAllocatorFenceValues[packetIndex];
-        }
-        packet.completionFence = _captureFence;
-        // Worker path: the warp gate is the color copy (signaled first), the
-        // UI copy trails on the same fence timeline behind captureFenceValue.
-        // Inline path: color+UI are one submission, so the single value is the
-        // gate (colorFenceValue is 0 there and must not bypass the capture).
-        packet.completionFenceValue = captureViaWorker ? packet.colorFenceValue : packet.captureFenceValue;
-        // With separate HUD-less world/UI resources the COPY queue never reads
-        // the virtual game backbuffer. When nonBlockingHandoff is enabled,
-        // release the virtual backbuffer immediately without GPU wait.
-        // The composed fallback reads the virtual buffer and keeps the capture fence.
-        if (packet.hasUi && nonBlockingHandoff)
-        {
-            packet.handoffFence = nullptr;
-            packet.handoffFenceValue = 0;
-        }
-        else
-        {
-            packet.handoffFence = _captureFence;
-            packet.handoffFenceValue = packet.captureFenceValue;
-        }
-        if (submitted)
-        {
-            std::scoped_lock lock(_metricsMutex);
-            ++_metricsDirectCaptures;
-        }
+        std::scoped_lock lock(_metricsMutex);
+        ++_metricsDirectCaptures;
     }
-    else
-    {
-        submitted = SubmitUICommandList((UINT) packetIndex);
-        packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex];
-        packet.completionFence = _uiFence;
-        packet.completionFenceValue = packet.captureFenceValue;
-        packet.handoffFence = (packet.hasUi && nonBlockingHandoff) ? nullptr : _uiFence;
-        packet.handoffFenceValue = (packet.hasUi && nonBlockingHandoff) ? 0 : packet.captureFenceValue;
-        if (submitted)
-        {
-            std::scoped_lock lock(_metricsMutex);
-            ++_metricsDirectCaptures;
-        }
-    }
-    if (!submitted)
-    {
-        // The worker path reserves a capture fence value that will never be
-        // signaled if the enqueue failed; complete it CPU-side so RetirePackets
-        // can recycle the packet without waiting on a submission that never ran.
-        if (captureViaWorker && _captureFence != nullptr && packet.captureFenceValue != 0)
-            _captureFence->Signal(packet.captureFenceValue);
-        return false;
-    }
-    return true;
-}
-
-bool AReproj_Dx12::EnqueueCapture(int packetIndex)
-{
-    std::scoped_lock lock(_captureWorkMutex);
-    if (_captureWorkStop || _captureWorkCount >= BUFFER_COUNT)
-        return false;
-    _captureWorkPending[_captureWorkCount++] = packetIndex;
-    RecordPipelineCaptureQueueDepth(static_cast<uint32_t>(_captureWorkCount));
-    _captureWorkCv.notify_one();
-    return true;
-}
-
-void AReproj_Dx12::CaptureWorkerMain()
-{
-    for (;;)
-    {
-        int packetIndex = -1;
-        {
-            std::unique_lock lock(_captureWorkMutex);
-            _captureWorkCv.wait(lock, [&] { return _captureWorkStop || _captureWorkCount > 0; });
-            if (_captureWorkCount == 0)
-            {
-                if (_captureWorkStop)
-                    break;
-                continue;
-            }
-            packetIndex = _captureWorkPending[0];
-            for (int i = 1; i < _captureWorkCount; ++i)
-                _captureWorkPending[i - 1] = _captureWorkPending[i];
-            --_captureWorkCount;
-        }
-        const auto workerStartMs = Util::MillisecondsNow();
-        ProcessCapturePacket(packetIndex);
-        RecordPipelineCaptureWorker(Util::MillisecondsNow() - workerStartMs);
-    }
-}
-
-void AReproj_Dx12::FailCapturePacket(int packetIndex)
-{
-    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT)
-        return;
-    auto& packet = _packets[packetIndex];
-    // Complete the reserved value CPU-side so RetirePackets can recycle the
-    // packet without waiting on a submission that never happened.
-    if (_captureFence != nullptr && packet.captureFenceValue != 0)
-        _captureFence->Signal(packet.captureFenceValue);
-    PacketState expected = PacketState::Capturing;
-    if (packet.state.compare_exchange_strong(expected, PacketState::Retired))
-        _presentCv.notify_all();
-}
-
-void AReproj_Dx12::ProcessCapturePacket(int packetIndex)
-{
-    if (packetIndex < 0 || packetIndex >= BUFFER_COUNT)
-        return;
-    auto& packet = _packets[packetIndex];
-
-    if (_captureQueue == nullptr || _captureInputFence == nullptr || _captureFence == nullptr)
-    {
-        FailCapturePacket(packetIndex);
-        return;
-    }
-
-    // PHASE 1 - world (color) copy. Gated on the mid-frame world fence when a
-    // snapshot CL was marked this frame AND the source is the isolated world
-    // texture (complete at world-end); the composed-backbuffer fallback must
-    // stay gated on the present-time input fence - its final composite is only
-    // complete once the game's frame CLs execute.
-    const bool worldGated = packet.worldFenceValue != 0 && packet.captureSrcColor != packet.captureSrcComposed;
-    if (worldGated)
-    {
-        if (_worldFence == nullptr || FAILED(_captureQueue->Wait(_worldFence, packet.worldFenceValue)))
-        {
-            FailCapturePacket(packetIndex);
-            return;
-        }
-    }
-    else if (FAILED(_captureQueue->Wait(_captureInputFence, packet.captureInputFenceValue)))
-    {
-        FailCapturePacket(packetIndex);
-        return;
-    }
-
-    // Recycle this packet's capture allocator. This is the worker thread, so a
-    // bounded wait here never eats the game's frame budget.
-    if (!WaitForCaptureAllocator(packetIndex))
-    {
-        FailCapturePacket(packetIndex);
-        return;
-    }
-
-    auto* capList = GetCaptureCommandList(packetIndex);
-    if (capList == nullptr)
-    {
-        FailCapturePacket(packetIndex);
-        return;
-    }
-
-    bool ok = CopyPacketResource(capList, packet.captureSrcColor, packet.captureSrcColorState, &packet.color,
-                                 packet.colorState, L"Reproj_PacketColor");
-    if (!ok || FAILED(capList->Close()))
-    {
-        FailCapturePacket(packetIndex);
-        return;
-    }
-    _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &capList);
-    _captureCommandListResetted[packetIndex] = false;
-    _captureAllocatorFenceValues[packetIndex] = packet.colorFenceValue;
-    if (FAILED(_captureQueue->Signal(_captureFence, packet.colorFenceValue)))
-    {
-        FailCapturePacket(packetIndex);
-        return;
-    }
-
-    // PHASE 2 - UI copy. Gated on the present-time input fence (the isolated UI
-    // is only complete once the game's frame CLs execute). The allocator reuse
-    // wait below doubles as the phase-1 completion wait: the color copy runs on
-    // the same COPY queue and finishes long before the present gate fires.
-    if (packet.hasUi)
-    {
-        if (!WaitForCaptureAllocator(packetIndex))
-        {
-            FailCapturePacket(packetIndex);
-            return;
-        }
-        capList = GetCaptureCommandList(packetIndex);
-        if (capList == nullptr)
-        {
-            FailCapturePacket(packetIndex);
-            return;
-        }
-        if (FAILED(_captureQueue->Wait(_captureInputFence, packet.captureInputFenceValue)))
-        {
-            FailCapturePacket(packetIndex);
-            return;
-        }
-        packet.hasUi = CopyPacketResource(capList, packet.captureSrcUi, packet.captureSrcUiState, &packet.ui,
-                                          packet.uiState, L"Reproj_PacketUI");
-        if (!packet.hasUi)
-        {
-            // This occurs after the game thread chose its virtual-buffer handoff.
-            // ReprojPipe exposes it explicitly; it must never be inferred from hud=.
-            RecordPipelineWorkerUiFallback();
-            RecordPipelineComposedFallback();
-            LOG_WARN("Reproj: UI capture failed; using composed frame");
-            ok = CopyPacketResource(capList, packet.captureSrcComposed, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
-                                    packet.colorState, L"Reproj_PacketColor");
-        }
-        if (!ok || FAILED(capList->Close()))
-        {
-            FailCapturePacket(packetIndex);
-            return;
-        }
-        _captureQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &capList);
-        _captureCommandListResetted[packetIndex] = false;
-        _captureAllocatorFenceValues[packetIndex] = packet.captureFenceValue;
-        if (FAILED(_captureQueue->Signal(_captureFence, packet.captureFenceValue)))
-        {
-            FailCapturePacket(packetIndex);
-            return;
-        }
-    }
-
-    // Publish Capturing -> Ready. The game thread may have abandoned the packet
-    // (failed-publication downgrade); the CAS keeps this from resurrecting it,
-    // while the capture itself stays submitted so any pending handoff wait
-    // still observes the reserved fence value.
-    PacketState expected = PacketState::Capturing;
-    if (packet.state.compare_exchange_strong(expected, PacketState::Ready))
-    {
-        _readyFrameId.store(packet.frameId);
-        _presentCv.notify_all();
-    }
-}
-
-void AReproj_Dx12::StopCaptureWorker()
-{
-    {
-        std::scoped_lock lock(_captureWorkMutex);
-        _captureWorkStop = true;
-        _captureWorkCv.notify_all();
-    }
-    if (_captureThread.joinable())
-        _captureThread.join();
+    return submitted;
 }
 
 bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIndex, uint32_t telemetryQueryStart)
@@ -2065,8 +1544,6 @@ bool AReproj_Dx12::DrainGpuWork()
             return false;
         if (_computeCommandListResetted[i] && !SubmitComputeCommandList(i))
             return false;
-        if (_captureCommandListResetted[i] && !SubmitCaptureCommandList(i))
-            return false;
     }
 
     const auto waitForFence = [](ID3D12Fence* fence, HANDLE event, UINT64 value, const char* name, int slot)
@@ -2087,9 +1564,7 @@ bool AReproj_Dx12::DrainGpuWork()
     {
         if (!waitForFence(_uiFence, _uiFenceEvent, _uiAllocatorFenceValues[i], "UI", i) ||
             !waitForFence(_scFence, _scFenceEvent, _scAllocatorFenceValues[i], "SC", i) ||
-            !waitForFence(_computeFence, _scFenceEvent, _computeAllocatorFenceValues[i], "COMPUTE", i) ||
-            !waitForFence(_captureFence, _captureFenceEvent ? _captureFenceEvent : _scFenceEvent,
-                          _captureAllocatorFenceValues[i], "CAPTURE", i))
+            !waitForFence(_computeFence, _scFenceEvent, _computeAllocatorFenceValues[i], "COMPUTE", i))
             return false;
     }
 
@@ -2626,19 +2101,13 @@ bool AReproj_Dx12::Present()
             // continues rendering at its natural rate.
             const auto fenceValue = ++_uiFenceValue;
             _uiAllocatorFenceValues[fIndex] = fenceValue;
-            const bool signaled = _gameCommandQueue != nullptr && _uiFence != nullptr &&
-                                  SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue));
-            const bool nonBlockingHandoff = Config::Instance()->ReprojNonBlockingHandoff.value_or_default();
-            ID3D12Fence* handoffFence = nullptr;
-            UINT64 handoffFenceValue = 0;
-            if (!nonBlockingHandoff && signaled)
-            {
-                handoffFence = _uiFence;
-                handoffFenceValue = fenceValue;
-            }
+            if (_gameCommandQueue != nullptr && _uiFence != nullptr)
+                _gameCommandQueue->Signal(_uiFence, fenceValue);
+            // async-simple: never pass a handoff fence on a skipped anchor —
+            // Advance must not stall the game thread.
             const bool advanced =
                 wrapped != nullptr &&
-                SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence, handoffFenceValue)) &&
+                SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0)) &&
                 SUCCEEDED(wrapped->AdvanceReprojectionBuffer());
             if (!advanced)
                 _presenterState.store(PresenterState::Failed);
@@ -2693,20 +2162,13 @@ bool AReproj_Dx12::Present()
         const auto captureSetupStartMs = Util::MillisecondsNow();
         const bool captured = CaptureFramePacket(fIndex, packetIndex, gameBackBuffer, virtualBufferIndex, warpAllowed);
         const auto captureSetupMs = Util::MillisecondsNow() - captureSetupStartMs;
-        // Packet readiness and virtual-buffer reuse have separate fences on the
-        // isolated-HUD path: reuse need not wait for copies that only read the
-        // separate HUD-less/UI resources.
+        // async-simple: capture is inline on the game's DIRECT queue, so the
+        // copy is GPU-ordered before any later render into this virtual buffer
+        // on the same queue — the handoff needs no fence. Release the buffer
+        // immediately; the warp gate is the _uiFence capture value below.
         auto* captureFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
-        // CaptureFramePacket deliberately clears both handoff fields for an
-        // isolated HUD-less/UI capture: COPY never reads the virtual game
-        // backbuffer, so ring reuse must not wait for its fence. Do not fall
-        // back to completionFence/captureFenceValue here; that silently turns
-        // the non-blocking path back into ownership back-pressure.
-        auto* handoffFence = packet.handoffFence;
-        const auto handoffFenceValue = packet.handoffFenceValue;
         const auto submitStartMs = Util::MillisecondsNow();
-        const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence,
-                                                                                       handoffFenceValue));
+        const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0));
         const auto submitMs = Util::MillisecondsNow() - submitStartMs;
         HRESULT advanceHr = E_FAIL;
         const auto advanceStartMs = Util::MillisecondsNow();
@@ -2952,8 +2414,6 @@ void AReproj_Dx12::Deactivate()
             pkt.captureFenceValue = 0;
             pkt.completionFence = nullptr;
             pkt.completionFenceValue = 0;
-            pkt.handoffFence = nullptr;
-            pkt.handoffFenceValue = 0;
             pkt.retirementFenceValue = 0;
             pkt.frameId = 0;
             pkt.hasCamera = false;
@@ -3635,6 +3095,7 @@ void AReproj_Dx12::ReleaseObjects()
     Kcd2HudIsolation::Reset();
     _warp.reset();
 
+    // Real-chain/output resources stay at BUFFER_COUNT.
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
         SAFE_RELEASE(_uiCommandAllocator[i]);
@@ -3645,24 +3106,10 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_lastColor[i]);
         SAFE_RELEASE(_uiColor[i]);
         SAFE_RELEASE(_warpOutput[i]);
-        SAFE_RELEASE(_packets[i].color);
-        SAFE_RELEASE(_packets[i].ui);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _syncHasUi[i] = false;
-        _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
-        _packets[i].uiState = D3D12_RESOURCE_STATE_COMMON;
-        _packets[i].captureFenceValue = 0;
-        _packets[i].completionFence = nullptr;
-        _packets[i].completionFenceValue = 0;
-        _packets[i].handoffFence = nullptr;
-        _packets[i].handoffFenceValue = 0;
-        _packets[i].retirementFenceValue = 0;
-        _packets[i].syncInterval = 0;
-        _packets[i].presentFlags = 0;
-        _packets[i].warpAllowed = false;
-        _packets[i].state.store(PacketState::Free);
 
         // Reset command list state
         _scCommandListResetted[i] = false;
@@ -3673,20 +3120,22 @@ void AReproj_Dx12::ReleaseObjects()
 
         _uiCommandListResetted[i] = false;
         _uiAllocatorFenceValues[i] = 0;
-
-        _captureCommandListResetted[i] = false;
-        _captureAllocatorFenceValues[i] = 0;
     }
-
-    if (_captureFenceEvent)
+    // FrameSlot[3] packet ring.
+    for (size_t i = 0; i < kReprojFrameSlots; i++)
     {
-        CloseHandle(_captureFenceEvent);
-        _captureFenceEvent = nullptr;
+        SAFE_RELEASE(_packets[i].color);
+        SAFE_RELEASE(_packets[i].ui);
+        _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
+        _packets[i].uiState = D3D12_RESOURCE_STATE_COMMON;
+        _packets[i].captureFenceValue = 0;
+        _packets[i].completionFence = nullptr;
+        _packets[i].completionFenceValue = 0;
+        _packets[i].retirementFenceValue = 0;
+        _packets[i].warpAllowed = false;
+        _packets[i].state.store(PacketState::Free);
     }
-    SAFE_RELEASE(_captureFence);
-    _captureFenceValue = 0;
-    SAFE_RELEASE(_captureInputFence);
-    _captureInputFenceValue = 0;
+
     SAFE_RELEASE(_uiFence);
     SAFE_RELEASE(_scFence);
     SAFE_RELEASE(_lateLatchFence);
