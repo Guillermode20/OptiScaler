@@ -320,7 +320,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />
     <ClInclude Include="framegen\reproj\AReproj_Dx12.h" />
     <ClInclude Include="framegen\reproj\ContentFrame.h" />
-    <ClInclude Include="framegen\reproj\ReprojTelemetry.h" />
     <ClInclude Include="framegen\IFGFeature.h" />
     <ClInclude Include="framegen\IFGFeature_Dx12.h" />
     <ClInclude Include="framegen\nvngx\Nvngx_FG.h" />
@@ -614,7 +613,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="framegen\reproj\Kcd2Camera.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2HudIsolation.cpp" />
     <ClCompile Include="framegen\reproj\Kcd2Scaleform.cpp" />
-    <ClCompile Include="framegen\reproj\ReprojTelemetry.cpp" />
     <ClCompile Include="framegen\IFGFeature.cpp" />
     <ClCompile Include="framegen\IFGFeature_Dx12.cpp" />
     <ClCompile Include="framegen\nvngx\Nvngx_FG.cpp" />

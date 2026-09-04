@@ -44,6 +44,19 @@
   **P3 complete** — the runtime is Capture (one DIRECT UI list) + FrameSlot[3] + Presenter
   (one DIRECT SC queue, one warp shader, one `_scFence`). Warps stay gated behind
   `kAsyncSimpleStage` (0 = blit) until a CI + KCD2 pass validates this queue model.
+- **P4 (telemetry trim): landed.** `ReprojTelemetry.{h,cpp}` deleted (slot records,
+  snapshots, GPU queries, `TRACE_SLOT_COUNT`); the query heap/readback and
+  `_presentTimestampFrequency` are gone from `CreateAsyncPresenter`; `_currentTelemetrySlot`,
+  `GetTelemetry/GetTelemetrySnapshot`, every `RecordPipeline*` + `_pipe*` atomic, and the
+  `ReprojPipe v=1` 4 Hz line are deleted, along with the now-dead
+  `_reprojectionAdvanceWait*` stats in the wrapped swapchain (their only consumer was
+  ReprojPipe). `DispatchPacketWarp`/`DisplayPacket` lost their `telemetryQueryStart`
+  plumbing. The 1 Hz line is now:
+  `Reproj: source=… display=… (new=… repeat=…) missed=… interval=mean/p95 lead=3.0 poseAge=… queue=… late=applied/samples maxDeg=… dropAnchor=… capC=… capWait=… (mode, block=…)`
+  — dropped `sampLead`, `hud`, `latch/lateAge`, `sensX`, `pace` keys and their dead
+  counters (`_metricsLateCam*`, `_metricsHudComposites`, `_metricsGamePresentPaceMaxMs`).
+  `_trackedMouseSensitivityX` stays (ApplyLateInput steering still uses it). Parser tests
+  re-pinned (sampLead/hud/ReprojPipe → absence, new key set); 35/35 pass.
 
 ## 1. Goal
 

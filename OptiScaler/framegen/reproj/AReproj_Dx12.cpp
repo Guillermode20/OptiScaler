@@ -535,10 +535,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     }
 
     if (deltaX == 0.0 && deltaY == 0.0 && !haveLateCamera)
-    {
-        ++_metricsLateFallbacks;
         return false;
-    }
 
     float sensX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
     float sensY = Config::Instance()->ReprojMouseSensitivityY.value_or_default();
@@ -555,10 +552,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     double pitch = -deltaY * sensY;
 
     if (!std::isfinite(yaw) || !std::isfinite(pitch))
-    {
-        ++_metricsLateFallbacks;
         return false;
-    }
 
     // Ceiling per slot: beyond this the warp under-rotates and the correction
     // lands next slot (fast-flick stutter). Live logs showed slots binding at
@@ -574,27 +568,9 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
 
     PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch), pBaseRight, pBaseUp,
                              pBaseForward);
-    if (haveLateCamera)
-    {
-        ++_metricsLateCamHits;
-        _metricsLateCamAgeTotalMs += std::max(0.0, Util::MillisecondsNow() - latestCamera.timestampMs);
-        ++_metricsLateCamAgeSamples;
-    }
-    else
-        ++_metricsPacketBaseHits;
     ++_metricsLateInputApplied;
     _metricsLateInputMaxDegrees = std::max(
         _metricsLateInputMaxDegrees, static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
-    if (_currentTelemetrySlot != nullptr)
-    {
-        _currentTelemetrySlot->lateInputApplied = true;
-        _currentTelemetrySlot->lateInputDeltaX = static_cast<int64_t>(deltaX);
-        _currentTelemetrySlot->lateInputDeltaY = static_cast<int64_t>(deltaY);
-        _currentTelemetrySlot->lateInputYawRad = static_cast<float>(yaw);
-        _currentTelemetrySlot->lateInputPitchRad = static_cast<float>(pitch);
-        _currentTelemetrySlot->lateInputSensX = sensX;
-        _currentTelemetrySlot->lateInputSensY = sensY;
-    }
     return true;
 }
 
@@ -807,22 +783,15 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     // returning a virtual resource to the game while capture still owns it.
     const auto fenceValue = ++_uiFenceValue;
     _uiAllocatorFenceValues[fIndex] = fenceValue;
-    const auto signalStartMs = Util::MillisecondsNow();
     if (_gameCommandQueue != nullptr && _uiFence != nullptr)
         _gameCommandQueue->Signal(_uiFence, fenceValue);
-    RecordPipelineGameSignal(Util::MillisecondsNow() - signalStartMs);
-    const auto submitStartMs = Util::MillisecondsNow();
     // async-simple: never pass a handoff fence — AdvanceReprojectionBuffer must
     // not stall the game thread, and nothing reads the skipped buffer.
     const bool ok = wrapped != nullptr &&
                     SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0));
-    const auto submitMs = Util::MillisecondsNow() - submitStartMs;
-    double advanceMs = 0.0;
     if (ok)
     {
-        const auto advanceStartMs = Util::MillisecondsNow();
         const auto advanceHr = wrapped->AdvanceReprojectionBuffer();
-        advanceMs = Util::MillisecondsNow() - advanceStartMs;
         if (FAILED(advanceHr))
         {
             if (advanceHr == DXGI_ERROR_WAS_STILL_DRAWING)
@@ -833,11 +802,10 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     }
     else
         _presenterState.store(PresenterState::Failed);
-    RecordPipelinePublication(Util::MillisecondsNow() - presentStartMs, 0.0, submitMs, advanceMs, true);
     RecordWarpFrame(false, true, 0.0f);
     SAFE_RELEASE(gameBackBuffer);
     // async-simple: OptiScaler never paces the game thread. block= covers all
-    // game-present work here; pace= stays 0 (the SourceFramerateLimit pacer is gone).
+    // game-present work here (the SourceFramerateLimit pacer is gone).
     const auto doneMs = Util::MillisecondsNow();
     std::scoped_lock metricsLock(_metricsMutex);
     ++_metricsSkippedAnchorSamples;
@@ -956,7 +924,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     return submitted;
 }
 
-bool AReproj_Dx12::DisplayPacket(int packetIndex, uint32_t telemetryQueryStart)
+bool AReproj_Dx12::DisplayPacket(int packetIndex)
 {
     auto& packet = _packets[packetIndex];
     if (_swapChain == nullptr || packet.color == nullptr)
@@ -977,34 +945,11 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, uint32_t telemetryQueryStart)
     // Reserve the SC retirement fence value for this slot.
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
-    // Telemetry: use sequence-indexed query if provided, otherwise fallback to outputIndex
-    uint32_t queryStart = telemetryQueryStart;
-    bool useTelemetryQuery = false;
-    if (queryStart == UINT32_MAX && _currentTelemetrySlot && _currentTelemetrySlot->gpuQueryIndex != UINT32_MAX)
-    {
-        queryStart = _currentTelemetrySlot->gpuQueryIndex;
-        useTelemetryQuery = true;
-    }
-    else if (queryStart != UINT32_MAX)
-        useTelemetryQuery = true;
-
-    if (useTelemetryQuery && _warpTimestampHeap != nullptr && queryStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
-        cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, queryStart);
-
     ID3D12Resource* backBuffer = nullptr;
     if (FAILED(realSwapChain->GetBuffer(outputIndex, IID_PPV_ARGS(&backBuffer))))
     {
-        if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
-            queryStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
-        {
-            cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, queryStart + 1);
-            cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, queryStart, 2,
-                                      _warpTimestampReadback, queryStart * sizeof(UINT64));
-        }
         SubmitSCCommandList(outputIndex);
         packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
-        if (_currentTelemetrySlot && useTelemetryQuery)
-            _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
         return false;
     }
 
@@ -1028,14 +973,6 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, uint32_t telemetryQueryStart)
     }
     backBuffer->Release();
 
-    if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
-        queryStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
-    {
-        cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, queryStart + 1);
-        cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, queryStart, 2, _warpTimestampReadback,
-                                  queryStart * sizeof(UINT64));
-    }
-
     if (!SubmitSCCommandList(outputIndex))
         return false;
 
@@ -1043,19 +980,14 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, uint32_t telemetryQueryStart)
     // copy/UI list runs on _presentQueue. Order Present on the actual swapchain
     // queue with a GPU-side wait; never CPU-wait here.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
-    const auto directGateStartMs = Util::MillisecondsNow();
     const bool directGateQueued = _gameCommandQueue != nullptr && _scFence != nullptr &&
                                   SUCCEEDED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue));
-    RecordPipelineDirectGate(Util::MillisecondsNow() - directGateStartMs);
     if (!directGateQueued)
         return false;
-    if (_currentTelemetrySlot && useTelemetryQuery)
-        _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
     return true;
 }
 
-bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs,
-                                      uint32_t telemetryQueryStart)
+bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs)
 {
     auto& packet = _packets[packetIndex];
     auto& content = static_cast<ContentFrame&>(packet);
@@ -1092,20 +1024,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // signals it after the warp+copy dispatch.
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
-    uint32_t queryStart = telemetryQueryStart;
-    bool useTelemetryQuery = false;
-    if (queryStart == UINT32_MAX && _currentTelemetrySlot && _currentTelemetrySlot->gpuQueryIndex != UINT32_MAX)
-    {
-        queryStart = _currentTelemetrySlot->gpuQueryIndex;
-        useTelemetryQuery = true;
-    }
-    else if (queryStart != UINT32_MAX)
-        useTelemetryQuery = true;
-
-    // Sequence-indexed timestamps are emitted only while telemetry is active.
-    const UINT timestampStart = useTelemetryQuery ? queryStart : UINT32_MAX;
-    if (useTelemetryQuery && _warpTimestampHeap != nullptr && timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
-        cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = content.constants;
     constants.timeStep = timeStep;
     // Constants are baked at dispatch time on the presenter thread; fresh
@@ -1133,24 +1051,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     backBuffer->Release();
 
-    if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
-        timestampStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
-    {
-        cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart + 1);
-        cmdList->ResolveQueryData(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart, 2,
-                                  _warpTimestampReadback, timestampStart * sizeof(UINT64));
-    }
-
     if (!SubmitSCCommandList(outputIndex))
         return false;
-
-    ++_metricsHudComposites;
 
     // async-simple: _scFence is the single retirement fence — SubmitSCCommandList
     // signaled it after the warp+copy dispatch on _presentQueue.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
-    if (_currentTelemetrySlot && useTelemetryQuery)
-        _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
     return true;
 }
 
@@ -1188,156 +1094,6 @@ bool AReproj_Dx12::DrainGpuWork()
     return true;
 }
 
-namespace
-{
-uint64_t ReprojPipeUs(double elapsedMs) { return static_cast<uint64_t>(std::max(0.0, elapsedMs * 1000.0)); }
-
-void ReprojPipeMax(std::atomic<uint64_t>& target, uint64_t value)
-{
-    auto current = target.load(std::memory_order_relaxed);
-    while (value > current &&
-           !target.compare_exchange_weak(current, value, std::memory_order_relaxed, std::memory_order_relaxed))
-    {
-    }
-}
-} // namespace
-
-void AReproj_Dx12::RecordPipelinePublication(double totalMs, double captureSetupMs, double submitMs, double advanceMs,
-                                             bool skipped)
-{
-    const auto totalUs = ReprojPipeUs(totalMs);
-    _pipePubCount.fetch_add(1, std::memory_order_relaxed);
-    _pipePubSkipped.fetch_add(skipped, std::memory_order_relaxed);
-    _pipePubTotalUs.fetch_add(totalUs, std::memory_order_relaxed);
-    _pipeCaptureSetupTotalUs.fetch_add(ReprojPipeUs(captureSetupMs), std::memory_order_relaxed);
-    _pipeSubmitTotalUs.fetch_add(ReprojPipeUs(submitMs), std::memory_order_relaxed);
-    _pipeAdvanceTotalUs.fetch_add(ReprojPipeUs(advanceMs), std::memory_order_relaxed);
-    ReprojPipeMax(_pipePubMaxUs, totalUs);
-}
-
-void AReproj_Dx12::RecordPipelineGameSignal(double elapsedMs)
-{
-    const auto elapsedUs = ReprojPipeUs(elapsedMs);
-    _pipeGameSignalCount.fetch_add(1, std::memory_order_relaxed);
-    _pipeGameSignalTotalUs.fetch_add(elapsedUs, std::memory_order_relaxed);
-    ReprojPipeMax(_pipeGameSignalMaxUs, elapsedUs);
-}
-
-void AReproj_Dx12::RecordPipelineCaptureQueueDepth(uint32_t depth) { ReprojPipeMax(_pipeCaptureQueueHigh, depth); }
-
-void AReproj_Dx12::RecordPipelineCapturing(uint32_t count) { ReprojPipeMax(_pipeCapturingHigh, count); }
-
-void AReproj_Dx12::RecordPipelineCaptureWorker(double elapsedMs)
-{
-    const auto elapsedUs = ReprojPipeUs(elapsedMs);
-    _pipeCaptureWorkerCount.fetch_add(1, std::memory_order_relaxed);
-    _pipeCaptureWorkerTotalUs.fetch_add(elapsedUs, std::memory_order_relaxed);
-    ReprojPipeMax(_pipeCaptureWorkerMaxUs, elapsedUs);
-}
-
-void AReproj_Dx12::RecordPipelineCapturePath(bool isolated, bool nonBlocking, bool blocking)
-{
-    _pipeIsolated.fetch_add(isolated, std::memory_order_relaxed);
-    _pipeNonBlocking.fetch_add(nonBlocking, std::memory_order_relaxed);
-    _pipeBlocking.fetch_add(blocking, std::memory_order_relaxed);
-}
-
-void AReproj_Dx12::RecordPipelineWorkerUiFallback() { _pipeWorkerUiFallback.fetch_add(1, std::memory_order_relaxed); }
-
-void AReproj_Dx12::RecordPipelineComposedFallback() { _pipeComposedFallback.fetch_add(1, std::memory_order_relaxed); }
-
-void AReproj_Dx12::RecordPipelineOutput(bool warped, bool newContent)
-{
-    if (warped)
-        (newContent ? _pipeNewWarp : _pipeRepeatWarp).fetch_add(1, std::memory_order_relaxed);
-    else
-        (newContent ? _pipeNewBlit : _pipeRepeatBlit).fetch_add(1, std::memory_order_relaxed);
-}
-
-void AReproj_Dx12::RecordPipelineDirectGate(double elapsedMs)
-{
-    const auto elapsedUs = ReprojPipeUs(elapsedMs);
-    _pipeDirectGateCount.fetch_add(1, std::memory_order_relaxed);
-    _pipeDirectGateTotalUs.fetch_add(elapsedUs, std::memory_order_relaxed);
-    ReprojPipeMax(_pipeDirectGateMaxUs, elapsedUs);
-}
-
-void AReproj_Dx12::RecordPipelineFencePoll(bool colorPending, bool uiPending)
-{
-    _pipeFencePolls.fetch_add(1, std::memory_order_relaxed);
-    _pipeColorPending.fetch_add(colorPending, std::memory_order_relaxed);
-    _pipeUiPending.fetch_add(uiPending, std::memory_order_relaxed);
-}
-
-void AReproj_Dx12::LogPipelineMetricsIfDue()
-{
-    constexpr double PIPE_INTERVAL_MS = 250.0;
-    const auto now = Util::MillisecondsNow();
-    if (_pipeMetricsTimestamp == 0.0)
-    {
-        _pipeMetricsTimestamp = now;
-        return;
-    }
-    const auto elapsedMs = now - _pipeMetricsTimestamp;
-    if (elapsedMs < PIPE_INTERVAL_MS)
-        return;
-    _pipeMetricsTimestamp = now;
-
-    const auto take = [](std::atomic<uint64_t>& value) { return value.exchange(0, std::memory_order_relaxed); };
-    const auto pubCount = take(_pipePubCount);
-    const auto pubSkipped = take(_pipePubSkipped);
-    const auto pubTotalUs = take(_pipePubTotalUs);
-    const auto pubMaxUs = take(_pipePubMaxUs);
-    const auto captureSetupUs = take(_pipeCaptureSetupTotalUs);
-    const auto submitUs = take(_pipeSubmitTotalUs);
-    const auto advanceUs = take(_pipeAdvanceTotalUs);
-    const auto signalCount = take(_pipeGameSignalCount);
-    const auto signalTotalUs = take(_pipeGameSignalTotalUs);
-    const auto signalMaxUs = take(_pipeGameSignalMaxUs);
-    const auto capQueueHigh = take(_pipeCaptureQueueHigh);
-    const auto workerCount = take(_pipeCaptureWorkerCount);
-    const auto workerTotalUs = take(_pipeCaptureWorkerTotalUs);
-    const auto workerMaxUs = take(_pipeCaptureWorkerMaxUs);
-    const auto isolated = take(_pipeIsolated);
-    const auto nonBlocking = take(_pipeNonBlocking);
-    const auto blocking = take(_pipeBlocking);
-    const auto workerUiFallback = take(_pipeWorkerUiFallback);
-    const auto composedFallback = take(_pipeComposedFallback);
-    const auto newWarp = take(_pipeNewWarp);
-    const auto repeatWarp = take(_pipeRepeatWarp);
-    const auto newBlit = take(_pipeNewBlit);
-    const auto repeatBlit = take(_pipeRepeatBlit);
-    const auto directGateCount = take(_pipeDirectGateCount);
-    const auto directGateTotalUs = take(_pipeDirectGateTotalUs);
-    const auto directGateMaxUs = take(_pipeDirectGateMaxUs);
-    const auto capturingHigh = take(_pipeCapturingHigh);
-    const auto fencePolls = take(_pipeFencePolls);
-    const auto colorPending = take(_pipeColorPending);
-    const auto uiPending = take(_pipeUiPending);
-    const auto handoff = _wrappedSwapChain != nullptr ? _wrappedSwapChain->ConsumeReprojectionAdvanceWaitStats()
-                                                      : WrappedIDXGISwapChain4::ReprojectionAdvanceWaitStats {};
-    const auto meanMs = [](uint64_t totalUs, uint64_t count)
-    { return count != 0 ? static_cast<double>(totalUs) / count / 1000.0 : 0.0; };
-
-    // Flat key=value fields are intentionally stable for scripts; each line is
-    // a 250 ms aggregate, not an event trace. Units are encoded in key names.
-    LOG_INFO("ReprojPipe v=1 dtMs={:.0f} pubN={} pubSkip={} pubMeanMs={:.3f} pubMaxMs={:.3f} "
-             "pubCapMs={:.3f} pubSubmitMs={:.3f} pubAdvanceMs={:.3f} signalN={} signalMeanMs={:.3f} "
-             "signalMaxMs={:.3f} handoffWaitN={} handoffWaitMeanMs={:.3f} handoffWaitMaxMs={:.3f} "
-             "capQHi={} capWorkerN={} capWorkerMeanMs={:.3f} capWorkerMaxMs={:.3f} capCapturingHi={} "
-             "fencePollN={} colorPending={} uiPending={} iso={} handoffNB={} handoffBlock={} workerUiFail={} "
-             "composedFallback={} newWarp={} repeatWarp={} newBlit={} repeatBlit={} directGateN={} "
-             "directGateMeanMs={:.3f} directGateMaxMs={:.3f}",
-             elapsedMs, pubCount, pubSkipped, meanMs(pubTotalUs, pubCount), pubMaxUs / 1000.0,
-             meanMs(captureSetupUs, pubCount), meanMs(submitUs, pubCount), meanMs(advanceUs, pubCount), signalCount,
-             meanMs(signalTotalUs, signalCount), signalMaxUs / 1000.0, handoff.count,
-             meanMs(handoff.totalUs, handoff.count), handoff.maxUs / 1000.0, capQueueHigh, workerCount,
-             meanMs(workerTotalUs, workerCount), workerMaxUs / 1000.0, capturingHigh, fencePolls, colorPending,
-             uiPending, isolated, nonBlocking, blocking, workerUiFallback, composedFallback, newWarp, repeatWarp,
-             newBlit, repeatBlit, directGateCount, meanMs(directGateTotalUs, directGateCount),
-             directGateMaxUs / 1000.0);
-}
-
 void AReproj_Dx12::RecordRealFrame()
 {
     _metricsRealFrames.fetch_add(1, std::memory_order_relaxed);
@@ -1368,7 +1124,6 @@ void AReproj_Dx12::LogMetricsIfDue()
     double elapsed = 0.0;
     double scale = 1.0;
     double poseAge = 0.0;
-    double lateCamAge = 0.0;
     uint32_t realFrames = 0;
     uint32_t warpFrames = 0;
     uint32_t newAnchorDisplays = 0;
@@ -1376,16 +1131,11 @@ void AReproj_Dx12::LogMetricsIfDue()
     uint32_t missedDisplaySlots = 0;
     uint32_t lateInputSamples = 0;
     uint32_t lateInputApplied = 0;
-    uint32_t lateCamHits = 0;
-    uint32_t packetBaseHits = 0;
-    uint32_t lateFallbacks = 0;
-    uint32_t hudComposites = 0;
     uint32_t skippedAnchorSamples = 0;
     uint32_t directCaptures = 0;
     uint32_t captureNotReady = 0;
     float lateInputMaxDegrees = 0.0f;
     float gamePresentBlockMaxMs = 0.0f;
-    float gamePresentPaceMaxMs = 0.0f;
     float meanPresentIntervalMs = 0.0f;
     float p95PresentIntervalMs = 0.0f;
     int queueDepth = 0;
@@ -1412,18 +1162,12 @@ void AReproj_Dx12::LogMetricsIfDue()
         missedDisplaySlots = _metricsMissedDisplaySlots;
         lateInputSamples = _metricsLateInputSamples;
         lateInputApplied = _metricsLateInputApplied;
-        lateCamHits = _metricsLateCamHits;
-        packetBaseHits = _metricsPacketBaseHits;
-        lateFallbacks = _metricsLateFallbacks;
-        hudComposites = _metricsHudComposites;
         skippedAnchorSamples = _metricsSkippedAnchorSamples;
         directCaptures = _metricsDirectCaptures;
         captureNotReady = _metricsCaptureNotReady;
         lateInputMaxDegrees = _metricsLateInputMaxDegrees;
         gamePresentBlockMaxMs = _metricsGamePresentBlockMaxMs;
-        gamePresentPaceMaxMs = _metricsGamePresentPaceMaxMs;
         poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
-        lateCamAge = _metricsLateCamAgeSamples > 0 ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples : 0.0;
 
         _runtimeMetrics.realFps = static_cast<float>(realFrames * scale);
         _runtimeMetrics.warpFps = static_cast<float>(warpFrames * scale);
@@ -1442,7 +1186,6 @@ void AReproj_Dx12::LogMetricsIfDue()
         _runtimeMetrics.directCaptures = directCaptures;
         _runtimeMetrics.captureNotReady = captureNotReady;
         _runtimeMetrics.gamePresentBlockMs = gamePresentBlockMaxMs;
-        _runtimeMetrics.gamePresentPaceMs = gamePresentPaceMaxMs;
 
         if (_presentIntervalCount > 0)
         {
@@ -1471,32 +1214,22 @@ void AReproj_Dx12::LogMetricsIfDue()
         _metricsMissedDisplaySlots = 0;
         _metricsLateInputSamples = 0;
         _metricsLateInputApplied = 0;
-        _metricsLateCamHits = 0;
-        _metricsPacketBaseHits = 0;
-        _metricsLateFallbacks = 0;
-        _metricsLateCamAgeTotalMs = 0.0;
-        _metricsLateCamAgeSamples = 0;
-        _metricsHudComposites = 0;
         _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _metricsGamePresentBlockMaxMs = 0.0f;
-        _metricsGamePresentPaceMaxMs = 0.0f;
     }
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
-             "interval={:.2f}/{:.2f}ms lead={:.2f}ms sampLead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} latch={}/{}/{} "
-             "lateAge={:.1f}ms sensX={:.7f} ({}, block={:.2f}ms pace={:.2f}ms)",
+             "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
+             "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} "
+             "({}, block={:.2f}ms)",
              realFrames * scale, warpFrames * scale, newAnchorDisplays,
              repeatedAnchorDisplays, missedDisplaySlots, meanPresentIntervalMs,
-             p95PresentIntervalMs, kDispatchLeadMs, _lastLateSampleLeadMs.load(), poseAge,
-             queueDepth,
-             lateInputApplied, lateInputSamples, lateInputMaxDegrees, hudComposites,
+             p95PresentIntervalMs, kDispatchLeadMs, poseAge, queueDepth,
+             lateInputApplied, lateInputSamples, lateInputMaxDegrees,
              skippedAnchorSamples, directCaptures, captureNotReady,
-             lateCamHits, packetBaseHits, lateFallbacks, lateCamAge,
-             _trackedMouseSensitivityX.load(std::memory_order_relaxed), presenter,
-             gamePresentBlockMaxMs, gamePresentPaceMaxMs);
+             presenter, gamePresentBlockMaxMs);
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -1728,21 +1461,14 @@ bool AReproj_Dx12::Present()
             SkipAnchorPublication(fIndex, gameBackBuffer, virtualBufferIndex, wrapped, presentStart);
             return true;
         }
-        const auto captureSetupStartMs = Util::MillisecondsNow();
         const bool captured = CaptureFramePacket(fIndex, packetIndex, gameBackBuffer, virtualBufferIndex, warpAllowed);
-        const auto captureSetupMs = Util::MillisecondsNow() - captureSetupStartMs;
         // async-simple: capture is inline on the game's DIRECT queue, so the
         // copy is GPU-ordered before any later render into this virtual buffer
         // on the same queue — the handoff needs no fence. Release the buffer
         // immediately; the warp gate is the _uiFence capture value below.
-        const auto submitStartMs = Util::MillisecondsNow();
         const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0));
-        const auto submitMs = Util::MillisecondsNow() - submitStartMs;
         HRESULT advanceHr = E_FAIL;
-        const auto advanceStartMs = Util::MillisecondsNow();
         const bool advanced = submitted && SUCCEEDED(advanceHr = wrapped->AdvanceReprojectionBuffer());
-        const auto advanceMs = Util::MillisecondsNow() - advanceStartMs;
-        RecordPipelinePublication(Util::MillisecondsNow() - presentStart, captureSetupMs, submitMs, advanceMs, false);
         if (captured && submitted && advanced)
         {
             packet.state.store(PacketState::Ready);
@@ -1819,12 +1545,6 @@ void AReproj_Dx12::Activate()
         _metricsSkippedAnchorSamples = 0;
         _metricsLateInputSamples = 0;
         _metricsLateInputApplied = 0;
-        _metricsLateCamHits = 0;
-        _metricsPacketBaseHits = 0;
-        _metricsLateFallbacks = 0;
-        _metricsLateCamAgeTotalMs = 0.0;
-        _metricsLateCamAgeSamples = 0;
-        _metricsHudComposites = 0;
         _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;
         _metricsLateInputMaxDegrees = 0.0f;
@@ -1887,7 +1607,6 @@ void AReproj_Dx12::Deactivate()
     _publishedFrameId.store(0);
     _readyFrameId.store(0);
     _presenterState.store(PresenterState::Stopped);
-    _currentTelemetrySlot = nullptr;
 
     auto fIndex = GetIndex();
 

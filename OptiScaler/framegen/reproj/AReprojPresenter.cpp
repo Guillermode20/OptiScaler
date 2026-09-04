@@ -72,7 +72,6 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         return false;
     }
     _presentQueue->SetName(L"Reproj_PresentQueue");
-    _presentQueue->GetTimestampFrequency(&_presentTimestampFrequency);
 
     // async-simple: the presenter owns exactly one queue (_presentQueue,
     // DIRECT) and one retirement fence (_scFence). Warps and unwarped blits
@@ -80,42 +79,13 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     // COMPUTE warp queue and no deferred late-latch fence. Anchor capture runs
     // inline on the game's DIRECT queue via the base-class _uiCommandList
     // (see CaptureFramePacket) — no dedicated capture queue exists either.
-
-    // Telemetry calibrates against the one DIRECT presenter queue.
-    _telemetry.Initialize(_presentQueue);
-    _telemetry.SetTimestampResources(nullptr, nullptr, nullptr, _presentTimestampFrequency);
-#if 0 // Per-slot GPU telemetry is intentionally absent from the minimal path.
-    D3D12_QUERY_HEAP_DESC queryDesc {};
-    queryDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-    queryDesc.Count = ReprojTelemetry::TRACE_SLOT_COUNT * 2;
-    if (SUCCEEDED(_device->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&_warpTimestampHeap))))
-    {
-        const auto readbackDesc = CD3DX12_RESOURCE_DESC::Buffer(ReprojTelemetry::TRACE_SLOT_COUNT * 2 * sizeof(UINT64));
-        const auto readbackHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
-        if (FAILED(_device->CreateCommittedResource(&readbackHeap, D3D12_HEAP_FLAG_NONE, &readbackDesc,
-                                                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                    IID_PPV_ARGS(&_warpTimestampReadback))))
-        {
-            SAFE_RELEASE(_warpTimestampHeap);
-        }
-        else
-        {
-            _telemetry.SetTimestampResources(_warpTimestampHeap, _warpTimestampReadback, _scFence,
-                                             _presentTimestampFrequency);
-        }
-    }
-#endif
     LOG_INFO("Reproj: async presenter created (capture: game DIRECT, warp: DIRECT)");
     return true;
 }
 
 void AReproj_Dx12::DestroyAsyncPresenter()
 {
-    _telemetry.Shutdown();
     _presentWaitableObject = nullptr;
-    SAFE_RELEASE(_warpTimestampReadback);
-    SAFE_RELEASE(_warpTimestampHeap);
-    _presentTimestampFrequency = 0;
     SAFE_RELEASE(_presentQueue);
 }
 
@@ -262,8 +232,6 @@ void AReproj_Dx12::PresenterMain()
         std::fill(_presentIntervals, _presentIntervals + _countof(_presentIntervals), 0.0);
     };
 
-    _lastLateSampleLeadMs.store(4.0);
-
     while (!_stopPresenter.load())
     {
         const auto refreshHz = TargetRefreshHz();
@@ -281,11 +249,6 @@ void AReproj_Dx12::PresenterMain()
         if (lastSeenRefreshHz > 1.0 && std::abs(refreshHz - lastSeenRefreshHz) > 0.5)
             nextDeadlineMs = 0.0;
         lastSeenRefreshHz = refreshHz;
-
-        // Per-slot telemetry is compiled out of the minimal path (see AGENTS.md):
-        // the once-per-second Reproj: line is the only instrument. No per-slot
-        // allocation, QPC sampling, or GPU timestamp queries here.
-        _currentTelemetrySlot = nullptr;
 
         // Once DXGI reports occlusion, stop recording/dispatching GPU work and
         // use Present(TEST) as the visibility probe recommended by DXGI. Also
@@ -357,12 +320,9 @@ void AReproj_Dx12::PresenterMain()
         // the active anchor but no newer completed packet was claimed below,
         // this slot deliberately reuses the active anchor (counted as capWait).
         UINT64 newestReadyFrame = activeFrame;
-        uint32_t capturingCount = 0;
         for (int i = 0; i < kReprojFrameSlots; ++i)
         {
             const auto packetState = _packets[i].state.load();
-            if (packetState == PacketState::Capturing)
-                ++capturingCount;
             if (packetState == PacketState::Ready)
             {
                 if (_packets[i].frameId > newestReadyFrame)
@@ -375,7 +335,6 @@ void AReproj_Dx12::PresenterMain()
                 const auto& cand = _packets[i];
                 const bool captureComplete = cand.captureFenceValue == 0 || _uiFence == nullptr ||
                                              _uiFence->GetCompletedValue() >= cand.captureFenceValue;
-                RecordPipelineFencePoll(!captureComplete, !captureComplete);
                 if (captureComplete && _packets[i].frameId > newestFrame)
                 {
                     newestFrame = _packets[i].frameId;
@@ -383,8 +342,6 @@ void AReproj_Dx12::PresenterMain()
                 }
             }
         }
-
-        RecordPipelineCapturing(capturingCount);
 
         bool newAnchor = false;
         // A claimed packet is complete by construction above. On a real switch
@@ -456,8 +413,6 @@ void AReproj_Dx12::PresenterMain()
         // No hitch hold on the minimal path: a stall simply clamps timeStep
         // (extrapolation is bounded by the 2.5 cap either way).
         const auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
-        // No per-slot telemetry: timeStep inputs stay local, the 1 Hz log line aggregates.
-        constexpr uint32_t queryStart = UINT32_MAX;
 
         // A0 (kAsyncSimpleStage == 0): never dispatch the warp shader. Every
         // slot identity-blits the newest completed anchor so the source cadence
@@ -467,8 +422,8 @@ void AReproj_Dx12::PresenterMain()
         // controller exists to take the blit path).
         const bool shouldWarp = kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost;
         const bool dispatched = shouldWarp
-                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
-                                    : DisplayPacket(activePacketIndex, queryStart);
+                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs)
+                                    : DisplayPacket(activePacketIndex);
 
         if (!dispatched)
         {
@@ -476,7 +431,6 @@ void AReproj_Dx12::PresenterMain()
             _presenterState.store(PresenterState::Failed);
             break;
         }
-        RecordPipelineOutput(shouldWarp, newContent);
 
         const auto presentCallStartMs = Util::MillisecondsNow();
         const auto result = PresentCompositorFrame(1, 0, !newContent, false);
@@ -506,10 +460,6 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
         RecordWarpFrame(true, false, poseAge);
-        // ReprojPipe is intentionally emitted by the presenter, never the
-        // game Present thread: synchronous file logging at 4 Hz would otherwise
-        // become the very source-frame spike this diagnostic is measuring.
-        LogPipelineMetricsIfDue();
 
         constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;
         constexpr double WATCHDOG_WEDGE_MS = 2000.0;

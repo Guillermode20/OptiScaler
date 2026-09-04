@@ -2,7 +2,6 @@
 #include "SysUtils.h"
 #include <framegen/IFGFeature_Dx12.h>
 #include <shaders/reprojection/RP_Dx12.h>
-#include "ReprojTelemetry.h"
 #include "ContentFrame.h"
 
 #include <atomic>
@@ -38,7 +37,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         bool hudWarped = true;
         bool asyncPresenter = false;
         float gamePresentBlockMs = 0.0f; // game-thread Present() work, pacing sleep excluded
-        float gamePresentPaceMs = 0.0f;  // pacing sleep after the last published anchor (always 0: no source pacing)
         float meanPresentIntervalMs = 0.0f;
         float p95PresentIntervalMs = 0.0f;
         uint32_t newAnchorDisplays = 0;
@@ -117,14 +115,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     std::thread _presentThread;
     std::atomic<bool> _stopPresenter { false };
     std::atomic<PresenterState> _presenterState { PresenterState::Stopped };
-    std::atomic<uint32_t> _stageTraceCount { 0 };
 
     ID3D12CommandQueue* _presentQueue = nullptr;
-    ID3D12QueryHeap* _warpTimestampHeap = nullptr;
-    ID3D12Resource* _warpTimestampReadback = nullptr;
-    UINT64 _presentTimestampFrequency = 0;
-    ReprojTelemetry _telemetry;
-    ReprojSlotRecord* _currentTelemetrySlot = nullptr;
     class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use
     HANDLE _presentWaitableObject = nullptr;
     bool _asyncDowngraded = false;
@@ -137,9 +129,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     // the base-class _uiCommandList/_uiFence. There is no dedicated capture
     // queue, capture worker, or mid-frame world fence. Same-queue ordering
     // makes the virtual-buffer handoff fence-free.
-    float _metricsTxCmTotal = 0.0f;
-    uint32_t _metricsTxSamples = 0;
-
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
     UINT64 _scFenceValue = 0;  // monotonic SC fence value (fence outlives context recreate)
@@ -153,9 +142,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool PollCaptureAllocator(int packetIndex) { return CaptureAllocatorReady(packetIndex); }
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
-    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
-                            uint32_t telemetryQueryStart = UINT32_MAX);
-    bool DisplayPacket(int packetIndex, uint32_t telemetryQueryStart = UINT32_MAX);
+    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0);
+    bool DisplayPacket(int packetIndex);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
@@ -190,23 +178,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs);
     void LogMetricsIfDue();
 
-    // ReprojPipe v=1 is intentionally aggregate-only: 4 Hz parser-stable
-    // snapshots diagnose queue topology without restoring per-slot telemetry,
-    // readbacks, allocations, or additional GPU waits.
-    void RecordPipelinePublication(double totalMs, double captureSetupMs, double submitMs, double advanceMs,
-                                   bool skipped);
-    void RecordPipelineGameSignal(double elapsedMs);
-    void RecordPipelineCaptureQueueDepth(uint32_t depth);
-    void RecordPipelineCapturing(uint32_t count);
-    void RecordPipelineCaptureWorker(double elapsedMs);
-    void RecordPipelineCapturePath(bool isolated, bool nonBlocking, bool blocking);
-    void RecordPipelineWorkerUiFallback();
-    void RecordPipelineComposedFallback();
-    void RecordPipelineOutput(bool warped, bool newContent);
-    void RecordPipelineDirectGate(double elapsedMs);
-    void RecordPipelineFencePoll(bool colorPending, bool uiPending);
-    void LogPipelineMetricsIfDue();
-
     double _metricsTimestamp = 0.0;
     std::atomic<uint32_t> _metricsRealFrames { 0 };
     uint32_t _metricsWarpFrames = 0;
@@ -219,41 +190,14 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsMissedDisplaySlots = 0;
     uint32_t _metricsLateInputSamples = 0;
     uint32_t _metricsLateInputApplied = 0;
-    // Steering-path distribution per second: authoritative late-camera pose +
-    // residual mouse, packet-baseline mouse, or rendered-velocity fallback.
-    // Mean age of the late-camera pose at use discriminates a laggy pose pipe.
-    uint32_t _metricsLateCamHits = 0;
-    uint32_t _metricsPacketBaseHits = 0;
-    uint32_t _metricsLateFallbacks = 0;
-    double _metricsLateCamAgeTotalMs = 0.0;
-    uint32_t _metricsLateCamAgeSamples = 0;
-    uint32_t _metricsHudComposites = 0;
     uint32_t _metricsDirectCaptures = 0;
     uint32_t _metricsCaptureNotReady = 0;
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
-    float _metricsGamePresentPaceMaxMs = 0.0f;
-
-    // 4 Hz ReprojPipe v=1 accumulators. All writers are game, capture-worker,
-    // or presenter threads, so these use relaxed atomics and are drained with
-    // exchange by the existing metrics call sites.
-    std::atomic<uint64_t> _pipePubCount { 0 }, _pipePubSkipped { 0 }, _pipePubTotalUs { 0 }, _pipePubMaxUs { 0 };
-    std::atomic<uint64_t> _pipeCaptureSetupTotalUs { 0 }, _pipeSubmitTotalUs { 0 }, _pipeAdvanceTotalUs { 0 };
-    std::atomic<uint64_t> _pipeGameSignalCount { 0 }, _pipeGameSignalTotalUs { 0 }, _pipeGameSignalMaxUs { 0 };
-    std::atomic<uint64_t> _pipeCaptureQueueHigh { 0 }, _pipeCaptureWorkerCount { 0 }, _pipeCaptureWorkerTotalUs { 0 },
-        _pipeCaptureWorkerMaxUs { 0 };
-    std::atomic<uint64_t> _pipeIsolated { 0 }, _pipeNonBlocking { 0 }, _pipeBlocking { 0 }, _pipeWorkerUiFallback { 0 },
-        _pipeComposedFallback { 0 };
-    std::atomic<uint64_t> _pipeNewWarp { 0 }, _pipeRepeatWarp { 0 }, _pipeNewBlit { 0 }, _pipeRepeatBlit { 0 };
-    std::atomic<uint64_t> _pipeDirectGateCount { 0 }, _pipeDirectGateTotalUs { 0 }, _pipeDirectGateMaxUs { 0 };
-    std::atomic<uint64_t> _pipeCapturingHigh { 0 }, _pipeFencePolls { 0 }, _pipeColorPending { 0 },
-        _pipeUiPending { 0 };
-    double _pipeMetricsTimestamp = 0.0;
 
     // Fixed 3 ms dispatch lead (presenter-only tuning constant, see
     // plans/async_simple.md): every slot wakes to dispatch its warp 3 ms before
     // the present deadline. No adaptive lead controller on the minimal path.
-    std::atomic<double> _lastLateSampleLeadMs { 4.0 }; // fixed nominal sample lead, for the 1 Hz log line
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;
@@ -303,8 +247,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     // FGHooks may raise the private real-chain count before CreateSwapchain runs.
     void SetGameBufferCount(UINT count) { _gameBufferCount = count; }
     RuntimeMetrics GetRuntimeMetrics() const;
-    ReprojTelemetrySnapshot GetTelemetrySnapshot() const { return _telemetry.GetSnapshot(); }
-    ReprojTelemetry* GetTelemetry() { return &_telemetry; }
 
     // IFGFeature_Dx12
     void* FrameGenerationContext() override final;

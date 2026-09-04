@@ -154,10 +154,12 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("lateLatchValue", dispatch)
         self.assertNotIn("WriteConstants", dispatch)
         self.assertNotIn("WaitForPresenterDeadline", dispatch)
-        # The 1 Hz log still reports a (now fixed) sample-lead value.
+        # P4: the sampLead= key is gone with the controller; the fixed lead=
+        # constant is the only lead value the 1 Hz log reports.
         log = reproj.split("void AReproj_Dx12::LogMetricsIfDue", 1)[1]
-        self.assertIn("sampLead=", log)
-        self.assertIn("_lastLateSampleLeadMs.load()", log)
+        self.assertNotIn("sampLead=", log)
+        self.assertNotIn("_lastLateSampleLeadMs", log)
+        self.assertIn("lead={:.2f}ms", log)
         # The constants themselves are gone from the class definition.
         header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
         self.assertNotIn("SAMPLE_LEAD", header)
@@ -353,7 +355,10 @@ class ReprojectionTests(unittest.TestCase):
         # never emit LOG_INFO.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        self.assertIn("late={}/{} maxDeg={:.2f} hud={}", source)
+        self.assertIn("late={}/{} maxDeg={:.2f}", source)
+        self.assertNotIn("hud=", source)
+        self.assertNotIn("sampLead=", source)
+        self.assertNotIn("ReprojPipe", source)
         self.assertNotIn("PresentVirtualFrameSync", source)
         self.assertNotIn("CopyLastFrame", source)
         self.assertNotIn("DispatchWarp", source)

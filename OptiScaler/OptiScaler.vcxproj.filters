@@ -407,9 +407,6 @@
     <ClInclude Include="framegen\reproj\ContentFrame.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="framegen\reproj\ReprojTelemetry.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="framegen\IFGFeature.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -1212,9 +1209,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\reproj\Kcd2Scaleform.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="framegen\reproj\ReprojTelemetry.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="framegen\IFGFeature.cpp">
