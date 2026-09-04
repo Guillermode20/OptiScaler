@@ -1387,17 +1387,14 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
     if (state.swapchainInteropApi == SwapchainInteropApi::None)
         Hudfix_Dx12::PresentEnd();
 
-    // Reprojection owns pacing and must not be suppressed by Reflex/XeLL's limiter
-    // selection. Its limiter applies to the real-frame cadence; the fake present is
-    // emitted by AReproj_Dx12::Present().
-    if (willPresent && IsReprojectionOutput(state.activeFgOutput))
-    {
-        const bool reprojActive = fg != nullptr && fg->IsActive() && !fg->IsPaused();
-        if (!reprojVirtualized)
-            FrameLimit::sleep(reprojActive);
-    }
-    else if (willPresent && !state.reflexLimitsFps && state.activeFgOutput != FGOutput::NoFG &&
-             !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
+    // async-simple (P1): a reprojection output never reaches FrameLimit::sleep.
+    // OptiScaler must not throttle the game thread in async timewarp — not even
+    // on the non-virtualized fallback — and sleep(true)'s fgActive half-rate
+    // rule is meaningless when source and display cadence are decoupled. The
+    // game owns source cadence; the presenter owns display cadence.
+    // Non-reprojection FG outputs keep the historical limiter path.
+    if (willPresent && !IsReprojectionOutput(state.activeFgOutput) && !state.reflexLimitsFps &&
+        state.activeFgOutput != FGOutput::NoFG && !IdentifyGpu::getPrimaryGpu().usesDxvk && !XellHooks::canLimit())
     {
         FrameLimit::sleep(fg != nullptr ? fg->IsActive() && !fg->IsPaused() : false);
     }

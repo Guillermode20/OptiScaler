@@ -9,12 +9,6 @@
 #include <atomic>
 #include <cmath>
 
-namespace
-{
-std::atomic<float> g_reprojectionSourceCapHz { 0.0f };
-std::atomic<float> g_reprojectionSourceTimingErrorMs { 0.0f };
-} // namespace
-
 inline uint64_t FrameLimit::get_timestamp()
 {
     // Monotonic QPC in nanoseconds - wall clock (GetSystemTimePreciseAsFileTime) drifts under Wine/Proton
@@ -156,91 +150,4 @@ void FrameLimit::sleepForPrecisePacingMs(double ms)
     const int64_t spinNs = State::Instance().isRunningOnLinux ? 1'000'000 : 200'000;
     if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), spinNs); res)
         LOG_ERROR("Precise pacing sleep failed: {}", res);
-}
-
-void FrameLimit::sleepForReprojectionSourceMs(double ms)
-{
-    if (ms <= 0.0)
-        return;
-
-    // On Linux/Proton waitable timer granularity easily overshoots 0.2ms by 1-3ms,
-    // which systematically pushes frames past deadline. Keep a 1ms spin window
-    // (matching sleepForPrecisePacingMs) on Linux for deadline precision.
-    const int64_t spinNs = State::Instance().isRunningOnLinux ? 1'000'000 : 200'000;
-    if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), spinNs); res)
-        LOG_ERROR("Reprojection source pacing sleep failed: {}", res);
-}
-
-void FrameLimit::paceReprojectionSource(bool active)
-{
-    struct SourcePacer
-    {
-        uint64_t nextDeadlineNs = 0;
-        float capHz = 0.0f;
-    };
-    thread_local SourcePacer pacer;
-
-    float requestedCap = 0.0f;
-    if (active)
-    {
-        requestedCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
-        if (!(std::isfinite(requestedCap) && requestedCap > 0.0f))
-            requestedCap = Config::Instance()->FramerateLimit.value_or_default();
-    }
-    float capHz = std::isfinite(requestedCap) && requestedCap > 0.0f ? requestedCap : 0.0f;
-    // Clamp absurd INI values; 1000 Hz is well above any display/present rate and keeps interval sane.
-    capHz = std::clamp(capHz, 0.0f, 1000.0f);
-    if (capHz <= 0.0f)
-    {
-        pacer = {};
-        g_reprojectionSourceCapHz.store(0.0f, std::memory_order_relaxed);
-        g_reprojectionSourceTimingErrorMs.store(0.0f, std::memory_order_relaxed);
-        return;
-    }
-
-    // Small target headroom (0.2%) ensures 60 FPS pacing completes 60 frames per second
-    // instead of letting microsecond scheduler jitter pull the measured rate down to 57-58 FPS.
-    const double targetHz = capHz > 0.0f ? static_cast<double>(capHz) * 1.002 : 0.0;
-    const uint64_t intervalNs = std::clamp(static_cast<uint64_t>(1'000'000'000.0 / targetHz), 1ULL, 100'000'000'000ULL);
-    const uint64_t nowNs = get_timestamp();
-    g_reprojectionSourceCapHz.store(capHz, std::memory_order_relaxed);
-
-    // Only reset the absolute grid on initial frame, cap change, or large stalls (> 2 intervals).
-    // Resetting on minor late frames prevents the pacer from recovering cadence and pulls
-    // sustainable 60 FPS down to 55 FPS.
-    const bool capChanged = std::abs(pacer.capHz - capHz) > 0.001f;
-    const bool stalled = pacer.nextDeadlineNs != 0 && (nowNs > pacer.nextDeadlineNs + 2 * intervalNs);
-    if (pacer.nextDeadlineNs == 0 || capChanged || stalled)
-    {
-        pacer.nextDeadlineNs = nowNs + intervalNs;
-        pacer.capHz = capHz;
-        g_reprojectionSourceTimingErrorMs.store(0.0f, std::memory_order_relaxed);
-        return;
-    }
-
-    if (nowNs >= pacer.nextDeadlineNs)
-    {
-        // Frame finished slightly behind schedule. Advance to the next slot without sleeping
-        // so the subsequent frame can recover cadence instead of drifting down to 55 FPS.
-        const float errorMs = static_cast<float>(static_cast<double>(nowNs - pacer.nextDeadlineNs) / 1'000'000.0);
-        while (pacer.nextDeadlineNs <= nowNs)
-            pacer.nextDeadlineNs += intervalNs;
-        g_reprojectionSourceTimingErrorMs.store(errorMs, std::memory_order_relaxed);
-        return;
-    }
-
-    const uint64_t deadlineNs = pacer.nextDeadlineNs;
-    sleepForReprojectionSourceMs(static_cast<double>(deadlineNs - nowNs) / 1'000'000.0);
-    const uint64_t completedNs = get_timestamp();
-    g_reprojectionSourceTimingErrorMs.store(
-        static_cast<float>(static_cast<double>(completedNs - deadlineNs) / 1'000'000.0), std::memory_order_relaxed);
-    pacer.nextDeadlineNs = deadlineNs + intervalNs;
-    if (completedNs > pacer.nextDeadlineNs - intervalNs / 4)
-        pacer.nextDeadlineNs = completedNs + intervalNs;
-}
-
-FrameLimit::SourcePacingStats FrameLimit::reprojectionSourcePacingStats()
-{
-    return { g_reprojectionSourceCapHz.load(std::memory_order_relaxed),
-             g_reprojectionSourceTimingErrorMs.load(std::memory_order_relaxed) };
 }

@@ -136,6 +136,15 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     static constexpr double SAMPLE_LEAD_REDUCE_HEADROOM_MS = 2.0; // headroom above this -> sample later
     static constexpr double SAMPLE_LEAD_GROW_HEADROOM_MS = 0.9;  // headroom below this -> sample earlier
 
+    // async-simple development stage (see plans/async_simple.md):
+    //   0 = A0: the async presenter is live but the warp shader is never
+    //       dispatched — every display slot identity-blits the newest completed
+    //       anchor. Proves the async plumbing holds the source's natural
+    //       cadence before warp cost is introduced.
+    //   >=1 = parent-branch behavior (warp enabled). P2/P3 re-map stages 1-3
+    //       onto capture / presenter / warp as the strip-down proceeds.
+    static constexpr int kAsyncSimpleStage = 0;
+
     ReprojFramePacket _packets[BUFFER_COUNT];
     std::atomic<UINT64> _publishedFrameId { 0 };
     std::atomic<UINT64> _readyFrameId { 0 };

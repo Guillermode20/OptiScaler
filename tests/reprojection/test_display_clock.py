@@ -27,29 +27,6 @@ class DisplayClock:
         self.deadline += self.period
 
 
-class SourcePacer:
-    """Model the game-thread absolute-deadline cap without platform sleeping."""
-
-    def __init__(self):
-        self.deadline = None
-        self.cap = 0.0
-
-    def publish(self, now_ms, cap_hz, active=True):
-        cap_hz = cap_hz if active and cap_hz > 0 else 0.0
-        if not cap_hz:
-            self.deadline = None
-            self.cap = 0.0
-            return None
-        period = 1000.0 / cap_hz
-        if self.deadline is None or abs(self.cap - cap_hz) > 0.001 or now_ms >= self.deadline:
-            self.deadline = now_ms + period
-            self.cap = cap_hz
-            return None
-        deadline = self.deadline
-        self.deadline += period
-        return deadline
-
-
 class ReprojectionTests(unittest.TestCase):
     def test_packet_replacement_happens_only_on_slot(self):
         clock = DisplayClock(8.0)
@@ -310,10 +287,12 @@ class ReprojectionTests(unittest.TestCase):
         # Final spin window is 1.0ms on Proton for timer granularity, 0.2ms on Windows
         self.assertIn("spinWindowMs", wait)
         frame_limit = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
-        presenter_sleep = frame_limit.split("void FrameLimit::sleepForPrecisePacingMs", 1)[1].split(
-            "void FrameLimit::paceReprojectionSource", 1)[0]
-        self.assertIn("200'000", presenter_sleep)
-        self.assertIn("spinNs", presenter_sleep)
+        # async-simple: the source pacer trio is gone; sleepForPrecisePacingMs
+        # is the only remaining precise sleeper and owns the Proton spin tail.
+        self.assertNotIn("paceReprojectionSource", frame_limit)
+        self.assertIn("void FrameLimit::sleepForPrecisePacingMs", frame_limit)
+        self.assertIn("spinNs", frame_limit)
+        self.assertIn("200'000", frame_limit)
 
     def test_completion_clock_cannot_run_away_from_present(self):
         # Wine advances frame statistics per composed output, so the presenter
@@ -354,40 +333,30 @@ class ReprojectionTests(unittest.TestCase):
             embedded = common.split(marker, 1)[1].split('\n)";', 1)[0]
             self.assertEqual(embedded.strip(), source_path.read_text(encoding="utf-8").strip())
 
-    def test_source_cap_uses_an_absolute_deadline_grid(self):
-        pacer = SourcePacer()
-        self.assertIsNone(pacer.publish(0.0, 60.0))
-        self.assertEqual(pacer.publish(5.0, 60.0), 1000 / 60)
-        # The next deadline stays on the original grid, not 5 ms after completion.
-        self.assertEqual(pacer.publish(20.0, 60.0), 2000 / 60)
-
-    def test_source_cap_resets_on_late_frame_or_setting_change(self):
-        pacer = SourcePacer()
-        pacer.publish(0.0, 60.0)
-        self.assertIsNone(pacer.publish(20.0, 60.0))  # missed 16.67 ms deadline
-        self.assertIsNone(pacer.publish(21.0, 50.0))
-        self.assertEqual(pacer.publish(25.0, 50.0), 41.0)
-
-    def test_source_cap_disable_cannot_create_a_catchup_burst(self):
-        pacer = SourcePacer()
-        pacer.publish(0.0, 60.0)
-        self.assertIsNone(pacer.publish(1000.0, 0.0, active=False))
-        self.assertIsNone(pacer.publish(1001.0, 60.0))
-
-    def test_runtime_source_pacer_is_async_virtualized_only(self):
+    def test_reproj_never_paces_the_game_thread(self):
+        # async-simple P1: every source-pacing call site is gone from the reproj
+        # path. The game thread publishes anchors and returns without OptiScaler
+        # ever sleeping or throttling it; FG_Hooks never applies the half-rate
+        # rule to a reprojection output either.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        hooks = (root / "OptiScaler/hooks/FG_Hooks.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("paceReprojectionSource", source)
+        self.assertNotIn("paceReprojectionSource", hooks)
+        self.assertNotIn("sleepForReprojectionSourceMs", source)
         publish = source.split("if (captured && submitted && advanced)", 1)[1].split(
             "// Hard publication failures", 1)[0]
-        self.assertIn("FrameLimit::paceReprojectionSource(true)", publish)
-        self.assertLess(publish.index("FrameLimit::paceReprojectionSource(true)"), publish.index("return true"))
-        self.assertIn("FrameLimit::paceReprojectionSource(false)", source)
+        # The published frame still notifies the presenter before returning.
+        self.assertIn("_presentCv.notify_one()", publish)
+        self.assertIn("return true", publish)
 
-    def test_every_paced_source_frame_is_an_anchor(self):
+    def test_every_source_frame_is_captured_without_pacing(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        # Every virtualized present publishes an anchor (no sampling skip) and
+        # none of them sleep for a source cap afterwards.
         self.assertIn("constexpr bool captureThisPresent = true", source)
-        self.assertIn("FrameLimit::paceReprojectionSource(true)", source)
+        self.assertNotIn("FrameLimit::paceReprojectionSource", source)
 
     def test_minimal_path_requires_camera_and_separate_hud(self):
         root = Path(__file__).resolve().parents[2]
@@ -480,22 +449,20 @@ class ReprojectionTests(unittest.TestCase):
         for removed in ("ReprojMode", "ReprojUseDepth", "ReprojRotationOnly", "ReprojLateLatch",
                         "ReprojNonBlockingAnchorSampling", "ReprojTelemetry"):
             self.assertNotIn(removed, config)
-        self.assertIn("ReprojSourceFramerateLimit { 60.0f }", config)
+        # async-simple: the source limit still parses but defaults to 0 (never pace).
+        self.assertIn("ReprojSourceFramerateLimit { 0.0f }", config)
 
-    def test_source_cap_does_not_burn_two_ms_of_cpu_every_frame(self):
-        # KCD2 can sustain more than 60 FPS uncapped. A full 2 ms busy tail in
-        # the cap itself takes roughly 12% of one core at 60 Hz and turns a
-        # sustainable source into a sub-60 one under load.
+    def test_source_pacer_is_fully_removed_from_frame_limit(self):
+        # async-simple P1 deleted the whole source-cap machinery:
+        # paceReprojectionSource, its sleep helper, and the stats getter no
+        # longer exist in FrameLimit. The presenter sleepers survive.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
-        pacer = source.split("void FrameLimit::paceReprojectionSource", 1)[1].split(
-            "FrameLimit::SourcePacingStats", 1)[0]
-        self.assertIn("sleepForReprojectionSourceMs", pacer)
-        source_sleep = source.split("void FrameLimit::sleepForReprojectionSourceMs", 1)[1].split(
-            "void FrameLimit::paceReprojectionSource", 1)[0]
-        self.assertIn("SOURCE_SPIN_NS = 200'000", source_sleep)
-        self.assertNotIn("isRunningOnLinux", source_sleep)
-        self.assertNotIn("combined_sleep(static_cast<int64_t>(deadlineNs - nowNs))", pacer)
+        self.assertNotIn("paceReprojectionSource", source)
+        self.assertNotIn("sleepForReprojectionSourceMs", source)
+        self.assertNotIn("SourcePacingStats", source)
+        self.assertNotIn("g_reprojectionSourceCapHz", source)
+        self.assertIn("void FrameLimit::sleepForPrecisePacingMs", source)
 
     def test_kcd2_input_yaw_uses_world_up_before_pitch(self):
         root = Path(__file__).resolve().parents[2]
@@ -508,11 +475,10 @@ class ReprojectionTests(unittest.TestCase):
         self.assertLess(composition.index("yawForward"), composition.index("latePitch"))
 
     def test_packet_exhaustion_does_not_stall_game_thread(self):
-        # The SourceFramerateLimit pacer can only delay frames, never speed
-        # them up: any game-thread wait inside Present() eats the source
-        # budget directly. Packet exhaustion must drop the anchor (the
-        # presenter keeps re-warping its active anchor) and count it,
-        # never wait on the presenter condition variable.
+        # Any game-thread wait inside Present() eats the source budget
+        # directly. Packet exhaustion must drop the anchor (the presenter
+        # keeps re-warping its active anchor) and count it, never wait on
+        # the presenter condition variable.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         present = source.split("bool AReproj_Dx12::Present()", 1)[1].split(

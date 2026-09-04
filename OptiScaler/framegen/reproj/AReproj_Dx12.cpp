@@ -19,7 +19,6 @@
 #include <Util.h>
 #include <hooks/FG_Hooks.h>
 #include <menu/menu_overlay_dx.h>
-#include <misc/FrameLimit.h>
 #include <nvapi/fakenvapi.h>
 #include <wrapped/wrapped_swapchain.h>
 #include <menu/input/input_system.h>
@@ -1114,15 +1113,14 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     RecordPipelinePublication(Util::MillisecondsNow() - presentStartMs, 0.0, submitMs, advanceMs, true);
     RecordWarpFrame(false, true, 0.0f);
     SAFE_RELEASE(gameBackBuffer);
-    const auto paceStart = Util::MillisecondsNow();
-    FrameLimit::paceReprojectionSource(true);
-    const auto paceEnd = Util::MillisecondsNow();
+    // async-simple: OptiScaler never paces the game thread. block= covers all
+    // game-present work here; pace= stays 0 (the SourceFramerateLimit pacer is gone).
+    const auto doneMs = Util::MillisecondsNow();
     std::scoped_lock metricsLock(_metricsMutex);
     ++_metricsSkippedAnchorSamples;
     _metricsGamePresentBlockMaxMs =
-        std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStartMs));
-    _metricsGamePresentPaceMaxMs = std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
-    _latestGameStallMs.store(static_cast<float>(paceStart - presentStartMs), std::memory_order_relaxed);
+        std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStartMs));
+    _latestGameStallMs.store(static_cast<float>(doneMs - presentStartMs), std::memory_order_relaxed);
 }
 
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
@@ -2530,11 +2528,8 @@ bool AReproj_Dx12::Present()
     if (virtualized)
         _wrappedSwapChain = wrapped;
 
-    // A disable, context transition, or loss of virtual ownership must discard
-    // the game-thread pacing grid. The next eligible publication starts fresh.
-    if (!virtualized || !IsActive() || IsPaused())
-        FrameLimit::paceReprojectionSource(false);
-
+    // async-simple: there is no game-thread pacing grid to discard. OptiScaler
+    // never throttles the source, whatever the virtualization/active state.
     UINT virtualBufferIndex = 0;
     ID3D12Resource* gameBackBuffer = nullptr;
     if (virtualized)
@@ -2563,7 +2558,6 @@ bool AReproj_Dx12::Present()
 
     if (_presenterState.load() == PresenterState::Failed)
     {
-        FrameLimit::paceReprojectionSource(false);
         StopAsyncPresenter();
         DrainGpuWork();
         DestroyAsyncPresenter();
@@ -2653,20 +2647,13 @@ bool AReproj_Dx12::Present()
                 std::scoped_lock metricsLock(_metricsMutex);
                 ++_metricsSkippedAnchorSamples;
             }
-            // Pace only after handing this virtual buffer back so the sleep
-            // never delays its GPU ownership transition.
-            const auto paceStart = Util::MillisecondsNow();
-            FrameLimit::paceReprojectionSource(true);
-            const auto paceEnd = Util::MillisecondsNow();
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
-            // block= covers real game-thread work only; the pacing sleep is
-            // reported separately in pace= so queue-pin costs stay visible.
+            // async-simple: no source pacing; block= covers the whole present.
+            const auto doneMs = Util::MillisecondsNow();
             _metricsGamePresentBlockMaxMs =
-                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStart));
-            _metricsGamePresentPaceMaxMs =
-                std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
-            _latestGameStallMs.store(static_cast<float>(paceStart - presentStart), std::memory_order_relaxed);
+                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            _latestGameStallMs.store(static_cast<float>(doneMs - presentStart), std::memory_order_relaxed);
             return advanced;
         }
 
@@ -2731,22 +2718,15 @@ bool AReproj_Dx12::Present()
             packet.state.store(PacketState::Ready);
             _readyFrameId.store(packet.frameId);
             _presentCv.notify_one();
-            // SourceFramerateLimit is an explicit GPU-budget contract. Honor it
-            // even when anchor sampling is non-blocking; otherwise an uncapped
-            // KCD2 render queue starves the 120 Hz presenter behind 15-27 ms of
-            // work. NonBlockingAnchorSampling controls capture frequency only.
-            const auto paceStart = Util::MillisecondsNow();
-            FrameLimit::paceReprojectionSource(true);
-            const auto paceEnd = Util::MillisecondsNow();
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
-            // block= covers real game-thread work only (capture submit,
-            // publication); the pacing sleep is reported separately in pace=.
+            // async-simple: no source pacing. The presenter owns display
+            // cadence and needs no game-thread cap; block= covers the whole
+            // present (capture submit + publication) here.
+            const auto doneMs = Util::MillisecondsNow();
             _metricsGamePresentBlockMaxMs =
-                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(paceStart - presentStart));
-            _metricsGamePresentPaceMaxMs =
-                std::max(_metricsGamePresentPaceMaxMs, static_cast<float>(paceEnd - paceStart));
-            _latestGameStallMs.store(static_cast<float>(paceStart - presentStart), std::memory_order_relaxed);
+                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            _latestGameStallMs.store(static_cast<float>(doneMs - presentStart), std::memory_order_relaxed);
             return true;
         }
 
@@ -2792,7 +2772,6 @@ bool AReproj_Dx12::Present()
     // Synchronous path.  With virtualization the game source is copied to the real
     // anchor while the worker is stopped; otherwise retain the legacy raw-buffer path.
     RecordRealFrame();
-    FrameLimit::paceReprojectionSource(false);
     HRESULT realResult = E_FAIL;
     if (virtualized)
     {

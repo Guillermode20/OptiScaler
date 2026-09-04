@@ -680,14 +680,15 @@ ReprojTelemetrySnapshot ReprojTelemetry::Publish(int64_t nowQpc, uint32_t legacy
     snap.sourceRatioP95 = Percentile(ratios, nRatio, 0.95);
     snap.poseIntervalP50 = Percentile(poseIntervals, nPoseInterval, 0.50);
     snap.poseIntervalP95 = Percentile(poseIntervals, nPoseInterval, 0.95);
-    const auto sourcePacing = FrameLimit::reprojectionSourcePacingStats();
-    snap.sourceCapHz = sourcePacing.capHz;
-    snap.sourceCapTimingErrorMs = sourcePacing.timingErrorMs;
+    // async-simple: source pacing removed; the game thread is never throttled,
+    // so no active cap exists to report.
+    snap.sourceCapHz = 0.0f;
+    snap.sourceCapTimingErrorMs = 0.0f;
     const auto requestedSourceCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
     snap.sourceCapRequestedHz = std::isfinite(requestedSourceCap) && requestedSourceCap > 0.0f
                                     ? std::clamp(requestedSourceCap, 0.0f, 1000.0f)
                                     : 0.0f;
-    snap.sourceCapActive = sourcePacing.capHz > 0.0f;
+    snap.sourceCapActive = false;
     snap.anchorAgeP50 = Percentile(anchorAges, nAge, 0.50);
     snap.anchorAgeP95 = Percentile(anchorAges, nAge, 0.95);
     snap.anchorAgeMax = Percentile(anchorAges, nAge, 1.0);

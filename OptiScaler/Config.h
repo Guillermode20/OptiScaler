@@ -613,7 +613,7 @@ class Config
     // then the unwarped HUD is composited. Keep this surface deliberately small.
     CustomOptional<bool> ReprojEnabled { true };
     CustomOptional<float> ReprojTargetRefresh { 0.0f };         // 0 = active display refresh
-    CustomOptional<float> ReprojSourceFramerateLimit { 60.0f }; // pace only the virtualized game thread
+    CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // async-simple: 0 = never pace the game thread
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojSmoothing { 0.25f };            // EMA filter on camera angular velocity (0=off)

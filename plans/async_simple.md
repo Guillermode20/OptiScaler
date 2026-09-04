@@ -1,9 +1,20 @@
 # async-simple: Brutally Minimal Async Timewarp Baseline
 
 > **Branch:** `async-simple` (created from `async-timewarp` @ `b6668d95`).
-> **Status:** implementation plan only — no runtime code has changed yet.
 > **Reference:** keep `async-timewarp` untouched; it is the machinery museum this
 > branch strips from. Every line/function name below is from `b6668d95`.
+
+## Implementation status
+
+- **P1 (pacing removal + A0 gate): landed.** The reproj game thread is never paced:
+  every `paceReprojectionSource` call site in `AReproj_Dx12.cpp` is gone along with
+  the `FrameLimit` pacer itself (`sleepForReprojectionSourceMs`, `SourcePacingStats`,
+  `reprojectionSourcePacingStats`); `FG_Hooks` never lets a reprojection output reach
+  `FrameLimit::sleep`, so the fgActive half-rate rule cannot apply; `ReprojSourceFramerateLimit`
+  defaults to `0` (INI `SourceFramerateLimit=0`); and `kAsyncSimpleStage = 0` implements the
+  A0 identity stage below (presenter live, warp shader never dispatched). `ReprojTelemetry`
+  reports no active source cap. Test pins updated (`tests/reprojection/test_display_clock.py`).
+- **P2+ (FrameSlot[3] single-queue capture, slim presenter): not started.**
 
 ## 1. Goal
 
@@ -226,7 +237,7 @@ uncommitted hacks:
 
 | Stage | What runs | Acceptance |
 |-------|-----------|------------|
-| **A0** (`0`) | Async presenter live, virtualization on, but the presenter **blits** the anchor (no warp dispatch) and capture is disabled (re-present virtual frame). Effectively vanilla cadence through the new plumbing. | Source FPS identical to reproj-off in the same scene (±1 FPS); no new `block`; toggle-off/on clean. |
+| **A0** (`0`) | Async presenter live, virtualization on, but the warp shader is **never dispatched** — every display slot identity-blits the newest completed anchor (capture still runs; it is the blit's source). Zero warp cost through the async plumbing. | Source FPS identical to reproj-off in the same scene (±1 FPS); no new `block`; toggle-off/on clean. |
 | **A1** (`1`) | + capture (one copy per game present on game DIRECT queue). | Still identical source FPS; `block` ≤ ~1 ms over the A0 value; no dropped anchors. |
 | **A2** (`2`) | + presenter owns the real swapchain at display cadence (blit outputs, no warp). | Display at target (~118–120); source untouched; no missed-slot bursts; alt-tab in/out clean. |
 | **A3** (`3`) | + rotation warp on every output. | 60→120 cadence, `missed` < 2/s steady, `new`≈`repeat`, late-rotations sane while turning; **then** start judging warp feel. |

@@ -870,8 +870,11 @@ void AReproj_Dx12::PresenterMain()
         const bool repeatWarp =
             Config::Instance()->ReprojRepeatWarp.value_or_default() &&
             !_repeatWarpShed.load(std::memory_order_relaxed);
+        // A0 (kAsyncSimpleStage == 0): never dispatch the warp shader. Every
+        // slot identity-blits the newest completed anchor so the source cadence
+        // can be measured with zero warp cost (see plans/async_simple.md).
         const bool shouldWarp =
-            packet.warpAllowed && !focusLost && (newContent || repeatWarp);
+            kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost && (newContent || repeatWarp);
         // Latency pass: composite the newest completed UI. The new anchor's own
         // UI copy trails its color copy by a few ms, so the first display of a
         // new anchor borrows the held previous anchor's UI (16 ms stale is
