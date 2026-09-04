@@ -666,8 +666,6 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
     // assumes infinite depth. Depth-corrected warping was prototyped (v10.0.1
     // pre24/25) and removed: it regressed feel and needs footage tuning that
     // is not available. Do not re-add without a validation plan.
-    constants.targetPosition[3] = 0.0f;
-
     const auto sourceRight = NormalizeReprojVec3(LoadReprojVec3(constants.cameraRight));
     const auto sourceUp = NormalizeReprojVec3(LoadReprojVec3(constants.cameraUp));
     const auto sourceForward = NormalizeReprojVec3(LoadReprojVec3(constants.cameraForward));
@@ -940,14 +938,11 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.jitterY = _jitterY[fIndex];
     cb.invertMV = 0;
     cb.jitterCancelled = 0;
-    cb.invertedDepth = IsInvertedDepth() ? 1 : 0;
     cb.mode = 2;
     cb.debugView = 0;
     cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
-    cb.cameraNear = _cameraNear[fIndex];
-    cb.cameraFar = _cameraFar[fIndex];
 
     std::memcpy(cb.cameraPosition, _cameraPosition[fIndex], 3 * sizeof(float));
     std::memcpy(cb.cameraUp, _cameraUp[fIndex], 3 * sizeof(float));
@@ -1158,15 +1153,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         }
     }
 
-    // Depth is only consumed by mode-1 translation (ReprojDepthEnabled). When it is off
-    // (the default) skip the full-resolution depth copy entirely: one less copy per anchor,
-    // no retained depth texture, no wasted COPY bandwidth on every source frame.
-    const bool wantDepthCapture = Config::Instance()->ReprojDepthEnabled.value_or_default();
-    if (!wantDepthCapture)
-    {
-        SAFE_RELEASE(packet.depth);
-        packet.depthWidth = packet.depthHeight = 0;
-    }
     // PollCaptureAllocator(packetIndex) // kept for test invariant (see CaptureAllocatorReady)
     // packet.constants.mode = 2 // rotation-only fallback literal for test invariant
     // Prefer the dedicated capture queue (overlap) otherwise fallback to game DIRECT UI list.
@@ -1188,9 +1174,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         // MarkFrameCaptured) or the composed game backbuffer (fenced via the
         // handoff fence) — the submit moves to the capture worker so the
         // per-frame COPY-queue ops leave the game's present thread. The generic
-        // upscaler-resource path (DRG-style) and depth capture stay inline;
+        // upscaler-resource path (DRG-style) stays inline;
         // their source lifetimes are not pinned the same way.
-        const bool workerSafe = !wantDepthCapture && (usingKcd2Isolation || color == gameBackBuffer);
+        const bool workerSafe = usingKcd2Isolation || color == gameBackBuffer;
         captureViaWorker = workerSafe;
         if (workerSafe)
         {
@@ -1248,35 +1234,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                                                 packet.colorState, L"Reproj_PacketColor");
                     }
                 }
-                // Depth capture (optional, fail-open) — skipped unless depth mode is enabled.
-                if (ok && wantDepthCapture)
-                {
-                    auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
-                    if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) &&
-                        depthRes->GetResource() != nullptr)
-                    {
-                        auto* d = depthRes->GetResource();
-                        auto ds = depthRes->state;
-                        bool dOk = CopyPacketResource(capList, d, ds, &packet.depth, packet.depthState,
-                                                      L"Reproj_PacketDepth");
-                        if (dOk && packet.depth != nullptr)
-                        {
-                            auto dd = packet.depth->GetDesc();
-                            packet.depthWidth = static_cast<uint32_t>(dd.Width);
-                            packet.depthHeight = dd.Height;
-                        }
-                        else
-                        {
-                            SAFE_RELEASE(packet.depth);
-                            packet.depthWidth = packet.depthHeight = 0;
-                        }
-                    }
-                    else
-                    {
-                        SAFE_RELEASE(packet.depth);
-                        packet.depthWidth = packet.depthHeight = 0;
-                    }
-                }
                 usedCaptureQueue = true;
             }
         }
@@ -1295,32 +1252,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                 LOG_WARN("Reproj: UI capture failed; using the composed game frame for this packet");
                 ok = CopyPacketResource(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, &packet.color,
                                         packet.colorState, L"Reproj_PacketColor");
-            }
-        }
-        if (ok && wantDepthCapture)
-        {
-            auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
-            if (depthRes && IsResourceReady(FG_ResourceType::Depth, sourceIndex) && depthRes->GetResource() != nullptr)
-            {
-                auto* d = depthRes->GetResource();
-                auto ds = depthRes->state;
-                bool dOk = CopyPacketResource(cmdList, d, ds, &packet.depth, packet.depthState, L"Reproj_PacketDepth");
-                if (dOk && packet.depth != nullptr)
-                {
-                    auto dd = packet.depth->GetDesc();
-                    packet.depthWidth = static_cast<uint32_t>(dd.Width);
-                    packet.depthHeight = dd.Height;
-                }
-                else
-                {
-                    SAFE_RELEASE(packet.depth);
-                    packet.depthWidth = packet.depthHeight = 0;
-                }
-            }
-            else
-            {
-                SAFE_RELEASE(packet.depth);
-                packet.depthWidth = packet.depthHeight = 0;
             }
         }
     }
@@ -1417,53 +1348,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                 }
             }
         }
-        // Choose mode: depth-corrected (1) when enabled, depth captured, and projection sane; else rotation-only (2).
-        bool depthSane = packet.depth != nullptr && packet.depthWidth > 0 && packet.constants.cameraNear > 0.0f &&
-                         packet.constants.cameraFar > packet.constants.cameraNear &&
-                         packet.constants.cameraVFov > 0.01f;
-        bool wantDepth = Config::Instance()->ReprojDepthEnabled.value_or_default() && depthSane;
-        // Translation magnitude gate: tiny translations (<1cm) stay rotation-only to avoid depth noise.
-        if (wantDepth)
-        {
-            float dx = packet.constants.cameraPosition[0] - packet.constants.prevCameraPosition[0];
-            float dy = packet.constants.cameraPosition[1] - packet.constants.prevCameraPosition[1];
-            float dz = packet.constants.cameraPosition[2] - packet.constants.prevCameraPosition[2];
-            float tr = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (tr < 0.005f)
-                wantDepth = false;
-        }
-        packet.constants.mode = wantDepth ? 1u : 2u;
-        packet.constants.depthWidth = packet.depthWidth;
-        packet.constants.depthHeight = packet.depthHeight;
-        packet.constants.invertedDepth = IsInvertedDepth() ? 1u : 0u;
-        // Populate TargetPosition/Right/Up/Forward from current pose (used as reprojection target when depth corrects).
-        // Apply bob attenuation: reduce high-frequency vertical translation.
-        {
-            float damp = Config::Instance()->ReprojBobDampen.value_or_default();
-            damp = std::clamp(damp, 0.0f, 1.0f);
-            // attenuate world-Z component of deltaPos (KCD2 world-up is Z)
-            float rawDx = packet.constants.cameraPosition[0] - packet.constants.prevCameraPosition[0];
-            float rawDy = packet.constants.cameraPosition[1] - packet.constants.prevCameraPosition[1];
-            float rawDz = packet.constants.cameraPosition[2] - packet.constants.prevCameraPosition[2];
-            // simple: scale Z delta by damp (0.35 default -> 35% vertical).
-            float adjDz = rawDz * (damp < 0.01f ? 0.35f : damp);
-            packet.constants.targetPosition[0] = packet.constants.prevCameraPosition[0] + rawDx;
-            packet.constants.targetPosition[1] = packet.constants.prevCameraPosition[1] + rawDy;
-            packet.constants.targetPosition[2] = packet.constants.prevCameraPosition[2] + adjDz;
-            packet.constants.targetPosition[3] = 0.0f;
-            std::memcpy(packet.constants.targetRight, packet.constants.cameraRight,
-                        sizeof(packet.constants.targetRight));
-            std::memcpy(packet.constants.targetUp, packet.constants.cameraUp, sizeof(packet.constants.targetUp));
-            std::memcpy(packet.constants.targetForward, packet.constants.cameraForward,
-                        sizeof(packet.constants.targetForward));
-            // Track translation magnitude for telemetry
-            float tr2 = std::sqrt(rawDx * rawDx + rawDy * rawDy + adjDz * adjDz) * 100.0f;
-            {
-                std::scoped_lock lk(_metricsMutex);
-                _metricsTxCmTotal += tr2;
-                ++_metricsTxSamples;
-            }
-        }
+        packet.constants.mode = 2;
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     Kcd2Camera::Snapshot currentCamera {};
@@ -1471,21 +1356,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     const bool haveKcd2Snapshots =
         Kcd2Camera::ReadSnapshots(currentCamera, previousCamera) && currentCamera.timestampMs == kcd2CameraTimestamp;
     packet.sourceCutGeneration = haveKcd2Snapshots ? currentCamera.cutGeneration : 0;
-    // Rate-limited raw CCamera projection dump: lets a live session confirm the near/far field
-    // mapping (stock CryEngine layout assumed) against in-game view distance before depth mode
-    // is enabled. Values also land in telemetry slots via packet.constants.cameraNear/Far.
-    if (false)
-    {
-        static double lastProjectionLogMs = 0.0;
-        const auto nowLogMs = Util::MillisecondsNow();
-        if (nowLogMs - lastProjectionLogMs > 10000.0)
-        {
-            lastProjectionLogMs = nowLogMs;
-            char projectionDescription[256];
-            if (Kcd2Camera::DescribeProjection(projectionDescription, sizeof(projectionDescription)))
-                LOG_INFO("KCD2 camera projection: {}", projectionDescription);
-        }
-    }
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.
@@ -1564,9 +1434,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         {
             std::scoped_lock lock(_metricsMutex);
             ++_metricsDirectCaptures;
-            ++_metricsCaptureDepth;
-            if (packet.depth)
-                ++_metricsDepthWarps;
         }
     }
     else
@@ -1943,8 +1810,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, float 
             PrepareRotationConstants(constants, false);
     }
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
-                                    outputIndex, deferredLateLatch, uiPacket.ui, uiPacket.uiState, packet.depth,
-                                    packet.depthState);
+                                    outputIndex, deferredLateLatch, uiPacket.ui, uiPacket.uiState);
     if (!ok)
     {
         backBuffer->Release();
@@ -2464,7 +2330,6 @@ bool AReproj_Dx12::Present()
     _lastDispatchedFrame = _frameCount;
     constexpr bool captureThisPresent = true;
     float poseAge = 0.0f;
-    constexpr bool useDepth = false;
     constexpr bool needsCameraPose = true;
     const int prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
     // Distinguish "camera data never arrived" (fall back to the MV warp, which both
@@ -2476,7 +2341,6 @@ bool AReproj_Dx12::Present()
     const bool focused = OptiInput::IsFocused();
     {
         std::scoped_lock lock(_metricsMutex);
-        _runtimeMetrics.depthReady = useDepth;
         _runtimeMetrics.anchorStale = cameraAvailable && !poseFresh;
         _runtimeMetrics.focusLost = !focused;
         _runtimeMetrics.rotationOnly = true;
@@ -2848,8 +2712,6 @@ void AReproj_Dx12::Deactivate()
             pkt.hasCamera = false;
             pkt.hasUi = false;
             pkt.warpAllowed = false;
-            pkt.depthWidth = 0;
-            pkt.depthHeight = 0;
         }
     }
     _publishedFrameId.store(0);
@@ -3538,16 +3400,12 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_warpOutput[i]);
         SAFE_RELEASE(_packets[i].color);
         SAFE_RELEASE(_packets[i].ui);
-        SAFE_RELEASE(_packets[i].depth);
 
         _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
         _syncHasUi[i] = false;
         _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].uiState = D3D12_RESOURCE_STATE_COMMON;
-        _packets[i].depthState = D3D12_RESOURCE_STATE_COMMON;
-        _packets[i].depthWidth = 0;
-        _packets[i].depthHeight = 0;
         _packets[i].captureFenceValue = 0;
         _packets[i].completionFence = nullptr;
         _packets[i].completionFenceValue = 0;

@@ -617,11 +617,6 @@ class Config
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojSmoothing { 0.25f };            // EMA filter on camera angular velocity (0=off)
-    CustomOptional<bool> ReprojDepthEnabled {
-        false
-    }; // depth-corrected translation for hills (mode 1) - disabled until depth validated
-    CustomOptional<float> ReprojBobDampen { 0.35f };  // vertical bob attenuation for walking (0-1, 1=off)
-    CustomOptional<float> ReprojDepthScale { 1.0f };  // debug scale for depth warp blend
     CustomOptional<bool> ReprojHudIsolation { true }; // separate Scaleform HUD from 3D world (KCD2)
     CustomOptional<bool> ReprojAllowComposedWarp {
         false

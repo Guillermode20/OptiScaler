@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.41 (2026-09-04)
+* Reproj: remove depth capture path and protect source frame budget
+
 ## v10.0.1.40 (2026-09-04)
 * Remove swap-smooth color blend (v37 PrevColor t3 SRV): it sampled the held previous anchor's image with the CURRENT anchor's baked homography, so during camera motion the previous frame was misaligned by the full inter-anchor rotation - a visible ghost/double when looking around (first runnable build carrying it was v39; v37/v38 crashed at startup). UI borrow (held previous anchor's UI on the first slot of a new anchor) is unchanged; the 4th SRV/root-signature entry and the blend block are gone from both shader copies and the CSO is regenerated.
 

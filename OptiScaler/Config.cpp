@@ -188,9 +188,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojMouseSensitivityX.set_from_config(readFloat("AsyncTimewarp", "MouseSensitivityX"));
             ReprojMouseSensitivityY.set_from_config(readFloat("AsyncTimewarp", "MouseSensitivityY"));
             ReprojSmoothing.set_from_config(readFloat("AsyncTimewarp", "Smoothing"));
-            ReprojDepthEnabled.set_from_config(readBool("AsyncTimewarp", "DepthEnabled"));
-            ReprojBobDampen.set_from_config(readFloat("AsyncTimewarp", "BobDampen"));
-            ReprojDepthScale.set_from_config(readFloat("AsyncTimewarp", "DepthScale"));
             ReprojHudIsolation.set_from_config(readBool("AsyncTimewarp", "HudIsolation"));
             ReprojAllowComposedWarp.set_from_config(readBool("AsyncTimewarp", "AllowComposedWarp"));
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
@@ -1027,12 +1024,6 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojMouseSensitivityY.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "Smoothing",
                      GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "DepthEnabled",
-                     GetBoolValue(Instance()->ReprojDepthEnabled.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "BobDampen",
-                     GetFloatValue(Instance()->ReprojBobDampen.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "DepthScale",
-                     GetFloatValue(Instance()->ReprojDepthScale.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "HudIsolation",
                      GetBoolValue(Instance()->ReprojHudIsolation.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "AllowComposedWarp",

@@ -322,21 +322,13 @@ double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* p
     std::memcpy(constants.prevCameraUp, previous.up, sizeof(previous.up));
     std::memcpy(constants.prevCameraForward, previous.forward, sizeof(previous.forward));
     constants.cameraVFov = current.verticalFov;
-    // Live-validated: near = near-edge y @0x54, far = far-edge y @0x6C (see tail@68 dump).
-    // Aspect: the game's own pixel-aspect field (+0x40); the w/h ints at +0x34/38 are
+    // The game's own pixel-aspect field (+0x40); the w/h ints at +0x34/38 are
     // repurposed in KCD2 and must not be used.
     const auto pixAspect = current.projectionRaw[4];
     if (std::isfinite(pixAspect) && pixAspect > 0.5f && pixAspect < 4.0f)
         constants.cameraAspect = pixAspect;
     else
         constants.cameraAspect = fallbackAspect;
-    const float nearCandidate = current.projectionRaw[9]; // near-edge y @ +0x54
-    if (std::isfinite(nearCandidate) && nearCandidate > 0.0f && nearCandidate < 100.0f)
-        constants.cameraNear = nearCandidate;
-    const float farCandidate = current.projectionRaw[15]; // far-edge y @ +0x6C (=8000 in 1.5.6)
-    if (std::isfinite(farCandidate) && farCandidate > 100.0f && farCandidate < 200000.0f &&
-        farCandidate > constants.cameraNear)
-        constants.cameraFar = farCandidate;
     // Optional EMA smoothing on angular velocity to counter pose jitter. 0=off.
     // Smoothed delta replaces the raw (current-previous) used for extrapolation, so
     // high-frequency shake is attenuated at the cost of a few ms of lag.

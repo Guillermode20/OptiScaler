@@ -4162,17 +4162,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::SliderFloat("Smoothing##reproj-live", &smooth, 0.0f, 0.95f, "%.2f"))
             config->ReprojSmoothing = std::clamp(smooth, 0.0f, 0.95f);
         ShowHelpMarker("EMA on KCD2 camera angular velocity. 0=off. 0.25 default.");
-        bool depthOn = config->ReprojDepthEnabled.value_or_default();
-        if (ImGui::Checkbox("Depth correct hills##reproj-live", &depthOn))
-            config->ReprojDepthEnabled = depthOn;
-        ShowHelpMarker("Mode 1: depth-reprojects translation for walking/hills. Falls back to rotation when depth "
-                       "missing or <5mm move. Disabled until validated -> rotation-only.");
-        float bob = config->ReprojBobDampen.value_or_default();
-        if (ImGui::SliderFloat("Bob dampen Z##reproj-live", &bob, 0.0f, 1.0f, "%.2f"))
-            config->ReprojBobDampen = std::clamp(bob, 0.0f, 1.0f);
-        ShowHelpMarker(
-            "Attenuates head-bob vertical (world Z) translation. 0.35 default, 1.0=off, 0.0=freeze vertical.");
-
         bool hudIso = config->ReprojHudIsolation.value_or_default();
         if (ImGui::Checkbox("HUD Isolation (KCD2)##reproj-live", &hudIso))
             config->ReprojHudIsolation = hudIso;
@@ -4219,9 +4208,8 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {
             auto m = reproj->GetRuntimeMetrics();
-            const char* modeStr = config->ReprojDepthEnabled.value_or_default() ? "depth(when depth sane)" : "rotation";
             ImGui::Separator();
-            ImGui::TextDisabled("poseAge %.1f ms | capWait %u | %s", m.poseAgeMs, m.captureNotReady, modeStr);
+            ImGui::TextDisabled("poseAge %.1f ms | capWait %u | rotation", m.poseAgeMs, m.captureNotReady);
         }
     }
 

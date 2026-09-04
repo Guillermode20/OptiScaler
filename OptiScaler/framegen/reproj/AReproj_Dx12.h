@@ -30,7 +30,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         uint32_t warpsPerReal = 0;
         uint32_t droppedWarps = 0;
         uint32_t queueDepth = 0;
-        bool depthReady = false;
         bool anchorStale = false;
         bool focusLost = false;
         bool rotationOnly = false;
@@ -170,7 +169,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT64 _computeAllocatorFenceValues[BUFFER_COUNT] = {};
 
     // Anchor capture runs on a dedicated COPY queue (fallback: game DIRECT) so
-    // the color/UI/depth copies overlap rendering instead of extending the
+    // the color/UI copies overlap rendering instead of extending the
     // game's frame. _captureInputFence orders DIRECT producers before COPY;
     // _captureFence tracks COPY completion for packet readiness. Keeping the
     // fence timelines separate prevents a later DIRECT signal from falsely
@@ -201,8 +200,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     int _captureWorkPending[BUFFER_COUNT] = {};
     int _captureWorkCount = 0;
     bool _captureWorkStop = false;
-    uint32_t _metricsCaptureDepth = 0;
-    uint32_t _metricsDepthWarps = 0;
     float _metricsTxCmTotal = 0.0f;
     uint32_t _metricsTxSamples = 0;
     uint32_t _metricsUiBorrows = 0; // slots that composited the held previous anchor's UI
