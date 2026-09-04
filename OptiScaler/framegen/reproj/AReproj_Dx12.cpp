@@ -2635,9 +2635,13 @@ bool AReproj_Dx12::Present()
         // isolated-HUD path: reuse need not wait for copies that only read the
         // separate HUD-less/UI resources.
         auto* captureFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
-        auto* handoffFence = packet.handoffFence != nullptr ? packet.handoffFence : captureFence;
-        const auto handoffFenceValue =
-            packet.handoffFenceValue != 0 ? packet.handoffFenceValue : packet.captureFenceValue;
+        // CaptureFramePacket deliberately clears both handoff fields for an
+        // isolated HUD-less/UI capture: COPY never reads the virtual game
+        // backbuffer, so ring reuse must not wait for its fence. Do not fall
+        // back to completionFence/captureFenceValue here; that silently turns
+        // the non-blocking path back into ownership back-pressure.
+        auto* handoffFence = packet.handoffFence;
+        const auto handoffFenceValue = packet.handoffFenceValue;
         const auto submitStartMs = Util::MillisecondsNow();
         const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence,
                                                                                        handoffFenceValue));
