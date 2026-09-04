@@ -14,9 +14,11 @@
 /// Async reprojection (ASW-style) FG output.
 /// See AsyncReprojection.md for the full design.
 ///
-/// Virtualizes the game-visible backbuffers when async mode is available.  The game
-/// renders only into private textures while the worker exclusively presents the real
-/// DXGI swapchain.  The synchronous fallback retains the same ownership boundary.
+/// Virtualizes the game-visible backbuffers when async mode is available. The game
+/// renders into virtual backbuffers while the presenter thread exclusively presents
+/// the real DXGI swapchain. There is no synchronous generated-frame fallback: when
+/// the presenter is stopped, the game's frame is blitted to the real chain unchanged
+/// (async-simple).
 class AReproj_Dx12 : public virtual IFGFeature_Dx12
 {
   public:
@@ -83,17 +85,11 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         double sourceMouseTimestamp = 0.0;
         bool inputLatchReady = false;
         bool hasCamera = false;
-        bool hasUi = false;
         bool warpAllowed = false;
         std::atomic<PacketState> state { PacketState::Free };
     };
 
     std::unique_ptr<RP_Dx12> _warp;                // the reprojection pass (v1/v2 PSOs)
-    ID3D12Resource* _lastColor[BUFFER_COUNT] = {}; // copy of the last presented real frame
-    D3D12_RESOURCE_STATES _lastColorState[BUFFER_COUNT] = {};
-    ID3D12Resource* _uiColor[BUFFER_COUNT] = {}; // sync-path UI capture composited after warping
-    D3D12_RESOURCE_STATES _uiColorState[BUFFER_COUNT] = {};
-    bool _syncHasUi[BUFFER_COUNT] = {};
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
     bool _forceBorderless = false;
 
@@ -148,22 +144,18 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
     UINT64 _scFenceValue = 0;  // monotonic SC fence value (fence outlives context recreate)
 
-    bool CopyLastFrame(int fIndex, ID3D12Resource* source);
     static DXGI_FORMAT NormalizeReprojFormat(DXGI_FORMAT format);
     bool VirtualAnchorReady() const;
-    HRESULT PresentVirtualFrameSync(int fIndex, ID3D12Resource* source, UINT virtualBufferIndex, UINT syncInterval,
-                                    UINT flags, bool allowWarps);
-    bool DispatchWarp(int fIndex, float timeStep); // _lastColor[fIndex] rotation warp -> current backbuffer
+    bool BlitGameFrameToReal(int fIndex, ID3D12Resource* gameBackBuffer); // presenter-stopped passthrough copy
     bool CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                             bool warpAllowed);
     bool CaptureAllocatorReady(int packetIndex); // game thread: non-blocking UI-allocator poll, never waits
     bool PollCaptureAllocator(int packetIndex) { return CaptureAllocatorReady(packetIndex); }
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
-    bool DispatchPacketWarp(int packetIndex, int uiPacketIndex, float timeStep, double scanoutDeadlineMs = 0.0,
+    bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
                             uint32_t telemetryQueryStart = UINT32_MAX);
-    bool DisplayPacket(int packetIndex, bool composeUi, int uiPacketIndex = -1,
-                       uint32_t telemetryQueryStart = UINT32_MAX);
+    bool DisplayPacket(int packetIndex, uint32_t telemetryQueryStart = UINT32_MAX);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);

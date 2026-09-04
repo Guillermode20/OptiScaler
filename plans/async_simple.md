@@ -29,12 +29,21 @@
   `_metricsUiBorrows`) and hitch hold (`_metricsHitchHolds`) are gone — on a real switch the
   previous anchor retires immediately. The dispatch lead is the fixed `kDispatchLeadMs =
   3.0` constant (the `_dispatchLeadMs` adaptive controller is deleted); the 1 Hz log dropped
-  its `uiBorrow=`/`hold=`/`shed=`/`stallEma=` keys and `lead=` prints the constant. Parser
+  its `uiBorrow=`/`hold=`/`shed=`/`stallEma=` keys and `lead=` prints the constant.  Parser
   tests pinned the deletions (shed/borrow tests inverted to absence); 35/35 pass.
-  **Remaining P3.3/P3.5** — `DisplayPacket` RUI/query drop and the sync-fallback
-  (`PresentVirtualFrameSync`/`CopyLastFrame`/`DispatchWarp`/`_lastColor`/`_uiColor`)
-  deletion — are still open; warps stay gated behind `kAsyncSimpleStage` (0 = blit) until a
-  CI + KCD2 pass validates this queue model.
+- **P3.5 (sync-fallback deletion): landed.** `PresentVirtualFrameSync`, `CopyLastFrame`,
+  `DispatchWarp`, and the sync arrays (`_lastColor`/`_uiColor`/`_syncHasUi`/`_syncFence`)
+  are deleted; `_renderUI` is never created by AReproj (RUI composite + the vestigial UI
+  packet param are gone from `DisplayPacket`/`DispatchPacketWarp`). `Present()`'s inactive /
+  paused / failed / non-virtualized paths are plain passthrough: presenter stopped, one
+  same-queue `BlitGameFrameToReal` (virtual buffer → real backbuffer on the game DIRECT
+  queue) when virtualization is up, then `PresentFrame`. No generated frame is ever
+  presented. `_warpOutput` is kept. Parser tests re-pinned (sync-fallback pins inverted to
+  absence, dispatch split re-anchored at `DrainGpuWork`); 35/35 pass.
+
+  **P3 complete** — the runtime is Capture (one DIRECT UI list) + FrameSlot[3] + Presenter
+  (one DIRECT SC queue, one warp shader, one `_scFence`). Warps stay gated behind
+  `kAsyncSimpleStage` (0 = blit) until a CI + KCD2 pass validates this queue model.
 
 ## 1. Goal
 
@@ -334,8 +343,9 @@ remain (DisplayPacket RUI/query drop; sync-fallback deletion) and do not change 
    `SAMPLE_LEAD_*` adaptive-lead constants, `_lateSampleLeadMs`, and the `_lateLatchFence`
    creation/release sites. `ApplyLateInput` still runs inline at dispatch (parent DIRECT
    behavior); the raw-input pump is untouched.
-3. ⬜ `DisplayPacket`: drop RUI composite and telemetry queries — copy `packet.color` → real
-   backbuffer on the same SC list; used only when warping is disallowed.
+3. ✅ `DisplayPacket`: drop RUI composite + UI packet param — copy `packet.color` → real
+   backbuffer on the same SC list; used only when warping is disallowed. (Telemetry
+   timestamp-query writes remain until P4.)
 4. ✅ `PresenterMain`: delete `EvaluateRepeatWarpShed` call/state, ui-borrow selection, hitch
    hold, adaptive lead updates. Fixed lead 3 ms (`kDispatchLeadMs`); always-warp repeats;
    select newest READY packet whose capture value completed, else reuse active; retire
@@ -343,10 +353,11 @@ remain (DisplayPacket RUI/query drop; sync-fallback deletion) and do not change 
    watchdog, completion clock, `WaitForPresentSlot`, `PresentCompositorFrame` (minus
    waitable double-wait subtleties). The 1 Hz `Reproj:` line lost its
    `uiBorrow=`/`hold=`/`shed=`/`stallEma=` keys here (P4 trims the rest).
-5. ⬜ Delete the sync-fallback block: `PresentVirtualFrameSync`, `CopyLastFrame`,
-   `DispatchWarp`, `_lastColor`/`_uiColor`/`_syncHasUi` sync arrays (keep `_warpOutput`
+5. ✅ Delete the sync-fallback block: `PresentVirtualFrameSync`, `CopyLastFrame`,
+   `DispatchWarp`, `_lastColor`/`_uiColor`/`_syncHasUi` sync arrays (kept `_warpOutput`
    per-output), RUI `_renderUI` creation, and their use in `Present()`. Non-virtualized /
-   presenter-failed ⇒ `PresentFrame` passthrough + `_asyncDowngraded`.
+   presenter-failed ⇒ `PresentFrame` passthrough + `_asyncDowngraded` + one
+   `BlitGameFrameToReal` same-queue copy when virtualization is up.
 
 ### P4 — Trim telemetry to the 1 Hz line (A2/A3)
 

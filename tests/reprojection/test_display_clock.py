@@ -286,15 +286,17 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
         dispatch = source.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
-            "bool AReproj_Dx12::DispatchWarp", 1)[0]
-        # UI comes from the newest completed UI packet (own or the held previous).
-        self.assertIn("uiPacket.ui, uiPacket.uiState", dispatch)
-        # The warp is a single SC-list dispatch on _presentQueue.
+            "bool AReproj_Dx12::DrainGpuWork", 1)[0]
+        # The warp is a single SC-list dispatch on _presentQueue (no UI packet —
+        # the captured frame is composed, so the warp dispatches ui == nullptr).
         self.assertIn("GetSCCommandList(outputIndex)", dispatch)
         self.assertIn("SubmitSCCommandList(outputIndex)", dispatch)
         self.assertIn("_scAllocatorFenceValues[outputIndex] = ++_scFenceValue;", dispatch)
         self.assertIn("packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];", dispatch)
+        self.assertIn("outputIndex, false, nullptr", dispatch)
         # No COMPUTE queue, no deferred latch, no RUI composite on the warp path.
+        self.assertNotIn("uiPacket", dispatch)
+        self.assertNotIn("composeUi", dispatch)
         self.assertNotIn("_computeQueue", dispatch)
         self.assertNotIn("_computeFence", dispatch)
         self.assertNotIn("_lateLatchFence", dispatch)
@@ -306,7 +308,7 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("_renderUI->Dispatch", dispatch)
         # Constants are baked at dispatch time (no deferred rewrite).
         self.assertIn("if (!ApplyLateInput(constants, packet))", dispatch)
-        self.assertIn("outputIndex, false, uiPacket.ui, uiPacket.uiState", dispatch)
+        self.assertIn("PrepareRotationConstants(constants, false);", dispatch)
         self.assertNotIn("PrepareRotationConstants(constants);", dispatch)
         self.assertNotIn("PrepareRotationConstants(lateConstants);", dispatch)
         # The machinery is deleted from the class definition as well.
@@ -344,13 +346,20 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("MarkFrameCaptured", capture)
         self.assertNotIn("GetHudlessColor", capture)
 
-    def test_goal_telemetry_survives_without_per_frame_reproj_info_spam(self):
+    def test_goal_telemetry_survives_without_present_path_info_logs(self):
+        # async-simple: the once-per-second goal line is the only INFO logger
+        # near the frame path. The per-frame Present() body (sync fallback
+        # deleted in P3.5 — non-virtualized presents pass straight through) must
+        # never emit LOG_INFO.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         self.assertIn("late={}/{} maxDeg={:.2f} hud={}", source)
-        sync_present = source.split("HRESULT AReproj_Dx12::PresentVirtualFrameSync", 1)[1].split(
-            "bool AReproj_Dx12::IsCameraAllZero", 1)[0]
-        self.assertNotIn('LOG_INFO("Reproj diag:', sync_present)
+        self.assertNotIn("PresentVirtualFrameSync", source)
+        self.assertNotIn("CopyLastFrame", source)
+        self.assertNotIn("DispatchWarp", source)
+        present = source.split("bool AReproj_Dx12::Present()", 1)[1].split("void AReproj_Dx12::Activate()", 1)[0]
+        self.assertNotIn("LOG_INFO(", present)
+        self.assertNotIn('LOG_INFO("Reproj diag:', present)
         hooks = (root / "OptiScaler/hooks/FG_Hooks.cpp").read_text(encoding="utf-8")
         self.assertNotIn('LOG_INFO("Reproj diag: FGPresent pre-activation', hooks)
 
@@ -480,7 +489,9 @@ class ReprojectionTests(unittest.TestCase):
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket(", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket(", 1)[0]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        self.assertIn("packet.hasUi = false", capture)
+        # No UI-split bookkeeping survives on the packet: hasUi is removed.
+        self.assertNotIn("hasUi", capture)
+        self.assertNotIn("hasUi", (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8"))
         self.assertIn("packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex]", capture)
         self.assertNotIn("colorFenceValue", capture)
         self.assertNotIn("worldFenceValue", capture)

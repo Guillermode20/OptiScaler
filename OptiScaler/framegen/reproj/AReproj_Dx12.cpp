@@ -145,101 +145,6 @@ DXGI_FORMAT AReproj_Dx12::NormalizeReprojFormat(DXGI_FORMAT format)
     return format;
 }
 
-bool AReproj_Dx12::CopyLastFrame(int fIndex, ID3D12Resource* source)
-{
-    if (source == nullptr)
-        return false;
-
-    // CreateBufferResource reuses _lastColor when format/size match (leaving it in the
-    // state the previous warp put it in), but a (re)created resource starts in COPY_DEST.
-    ID3D12Resource* oldLastColor = _lastColor[fIndex];
-
-    if (!CreateBufferResource(_device, source, D3D12_RESOURCE_STATE_COPY_DEST, &_lastColor[fIndex], false, false))
-        return false;
-
-    if (_lastColor[fIndex] != oldLastColor)
-        _lastColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
-
-    auto cmdList = GetUICommandList(fIndex);
-    if (cmdList == nullptr)
-        return false;
-
-    // CreateBufferResource reuses _uiColor when format/size match; a new one starts in COPY_DEST.
-    ID3D12Resource* oldUiColor = _uiColor[fIndex];
-
-    // The backbuffer is expected to be in PRESENT state at present time (RUI_Dx12 does the same)
-    ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
-
-    // _lastColor may be left in NON_PIXEL_SHADER_RESOURCE by the previous warp
-    ResourceBarrier(cmdList, _lastColor[fIndex], _lastColorState[fIndex], D3D12_RESOURCE_STATE_COPY_DEST);
-
-    cmdList->CopyResource(_lastColor[fIndex], source);
-
-    ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
-    _lastColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
-    Kcd2Scaleform::Initialize();
-
-    // HUD composition (sync path): warp the HUD-less frame instead of the composed
-    // backbuffer so the baked-in HUD is not timewarped; UI is composited after the warp.
-    _syncHasUi[fIndex] = false;
-    if (Config::Instance()->FGDrawUIOverFG.value_or_default())
-    {
-        auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
-        D3D12_RESOURCE_STATES kcd2HudlessState {};
-        auto* kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(source, &kcd2HudlessState);
-        if (!kcd2Hudless)
-            kcd2Hudless = Kcd2HudIsolation::GetHudlessColor(fIndex, &kcd2HudlessState);
-        auto* hudlessResource = hudless ? hudless->GetResource() : kcd2Hudless;
-        const auto hudlessState = hudless ? hudless->state : kcd2HudlessState;
-        const bool hudlessReady =
-            hudless ? IsResourceReady(FG_ResourceType::HudlessColor, fIndex) : kcd2Hudless != nullptr;
-
-        auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
-        D3D12_RESOURCE_STATES kcd2UiState {};
-        auto* kcd2Ui = Kcd2HudIsolation::GetUIColor(source, &kcd2UiState);
-        if (!kcd2Ui)
-            kcd2Ui = Kcd2HudIsolation::GetUIColor(fIndex, &kcd2UiState);
-        auto* uiResource = ui ? ui->GetResource() : kcd2Ui;
-        const auto uiState = ui ? ui->state : kcd2UiState;
-        const bool uiReady = ui ? IsResourceReady(FG_ResourceType::UIColor, fIndex) : kcd2Ui != nullptr;
-        if (hudlessResource && uiResource && hudlessReady && uiReady)
-        {
-            const auto& hudlessDesc = hudlessResource->GetDesc();
-            const auto sourceDesc = source->GetDesc();
-            if (hudlessDesc.Width == sourceDesc.Width && hudlessDesc.Height == sourceDesc.Height &&
-                NormalizeReprojFormat(hudlessDesc.Format) == NormalizeReprojFormat(sourceDesc.Format))
-            {
-                ResourceBarrier(cmdList, hudlessResource, hudlessState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                cmdList->CopyResource(_lastColor[fIndex], hudlessResource);
-                ResourceBarrier(cmdList, hudlessResource, D3D12_RESOURCE_STATE_COPY_SOURCE, hudlessState);
-
-                if (CreateBufferResource(_device, uiResource, D3D12_RESOURCE_STATE_COPY_DEST, &_uiColor[fIndex], false,
-                                         false))
-                {
-                    if (_uiColor[fIndex] != oldUiColor)
-                        _uiColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
-                    ResourceBarrier(cmdList, uiResource, uiState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    ResourceBarrier(cmdList, _uiColor[fIndex], _uiColorState[fIndex], D3D12_RESOURCE_STATE_COPY_DEST);
-                    cmdList->CopyResource(_uiColor[fIndex], uiResource);
-                    ResourceBarrier(cmdList, uiResource, D3D12_RESOURCE_STATE_COPY_SOURCE, uiState);
-                    _uiColorState[fIndex] = D3D12_RESOURCE_STATE_COPY_DEST;
-                    _syncHasUi[fIndex] = true;
-                }
-            }
-        }
-    }
-
-    // Submit now: the copy must be queued before the real present so the warp (submitted
-    // after the present) runs on the same queue after it.
-    if (!SubmitUICommandList((UINT) fIndex))
-    {
-        LOG_ERROR("Reproj: failed to submit last-frame copy");
-        return false;
-    }
-
-    return true;
-}
-
 bool AReproj_Dx12::CreateWarpOutput(int fIndex, ID3D12Resource* source)
 {
     auto inDesc = source->GetDesc();
@@ -952,7 +857,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // (HUD included) becomes the warp source. No HUD isolation, no separate UI.
     ID3D12Resource* color = gameBackBuffer;
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_PRESENT;
-    packet.hasUi = false;
 
     // Record the composed color copy on the packet's UI command list. It is
     // submitted on the game DIRECT queue below — the same queue the frame
@@ -1052,19 +956,17 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     return submitted;
 }
 
-bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIndex, uint32_t telemetryQueryStart)
+bool AReproj_Dx12::DisplayPacket(int packetIndex, uint32_t telemetryQueryStart)
 {
     auto& packet = _packets[packetIndex];
     if (_swapChain == nullptr || packet.color == nullptr)
         return false;
-    auto& uiPacket = _packets[uiPacketIndex >= 0 && uiPacketIndex < BUFFER_COUNT ? uiPacketIndex : packetIndex];
 
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
 
-    // Unwarped blits are pure copies: keep them on the DIRECT SC queue where the
-    // rasterizing UI pass also lives. Routing a copy through COMPUTE cost an extra
-    // ExecuteCommandLists plus a cross-queue Wait and a second SC submit per slot.
+    // Unwarped blits are pure copies on the presenter's DIRECT SC queue — no
+    // UI composite on the minimal path (the frame is captured composed).
     if (!WaitForSCAllocator(outputIndex))
         return false;
 
@@ -1126,8 +1028,6 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIn
     }
     backBuffer->Release();
 
-    const bool composeUiNow = composeUi && uiPacket.hasUi && _renderUI != nullptr && _renderUI->IsInit();
-
     if (useTelemetryQuery && _warpTimestampHeap != nullptr && _warpTimestampReadback != nullptr &&
         queryStart + 1 < ReprojTelemetry::GPU_QUERY_COUNT)
     {
@@ -1136,8 +1036,6 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIn
                                   queryStart * sizeof(UINT64));
     }
 
-    if (composeUiNow)
-        _renderUI->Dispatch(realSwapChain, cmdList, uiPacket.ui, uiPacket.uiState);
     if (!SubmitSCCommandList(outputIndex))
         return false;
 
@@ -1156,17 +1054,14 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIn
     return true;
 }
 
-bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, float timeStep,
-                                      double scanoutDeadlineMs, uint32_t telemetryQueryStart)
+bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs,
+                                      uint32_t telemetryQueryStart)
 {
     auto& packet = _packets[packetIndex];
     auto& content = static_cast<ContentFrame&>(packet);
     if (_swapChain == nullptr || _warp == nullptr || !_warp->IsInit() || content.color == nullptr ||
         !packet.warpAllowed)
         return false;
-    // UI comes from the newest completed UI packet (borrowed from the held
-    // previous anchor when this anchor's own UI copy still trails).
-    auto& uiPacket = _packets[uiPacketIndex >= 0 && uiPacketIndex < BUFFER_COUNT ? uiPacketIndex : packetIndex];
 
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
@@ -1218,8 +1113,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, float 
     // deferred GPU-side constant rewrite on the minimal path.
     if (!ApplyLateInput(constants, packet))
         PrepareRotationConstants(constants, false);
+    // No isolated-UI composite: the captured frame is composed, so the warp
+    // dispatches with ui == nullptr (RPD then samples color for both SRVs).
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
-                                    outputIndex, false, uiPacket.ui, uiPacket.uiState);
+                                    outputIndex, false, nullptr);
     if (!ok)
     {
         backBuffer->Release();
@@ -1254,84 +1151,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, float 
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
     if (_currentTelemetrySlot && useTelemetryQuery)
         _currentTelemetrySlot->scFenceValue = packet.retirementFenceValue;
-    return true;
-}
-
-bool AReproj_Dx12::DispatchWarp(int fIndex, float timeStep)
-{
-    if (_warp == nullptr || !_warp->IsInit())
-        return false;
-
-    IDXGISwapChain3* sc = (IDXGISwapChain3*) _swapChain;
-    auto bbIndex = sc->GetCurrentBackBufferIndex();
-    ID3D12Resource* bb = nullptr;
-    if (FAILED(sc->GetBuffer(bbIndex, IID_PPV_ARGS(&bb))))
-        return false;
-
-    // Warp into a private UAV buffer (backbuffers don't expose UAV), then copy it into the backbuffer
-    if (!CreateWarpOutput(fIndex, bb))
-    {
-        bb->Release();
-        return false;
-    }
-
-    // Ensure the previous warp on this slot has finished before reusing its allocator
-    if (!WaitForSCAllocator(fIndex))
-    {
-        bb->Release();
-        return false;
-    }
-
-    auto cmdList = GetSCCommandList(fIndex);
-    if (cmdList == nullptr)
-    {
-        bb->Release();
-        return false;
-    }
-
-    // Assign the fence value SubmitSCCommandList will signal for this slot
-    _scAllocatorFenceValues[fIndex] = ++_scFenceValue;
-
-    RP_Constants cb {};
-    FillConstants(fIndex, cb);
-    cb.timeStep = timeStep;
-    cb.hudlessSource = _syncHasUi[fIndex] ? 1u : 0u;
-
-    // Rotation-only reprojection: extrapolate the last rendered camera pair to
-    // the display slot. No prediction machinery; the async path additionally
-    // composes fresh raw-mouse motion via ApplyLateInput.
-    PrepareRotationConstants(cb);
-
-    bool ok = _warp->Dispatch(cmdList, _lastColor[fIndex], _lastColorState[fIndex], _warpOutput[fIndex], cb);
-
-    if (!ok)
-    {
-        bb->Release();
-        return false;
-    }
-
-    _lastColorState[fIndex] = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-
-    // Copy the warp result into the current backbuffer, then submit everything now
-    ResourceBarrier(cmdList, _warpOutput[fIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    D3D12_RESOURCE_STATE_COPY_SOURCE);
-    ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
-    cmdList->CopyResource(bb, _warpOutput[fIndex]);
-    ResourceBarrier(cmdList, bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-
-    // Composite the captured UI unwarped on top of the warped HUD-less frame
-    if (cb.debugView != 2 && _syncHasUi[fIndex] && _uiColor[fIndex] != nullptr && _renderUI != nullptr &&
-        _renderUI->IsInit())
-        _renderUI->Dispatch(sc, cmdList, _uiColor[fIndex], _uiColorState[fIndex]);
-
-    bb->Release();
-
-    if (!SubmitSCCommandList(fIndex))
-    {
-        LOG_ERROR("Reproj: failed to submit warp command list");
-        return false;
-    }
-
     return true;
 }
 
@@ -1701,73 +1520,35 @@ bool AReproj_Dx12::VirtualAnchorReady() const
     return true;
 }
 
-HRESULT AReproj_Dx12::PresentVirtualFrameSync(int fIndex, ID3D12Resource* source, UINT virtualBufferIndex,
-                                              UINT syncInterval, UINT flags, bool allowWarps)
+// async-simple: minimal passthrough display for a virtualized real swapchain
+// whose presenter is stopped (feature inactive/paused, or permanently failed).
+// Copies the game's just-rendered virtual buffer into the current real
+// backbuffer on the game DIRECT queue so the following PresentFrame shows the
+// real frame unchanged — no warp, no generated frames. Same-queue ordering
+// after the game's render makes the copy safe without a cross-queue fence.
+bool AReproj_Dx12::BlitGameFrameToReal(int fIndex, ID3D12Resource* gameBackBuffer)
 {
-    (void) allowWarps;
-    if (_wrappedSwapChain == nullptr || source == nullptr || _presentThread.joinable() ||
-        _presenterState.load() == PresenterState::Running)
-        return DXGI_ERROR_INVALID_CALL;
-
-    if (!CopyLastFrame(fIndex, source))
-    {
-        LOG_WARN("Reproj: synchronous fallback could not copy the source frame");
-        return E_FAIL;
-    }
-
+    if (_swapChain == nullptr || gameBackBuffer == nullptr)
+        return false;
     auto* realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto realIndex = realSwapChain->GetCurrentBackBufferIndex();
     ID3D12Resource* realBuffer = nullptr;
     if (FAILED(realSwapChain->GetBuffer(realIndex, IID_PPV_ARGS(&realBuffer))))
-    {
-        LOG_WARN("Reproj: synchronous fallback GetBuffer({}) failed", realIndex);
-        return E_FAIL;
-    }
+        return false;
 
     auto* cmdList = GetUICommandList(fIndex);
     if (cmdList == nullptr)
     {
-        LOG_WARN("Reproj: synchronous fallback has no UI command list");
         realBuffer->Release();
-        return E_FAIL;
+        return false;
     }
-    ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ResourceBarrier(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
     ResourceBarrier(cmdList, realBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
-    cmdList->CopyResource(realBuffer, source);
+    cmdList->CopyResource(realBuffer, gameBackBuffer);
     ResourceBarrier(cmdList, realBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
-    ResourceBarrier(cmdList, source, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+    ResourceBarrier(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
     realBuffer->Release();
-
-    if (_syncHasUi[fIndex] && _uiColor[fIndex] != nullptr)
-    {
-        if (_renderUI == nullptr && _device != nullptr)
-            _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
-                                                   Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
-
-        if (_renderUI != nullptr && _renderUI->IsInit())
-        {
-            _renderUI->Dispatch(realSwapChain, cmdList, _uiColor[fIndex], _uiColorState[fIndex]);
-        }
-    }
-
-    if (!SubmitUICommandList(static_cast<UINT>(fIndex)))
-    {
-        LOG_WARN("Reproj: synchronous fallback command submission failed");
-        return E_FAIL;
-    }
-    const auto captureValue = _uiAllocatorFenceValues[fIndex];
-    if (FAILED(_wrappedSwapChain->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, captureValue)))
-    {
-        LOG_WARN("Reproj: synchronous fallback buffer submission failed");
-        return E_FAIL;
-    }
-    const auto advanceResult = _wrappedSwapChain->AdvanceReprojectionBuffer();
-    if (FAILED(advanceResult))
-    {
-        LOG_WARN("Reproj: synchronous fallback buffer advance failed {:X}", (UINT) advanceResult);
-        return advanceResult;
-    }
-    return PresentFrame(syncInterval, flags);
+    return SubmitUICommandList(static_cast<UINT>(fIndex));
 }
 
 bool AReproj_Dx12::Present()
@@ -1801,17 +1582,21 @@ bool AReproj_Dx12::Present()
 
     if (!IsActive() || IsPaused())
     {
-        HRESULT result = S_OK;
+        // async-simple: no generated-frame fallback. Stop the presenter (it
+        // owns the real swapchain), blit the game's virtual frame into the real
+        // chain when virtualization is up, and present unchanged.
         if (virtualized)
         {
             StopAsyncPresenter();
             DrainGpuWork();
             DestroyAsyncPresenter();
-            result = PresentVirtualFrameSync(GetIndexWillBeDispatched(), gameBackBuffer, virtualBufferIndex,
-                                             syncInterval, presentFlags, false);
+            if (!BlitGameFrameToReal(GetIndexWillBeDispatched(), gameBackBuffer))
+            {
+                SAFE_RELEASE(gameBackBuffer);
+                return false;
+            }
         }
-        else
-            result = PresentFrame(syncInterval, presentFlags);
+        const auto result = PresentFrame(syncInterval, presentFlags);
         SAFE_RELEASE(gameBackBuffer);
         return SUCCEEDED(result);
     }
@@ -1950,7 +1735,6 @@ bool AReproj_Dx12::Present()
         // copy is GPU-ordered before any later render into this virtual buffer
         // on the same queue — the handoff needs no fence. Release the buffer
         // immediately; the warp gate is the _uiFence capture value below.
-        auto* captureFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
         const auto submitStartMs = Util::MillisecondsNow();
         const bool submitted = captured && SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0));
         const auto submitMs = Util::MillisecondsNow() - submitStartMs;
@@ -1977,9 +1761,9 @@ bool AReproj_Dx12::Present()
 
         // Any failed virtual-buffer handoff is a hard ownership failure. The
         // current virtual buffer remains Capturing, so returning to the game
-        // would let it render into a resource still read by capture.
-        // Hard publication failures permanently hand the real swapchain back to the
-        // game queue before displaying this same virtual frame synchronously.
+        // would let it render into a resource still read by capture. Downgrade
+        // permanently: stop the presenter and display this frame unchanged via
+        // a direct virtual->real blit — never a generated-frame fallback.
         packet.state.store(PacketState::Retired);
         _presenterState.store(PresenterState::Failed);
         StopAsyncPresenter();
@@ -1987,132 +1771,33 @@ bool AReproj_Dx12::Present()
         DestroyAsyncPresenter();
         _asyncDowngraded = true;
         _presenterState.store(PresenterState::Stopped);
-        HRESULT fallbackResult = E_FAIL;
         bool ringAdvanced = advanced;
         if (submitted && !ringAdvanced)
             ringAdvanced = SUCCEEDED(wrapped->AdvanceReprojectionBuffer());
-        if (captured && submitted && ringAdvanced && _gameCommandQueue != nullptr &&
-            SUCCEEDED(_gameCommandQueue->Wait(captureFence, packet.captureFenceValue)) &&
-            DisplayPacket(packetIndex, true) &&
-            SUCCEEDED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue)))
+        HRESULT fallbackResult = E_FAIL;
+        // The blit is queued after the game's render on the same DIRECT queue,
+        // so no cross-queue fence is needed to read the virtual buffer here.
+        if (ringAdvanced && BlitGameFrameToReal(fIndex, gameBackBuffer))
             fallbackResult = PresentFrame(syncInterval, presentFlags);
-        else if (!submitted)
-            fallbackResult =
-                PresentVirtualFrameSync(fIndex, gameBackBuffer, virtualBufferIndex, syncInterval, presentFlags, false);
-        LOG_WARN("Reproj: async publication failed; synchronous downgrade result {:X}", (UINT) fallbackResult);
+        LOG_WARN("Reproj: async publication failed; async downgrade result {:X}", (UINT) fallbackResult);
         SAFE_RELEASE(gameBackBuffer);
         return SUCCEEDED(fallbackResult);
     }
 
-    // Async ownership is required for timewarp. If it is unavailable, present the
-    // game frame unchanged; never run a blocking generated-frame fallback.
-    HRESULT fallbackResult = virtualized ? PresentVirtualFrameSync(fIndex, gameBackBuffer, virtualBufferIndex,
-                                                                   syncInterval, presentFlags, false)
-                                         : PresentFrame(syncInterval, presentFlags);
-    SAFE_RELEASE(gameBackBuffer);
-    return SUCCEEDED(fallbackResult);
-
-#if 0
-    // Removed synchronous reprojection path.
-    // Synchronous path.  With virtualization the game source is copied to the real
-    // anchor while the worker is stopped; otherwise retain the legacy raw-buffer path.
-    RecordRealFrame();
-    HRESULT realResult = E_FAIL;
+    // Async ownership is required for timewarp. If it is unavailable, display
+    // the game frame unchanged: blit the virtual buffer into the real chain
+    // when virtualization is up, else present straight through. Never run a
+    // blocking generated-frame fallback.
+    HRESULT fallbackResult = E_FAIL;
     if (virtualized)
     {
-        StopAsyncPresenter();
-        DrainGpuWork();
-        DestroyAsyncPresenter();
-        realResult = PresentVirtualFrameSync(fIndex, gameBackBuffer, virtualBufferIndex, syncInterval, presentFlags,
-                                             warpAllowed);
+        if (BlitGameFrameToReal(fIndex, gameBackBuffer))
+            fallbackResult = PresentFrame(syncInterval, presentFlags);
     }
     else
-    {
-        auto* realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
-        ID3D12Resource* source = nullptr;
-        if (SUCCEEDED(realSwapChain->GetBuffer(realSwapChain->GetCurrentBackBufferIndex(), IID_PPV_ARGS(&source))))
-        {
-            if (CopyLastFrame(fIndex, source))
-            {
-                if (_syncHasUi[fIndex] && _uiColor[fIndex] != nullptr)
-                {
-                    if (_renderUI == nullptr && _device != nullptr)
-                        _renderUI = std::make_unique<RUI_Dx12>(
-                            "ReprojUI", _device, Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
-
-                    if (_renderUI != nullptr && _renderUI->IsInit())
-                    {
-                        auto* cmdList = GetUICommandList(fIndex);
-                        if (cmdList != nullptr)
-                        {
-                            _renderUI->Dispatch(realSwapChain, cmdList, _uiColor[fIndex], _uiColorState[fIndex]);
-                            SubmitUICommandList(static_cast<UINT>(fIndex));
-                        }
-                    }
-                }
-                realResult = PresentFrame(syncInterval, presentFlags);
-            }
-            source->Release();
-        }
-    }
+        fallbackResult = PresentFrame(syncInterval, presentFlags);
     SAFE_RELEASE(gameBackBuffer);
-
-    // 6. Only proceed to the fake frame if the real present actually displayed (S_OK).
-    //    Occluded/device-removed/errors all mean we should not spin or fake.
-    if (realResult != S_OK || !warpAllowed)
-    {
-        RecordWarpFrame(false, !warpAllowed, poseAge);
-        return true;
-    }
-
-    // 7. This is deliberately synchronous. DXGI gives the next buffer back to the
-    // game immediately after the real present, so a worker cannot own it safely.
-    // Multiple warps are therefore bounded and emitted before returning to the game.
-    const auto refreshHz = TargetRefreshHz();
-    const auto warpCount = WarpCountForFrame(refreshHz);
-    {
-        std::scoped_lock lock(_metricsMutex);
-        _metricsMaxWarpsPerReal = std::max(_metricsMaxWarpsPerReal, warpCount);
-    }
-    const auto sourceTimestamp = Util::MillisecondsNow();
-    const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : State::Instance().lastFGFrameTime * 0.5;
-    const auto realPeriodMs = std::max(State::Instance().lastFGFrameTime, refreshPeriodMs * 2.0);
-
-    for (uint32_t warp = 1; warp <= warpCount; ++warp)
-    {
-        WaitUntil(sourceTimestamp + refreshPeriodMs * warp);
-
-        // A warp is placed at its display deadline relative to the real frame. This
-        // gives 1/3 and 2/3 exposure for a 40 -> 120 FPS cadence instead of repeatedly
-        // using the old fixed midpoint.
-        constexpr float configuredStep = 1.0f;
-        const auto timeStep =
-            std::clamp(static_cast<float>((refreshPeriodMs * warp) / realPeriodMs) * configuredStep, 0.0f, 1.0f);
-        if (!DispatchWarp(fIndex, timeStep))
-        {
-            LOG_WARN("Reproj: failed to dispatch warp {}/{}, dropping it", warp, warpCount);
-            RecordWarpFrame(false, true, 0.0f);
-            continue;
-        }
-
-        UINT fakeFlags = DXGI_PRESENT_ALLOW_TEARING;
-        UINT fakeInterval = 0;
-        if (!State::Instance().SCAllowTearing || State::Instance().realExclusiveFullscreen)
-        {
-            fakeFlags = 0;
-            fakeInterval = 1;
-        }
-
-        const auto fakeResult = PresentFrame(fakeInterval, fakeFlags, true);
-        const auto poseTimestamp = _cameraTimestamp[fIndex] > 0.0 ? _cameraTimestamp[fIndex] : sourceTimestamp;
-        const auto poseAge = static_cast<float>(std::max(0.0, Util::MillisecondsNow() - poseTimestamp));
-        RecordWarpFrame(fakeResult == S_OK, fakeResult != S_OK, poseAge);
-        if (fakeResult != S_OK)
-            break;
-    }
-
-    return true;
-#endif
+    return SUCCEEDED(fallbackResult);
 }
 
 void AReproj_Dx12::Activate()
@@ -2159,9 +1844,6 @@ void AReproj_Dx12::Activate()
     _kcd2CalibrationMouseX = 0;
     _kcd2CalibrationMouseY = 0;
     _kcd2CalibrationSamples = 0;
-    if (_renderUI == nullptr)
-        _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
-                                               Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
     _asyncDowngraded = false;
     const bool async = StartAsyncPresenter();
     LOG_INFO("Reproj: activated ({})", async ? "async virtual swapchain" : "synchronous");
@@ -2199,7 +1881,6 @@ void AReproj_Dx12::Deactivate()
             pkt.retirementFenceValue = 0;
             pkt.frameId = 0;
             pkt.hasCamera = false;
-            pkt.hasUi = false;
             pkt.warpAllowed = false;
         }
     }
@@ -2885,13 +2566,7 @@ void AReproj_Dx12::ReleaseObjects()
         SAFE_RELEASE(_scCommandAllocator[i]);
         SAFE_RELEASE(_scCommandList[i]);
 
-        SAFE_RELEASE(_lastColor[i]);
-        SAFE_RELEASE(_uiColor[i]);
         SAFE_RELEASE(_warpOutput[i]);
-
-        _lastColorState[i] = D3D12_RESOURCE_STATE_COMMON;
-        _uiColorState[i] = D3D12_RESOURCE_STATE_COMMON;
-        _syncHasUi[i] = false;
 
         // Reset command list state
         _scCommandListResetted[i] = false;

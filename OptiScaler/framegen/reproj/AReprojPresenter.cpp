@@ -133,10 +133,6 @@ bool AReproj_Dx12::StartAsyncPresenter()
         return false;
     }
 
-    if (_renderUI == nullptr)
-        _renderUI = std::make_unique<RUI_Dx12>("ReprojUI", _device,
-                                               Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
-
     _stopPresenter.store(false);
     {
         std::scoped_lock metricsLock(_metricsMutex);
@@ -470,13 +466,9 @@ void AReproj_Dx12::PresenterMain()
         // slots included (RepeatWarp is unconditional on this branch; no shed
         // controller exists to take the blit path).
         const bool shouldWarp = kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost;
-        // No isolated-UI composite on the minimal path: the composed frame is
-        // captured whole, so the warp never borrows another anchor's UI.
-        const int uiPacketIndex = activePacketIndex;
         const bool dispatched = shouldWarp
-                                    ? DispatchPacketWarp(activePacketIndex, uiPacketIndex, timeStep, targetDisplayMs,
-                                                         queryStart)
-                                    : DisplayPacket(activePacketIndex, true, uiPacketIndex, queryStart);
+                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, queryStart)
+                                    : DisplayPacket(activePacketIndex, queryStart);
 
         if (!dispatched)
         {
