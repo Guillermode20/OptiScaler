@@ -74,111 +74,14 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     _presentQueue->SetName(L"Reproj_PresentQueue");
     _presentQueue->GetTimestampFrequency(&_presentTimestampFrequency);
 
-    // COMPUTE queue for async warp — not serialized with the game's DIRECT queue on
-    // VKD3D, eliminating the 10-17ms scheduling delay that breaks per-slot steering.
-    // Any partial failure tears the whole compute subsystem down so the DIRECT queue
-    // (via _presentQueue) is the seamless fallback; useCompute must never see a
-    // compute queue without its fence/allocators/lists.
-    auto teardownCompute = [this]()
-    {
-        SAFE_RELEASE(_computeFence);
-        for (size_t i = 0; i < BUFFER_COUNT; i++)
-        {
-            SAFE_RELEASE(_computeCommandList[i]);
-            SAFE_RELEASE(_computeAllocator[i]);
-            _computeCommandListResetted[i] = false;
-            _computeAllocatorFenceValues[i] = 0;
-        }
-        SAFE_RELEASE(_computeQueue);
-        _computeFenceValue = 0;
-    };
+    // async-simple: the presenter owns exactly one queue (_presentQueue,
+    // DIRECT) and one retirement fence (_scFence). Warps and unwarped blits
+    // are recorded on the SC command lists and submitted here; there is no
+    // COMPUTE warp queue and no deferred late-latch fence. Anchor capture runs
+    // inline on the game's DIRECT queue via the base-class _uiCommandList
+    // (see CaptureFramePacket) — no dedicated capture queue exists either.
 
-    D3D12_COMMAND_QUEUE_DESC computeDesc {};
-    computeDesc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
-    computeDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    if (!Config::Instance()->ReprojAsyncComputeWarp.value_or_default())
-    {
-        LOG_INFO("Reproj: compute queue disabled by config; async warp uses DIRECT queue");
-    }
-    else
-    {
-        result = _device->CreateCommandQueue(&computeDesc, IID_PPV_ARGS(&_computeQueue));
-        if (FAILED(result))
-        {
-            LOG_WARN("Reproj: compute queue unavailable ({:X}); async warp will use DIRECT queue", (UINT) result);
-            // Fall back: async warp uses _presentQueue (DIRECT). VKD3D serialization
-            // will still apply, but at least async mode functions.
-        }
-        else
-        {
-            _computeQueue->SetName(L"Reproj_ComputeQueue");
-
-            // Telemetry converts warp GPU timestamps to CPU QPC using a per-queue
-            // timestamp frequency. If the compute queue runs on a different GPU
-            // clock domain, reject it so the telemetry numbers stay truthful.
-            UINT64 computeFrequency = 0;
-            if (FAILED(_computeQueue->GetTimestampFrequency(&computeFrequency)) ||
-                computeFrequency != _presentTimestampFrequency)
-            {
-                LOG_WARN("Reproj: compute queue timestamp frequency ({}) differs from present queue ({}); "
-                         "keeping DIRECT warp so telemetry stays correct",
-                         computeFrequency, _presentTimestampFrequency);
-                teardownCompute();
-            }
-            else
-            {
-                // Create COMPUTE command allocators and command lists for async warp
-                bool computeReady = true;
-                for (size_t i = 0; i < BUFFER_COUNT; i++)
-                {
-                    result = _device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                                             IID_PPV_ARGS(&_computeAllocator[i]));
-                    if (FAILED(result))
-                    {
-                        LOG_ERROR("Reproj: compute allocator[{}] creation failed: {:X}", i, (UINT) result);
-                        computeReady = false;
-                        break;
-                    }
-                    _computeAllocator[i]->SetName(std::format(L"Reproj_ComputeAllocator[{}]", i).c_str());
-
-                    result = _device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, _computeAllocator[i],
-                                                        nullptr, IID_PPV_ARGS(&_computeCommandList[i]));
-                    if (FAILED(result))
-                    {
-                        LOG_ERROR("Reproj: compute command list[{}] creation failed: {:X}", i, (UINT) result);
-                        computeReady = false;
-                        break;
-                    }
-                    _computeCommandList[i]->SetName(std::format(L"Reproj_ComputeCmdList[{}]", i).c_str());
-                    _computeCommandList[i]->Close();
-                }
-                if (!computeReady)
-                {
-                    // Tear down the partial compute resources so the caller falls back
-                    // to the DIRECT present queue for async warps.
-                    teardownCompute();
-                }
-                else if (_computeQueue != nullptr)
-                {
-                    result = _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_computeFence));
-                    if (FAILED(result))
-                    {
-                        LOG_WARN("Reproj: compute fence creation failed: {:X}; falling back to DIRECT warp",
-                                 (UINT) result);
-                        teardownCompute();
-                    }
-                    else
-                        _computeFence->SetName(L"Reproj_ComputeFence");
-                }
-            }
-        }
-    }
-
-    // async-simple (P2): anchor capture runs inline on the game's DIRECT queue
-    // (base-class _uiCommandList/_uiFence) — no dedicated capture queue exists.
-
-    // Telemetry uses the DIRECT queue for timestamp calibration (both queue types
-    // support timestamp queries; DIRECT is the existing baseline for comparison).
+    // Telemetry calibrates against the one DIRECT presenter queue.
     _telemetry.Initialize(_presentQueue);
     _telemetry.SetTimestampResources(nullptr, nullptr, nullptr, _presentTimestampFrequency);
 #if 0 // Per-slot GPU telemetry is intentionally absent from the minimal path.
@@ -202,8 +105,7 @@ bool AReproj_Dx12::CreateAsyncPresenter()
         }
     }
 #endif
-    LOG_INFO("Reproj: async presenter created (capture: game DIRECT, warp: {})",
-             _computeQueue != nullptr ? "COMPUTE" : "DIRECT (fallback)");
+    LOG_INFO("Reproj: async presenter created (capture: game DIRECT, warp: DIRECT)");
     return true;
 }
 
@@ -214,15 +116,6 @@ void AReproj_Dx12::DestroyAsyncPresenter()
     SAFE_RELEASE(_warpTimestampReadback);
     SAFE_RELEASE(_warpTimestampHeap);
     _presentTimestampFrequency = 0;
-    SAFE_RELEASE(_computeFence);
-    for (size_t i = 0; i < BUFFER_COUNT; i++)
-    {
-        SAFE_RELEASE(_computeCommandList[i]);
-        SAFE_RELEASE(_computeAllocator[i]);
-        _computeCommandListResetted[i] = false;
-        _computeAllocatorFenceValues[i] = 0;
-    }
-    SAFE_RELEASE(_computeQueue);
     SAFE_RELEASE(_presentQueue);
 }
 
@@ -465,7 +358,6 @@ void AReproj_Dx12::PresenterMain()
     _shedEngagedAtMs = 0.0;
     _heldPacketIndex = -1;
     _metricsUiBorrows = 0;
-    _lateSampleLeadMs = 4.0;
     _lastLateSampleLeadMs.store(4.0);
 
     while (!_stopPresenter.load())

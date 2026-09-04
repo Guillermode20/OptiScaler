@@ -101,26 +101,14 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
     bool _forceBorderless = false;
 
-    // Adaptive late-latch sample lead (DispatchPacketWarp): the sample time is
-    // scanned backward from the present deadline (SAMPLE_LEAD_MAX_MS) toward
-    // SAMPLE_LEAD_MIN_MS; each slot measures headroom after the warp completes
-    // and slides the lead by SAMPLE_LEAD_STEP_MS to keep headroom inside
-    // (SAMPLE_LEAD_GROW_HEADROOM_MS, SAMPLE_LEAD_REDUCE_HEADROOM_MS], so the
-    // mouse is sampled as late as the signal+warp+copy cost plus ~1.5 ms of
-    // CPU-wake/Present margin allows. Config LateSampleLead>0.5 overrides.
-    static constexpr double SAMPLE_LEAD_MIN_MS = 2.0;
-    static constexpr double SAMPLE_LEAD_MAX_MS = 6.0;
-    static constexpr double SAMPLE_LEAD_STEP_MS = 0.25;
-    static constexpr double SAMPLE_LEAD_REDUCE_HEADROOM_MS = 2.0; // headroom above this -> sample later
-    static constexpr double SAMPLE_LEAD_GROW_HEADROOM_MS = 0.9;  // headroom below this -> sample earlier
-
     // async-simple development stage (see plans/async_simple.md):
-    //   0 = A0: the async presenter is live but the warp shader is never
+    //   0 = A0/A1/A2 collapsed: the async presenter is live (capture + real
+    //       swapchain ownership at display cadence) but the warp shader is never
     //       dispatched — every display slot identity-blits the newest completed
     //       anchor. Proves the async plumbing holds the source's natural
     //       cadence before warp cost is introduced.
-    //   >=1 = parent-branch behavior (warp enabled). P2/P3 re-map stages 1-3
-    //       onto capture / presenter / warp as the strip-down proceeds.
+    //   >=1 = rotation warp enabled on the presenter's single DIRECT queue
+    //       (_presentQueue, retirement on _scFence) — the P3 queue model.
     static constexpr int kAsyncSimpleStage = 0;
     // FrameSlot[3]: three capture slots for the composed color + source camera
     // + fence. Distinct from BUFFER_COUNT (real-chain/output arrays stay 4).
@@ -140,25 +128,17 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12QueryHeap* _warpTimestampHeap = nullptr;
     ID3D12Resource* _warpTimestampReadback = nullptr;
     UINT64 _presentTimestampFrequency = 0;
-    ID3D12Fence* _lateLatchFence = nullptr;
-    UINT64 _lateLatchFenceValue = 0;
     ReprojTelemetry _telemetry;
     ReprojSlotRecord* _currentTelemetrySlot = nullptr;
     class WrappedIDXGISwapChain4* _wrappedSwapChain = nullptr; // game-owned, identity checked before use
     HANDLE _presentWaitableObject = nullptr;
     bool _asyncDowngraded = false;
 
-    // COMPUTE queue for async warp — not serialized with the game's DIRECT queue
-    // on VKD3D, eliminating the 10-17ms scheduling delay that breaks per-slot steering.
-    ID3D12CommandQueue* _computeQueue = nullptr;
-    ID3D12CommandAllocator* _computeAllocator[BUFFER_COUNT] = {};
-    ID3D12GraphicsCommandList* _computeCommandList[BUFFER_COUNT] = {};
-    bool _computeCommandListResetted[BUFFER_COUNT] = {};
-    ID3D12Fence* _computeFence = nullptr;
-    UINT64 _computeFenceValue = 0;
-    UINT64 _computeAllocatorFenceValues[BUFFER_COUNT] = {};
-
-    // async-simple: anchor capture runs inline on the game's DIRECT queue via
+    // async-simple: warps run on the presenter's single DIRECT queue
+    // (_presentQueue), and _scFence is the one retirement fence. There is no
+    // COMPUTE queue and no deferred late-latch fence (constants are baked at
+    // dispatch time on the presenter thread). Anchor capture runs inline on the
+    // game's DIRECT queue via
     // the base-class _uiCommandList/_uiFence. There is no dedicated capture
     // queue, capture worker, or mid-frame world fence. Same-queue ordering
     // makes the virtual-buffer handoff fence-free.
@@ -218,9 +198,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated = false); // skip-flag wrapped present
     bool SubmitSCCommandList(int fIndex); // close + execute the SC command list
     bool WaitForSCAllocator(int fIndex);  // wait for the previous warp on this slot to finish
-    ID3D12GraphicsCommandList* GetComputeCommandList(int fIndex);
-    bool SubmitComputeCommandList(int fIndex);
-    bool WaitForComputeAllocator(int fIndex);
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
     bool IsCameraAllZero(int fIndex) const;
     bool IsPoseFresh(double timestamp, float* ageMs = nullptr) const;
@@ -304,8 +281,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     double _lastShedEvaluateMs = 0.0; // stall EMA decay clock
     double _cadenceEmaMs = 0.0;       // smoothed source publish period
     std::atomic<double> _stallEmaMs { 0.0 }; // smoothed game-thread GPU stall
-    double _lateSampleLeadMs = 4.0;  // adaptive mouse-sample lead (presenter thread); hunts toward warp duration + margin
-    std::atomic<double> _lastLateSampleLeadMs { 4.0 }; // effective sample lead of the last slot, for the 1 Hz log line
+    std::atomic<double> _lastLateSampleLeadMs { 4.0 }; // fixed nominal sample lead, for the 1 Hz log line (no adaptive controller)
     double _lastStallSampleMs = 0.0;  // when the stall EMA was last fed
     float _lastStallSampleValue = -1.0f; // last stall sample seen (dedupe repeats)
     double _shedEngagedAtMs = 0.0;    // when the current shed began

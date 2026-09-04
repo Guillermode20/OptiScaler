@@ -22,7 +22,19 @@
   ordering makes it fence-free); `ReprojHudIsolation` defaults to `false` so the isolation
   code is inert. The packet ring is trimmed to `kReprojFrameSlots = 3` (`FrameSlot[3]`).
   Warping is still gated behind `kAsyncSimpleStage` (0 = A0 identity-blit; 1 = warps on).
-- **P3 (slim presenter: one queue + one fence, sync-path deletion): not started.**
+- **P3 (slim presenter: one queue + one fence): landed (queue/fence half).** The COMPUTE
+  warp queue, its allocators/lists/fence, and the deferred late-latch fence are deleted;
+  `DispatchPacketWarp` is now unconditional `GetSCCommandList(outputIndex)` on
+  `_presentQueue` with retirement on `_scFence` (the parent's DIRECT-fallback shape),
+  constants baked at dispatch time (no `WriteConstants`, no adaptive sample lead — the
+  `SAMPLE_LEAD_*` consts and `_lateSampleLeadMs` are gone too). `CreateAsyncPresenter`
+  creates only `_presentQueue`; `DrainGpuWork`/`VirtualAnchorReady`/`ReleaseObjects`/
+  `CreateObjects` no longer touch compute or late-latch resources. Parser tests pinned the
+  deletion (compute/adaptive-lead assertions inverted to absence). The **remaining P3.3–P3.5
+  half** — `DisplayPacket` RUI/query drop, `PresenterMain` slim (shed/ui-borrow/hold/lead
+  removal, always-warp repeats), sync-fallback (`PresentVirtualFrameSync`/`CopyLastFrame`/
+  `DispatchWarp`/`_lastColor`/`_uiColor`) deletion — is still open; warps stay gated behind
+  `kAsyncSimpleStage` (0 = blit) until a CI + KCD2 pass validates this queue model.
 
 ## 1. Goal
 
@@ -305,25 +317,31 @@ declarations in lockstep; delete dead includes.
 
 ### P3 — Slim presenter, one queue + one fence (A2)
 
-1. `CreateAsyncPresenter` (AReprojPresenter.cpp:18–300): delete the COMPUTE queue +
+Status: **items 1–2 done** (queue/fence deletion); items 3–5 are the remaining presenter-slim
+work, deferred to the next pass (they do not change the queue model).
+
+1. ✅ `CreateAsyncPresenter` (AReprojPresenter.cpp:18–300): delete the COMPUTE queue +
    allocators/lists/fence block (99–230) and the COPY capture queue block (231–300). Only
    create `_presentQueue` (DIRECT, normal priority) and grab the present waitable +
    `SetMaximumFrameLatency(1)`. `DestroyAsyncPresenter` mirrors: release `_presentQueue`,
    no capture/compute teardown, no `_warpTimestamp*`.
-2. Delete `DispatchPacketWarp`'s compute branch + deferred late latch (AReproj_Dx12.cpp:
+2. ✅ Delete `DispatchPacketWarp`'s compute branch + deferred late latch (AReproj_Dx12.cpp:
    1785–1980) and `SubmitComputeCommandList`/`GetComputeCommandList`/
    `WaitForComputeAllocator`. Warp path = `GetSCCommandList(outputIndex)` on `_presentQueue`
    (`RP_Dx12::Dispatch` with `ui = nullptr`), copy `_warpOutput` → real backbuffer, submit via
    `SubmitSCCommandList`, retirement value on `_scFence` (this is the existing DIRECT fallback
-   shape today's code already uses when `AsyncComputeWarp=false`).
-3. `DisplayPacket`: drop RUI composite and telemetry queries — copy `packet.color` → real
+   shape today's code already uses when `AsyncComputeWarp=false`). Also deleted: the
+   `SAMPLE_LEAD_*` adaptive-lead constants, `_lateSampleLeadMs`, and the `_lateLatchFence`
+   creation/release sites. `ApplyLateInput` still runs inline at dispatch (parent DIRECT
+   behavior); the raw-input pump is untouched.
+3. ⬜ `DisplayPacket`: drop RUI composite and telemetry queries — copy `packet.color` → real
    backbuffer on the same SC list; used only when warping is disallowed.
-4. `PresenterMain`: delete `EvaluateRepeatWarpShed` call/state, ui-borrow selection, hitch
+4. ⬜ `PresenterMain`: delete `EvaluateRepeatWarpShed` call/state, ui-borrow selection, hitch
    hold, adaptive lead updates. Fixed lead 3 ms; always-warp repeats; select newest READY
    packet whose capture value completed, else reuse active; retire previous anchor only on a
    real switch (drop `_heldPacketIndex`). Keep occlusion backoff, watchdog, completion clock,
    `WaitForPresentSlot`, `PresentCompositorFrame` (minus waitable double-wait subtleties).
-5. Delete the sync-fallback block: `PresentVirtualFrameSync`, `CopyLastFrame`,
+5. ⬜ Delete the sync-fallback block: `PresentVirtualFrameSync`, `CopyLastFrame`,
    `DispatchWarp`, `_lastColor`/`_uiColor`/`_syncHasUi` sync arrays (keep `_warpOutput`
    per-output), RUI `_renderUI` creation, and their use in `Present()`. Non-virtualized /
    presenter-failed ⇒ `PresentFrame` passthrough + `_asyncDowngraded`.
