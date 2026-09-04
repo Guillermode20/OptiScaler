@@ -1082,8 +1082,18 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
                           SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue));
     RecordPipelineGameSignal(Util::MillisecondsNow() - signalStartMs);
     const auto submitStartMs = Util::MillisecondsNow();
-    bool ok = signaled && wrapped != nullptr &&
-              SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue));
+    // When nonBlockingHandoff is enabled (default true), never pass a GPU fence
+    // on skipped anchors so AdvanceReprojectionBuffer does not stall the game thread.
+    const bool nonBlockingHandoff = Config::Instance()->ReprojNonBlockingHandoff.value_or_default();
+    ID3D12Fence* handoffFence = nullptr;
+    UINT64 handoffFenceValue = 0;
+    if (!nonBlockingHandoff && signaled)
+    {
+        handoffFence = _uiFence;
+        handoffFenceValue = fenceValue;
+    }
+    bool ok = wrapped != nullptr &&
+              SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence, handoffFenceValue));
     const auto submitMs = Util::MillisecondsNow() - submitStartMs;
     double advanceMs = 0.0;
     if (ok)
@@ -2240,20 +2250,24 @@ void AReproj_Dx12::LogPipelineMetricsIfDue()
 
 void AReproj_Dx12::RecordRealFrame()
 {
-    std::scoped_lock lock(_metricsMutex);
-    ++_metricsRealFrames;
-    LogMetricsIfDue();
+    _metricsRealFrames.fetch_add(1, std::memory_order_relaxed);
+    if (_presenterState.load(std::memory_order_relaxed) != PresenterState::Running)
+    {
+        LogMetricsIfDue();
+    }
 }
 
 void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs)
 {
-    std::scoped_lock lock(_metricsMutex);
-    _metricsWarpFrames += warpPresented;
-    _metricsDroppedWarps += dropped;
-    if (warpPresented)
     {
-        _metricsPoseAgeTotalMs += poseAgeMs;
-        ++_metricsPoseSamples;
+        std::scoped_lock lock(_metricsMutex);
+        _metricsWarpFrames += warpPresented;
+        _metricsDroppedWarps += dropped;
+        if (warpPresented)
+        {
+            _metricsPoseAgeTotalMs += poseAgeMs;
+            ++_metricsPoseSamples;
+        }
     }
 
     LogMetricsIfDue();
@@ -2261,95 +2275,148 @@ void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseA
 
 void AReproj_Dx12::LogMetricsIfDue()
 {
-    const auto now = Util::MillisecondsNow();
-    if (_metricsTimestamp == 0.0)
+    double elapsed = 0.0;
+    double scale = 1.0;
+    double poseAge = 0.0;
+    double lateCamAge = 0.0;
+    uint32_t realFrames = 0;
+    uint32_t warpFrames = 0;
+    uint32_t newAnchorDisplays = 0;
+    uint32_t repeatedAnchorDisplays = 0;
+    uint32_t missedDisplaySlots = 0;
+    uint32_t lateInputSamples = 0;
+    uint32_t lateInputApplied = 0;
+    uint32_t lateCamHits = 0;
+    uint32_t packetBaseHits = 0;
+    uint32_t lateFallbacks = 0;
+    uint32_t hudComposites = 0;
+    uint32_t skippedAnchorSamples = 0;
+    uint32_t directCaptures = 0;
+    uint32_t captureNotReady = 0;
+    uint32_t uiBorrows = 0;
+    uint32_t hitchHolds = 0;
+    float lateInputMaxDegrees = 0.0f;
+    float gamePresentBlockMaxMs = 0.0f;
+    float gamePresentPaceMaxMs = 0.0f;
+    float meanPresentIntervalMs = 0.0f;
+    float p95PresentIntervalMs = 0.0f;
+    int queueDepth = 0;
+    const char* presenter = nullptr;
+
     {
+        std::scoped_lock lock(_metricsMutex);
+        const auto now = Util::MillisecondsNow();
+        if (_metricsTimestamp == 0.0)
+        {
+            _metricsTimestamp = now;
+            return;
+        }
+
+        elapsed = now - _metricsTimestamp;
+        if (elapsed < 1000.0)
+            return;
+
+        scale = 1000.0 / elapsed;
+        realFrames = _metricsRealFrames.exchange(0, std::memory_order_relaxed);
+        warpFrames = _metricsWarpFrames;
+        newAnchorDisplays = _metricsNewAnchorDisplays;
+        repeatedAnchorDisplays = _metricsRepeatedAnchorDisplays;
+        missedDisplaySlots = _metricsMissedDisplaySlots;
+        lateInputSamples = _metricsLateInputSamples;
+        lateInputApplied = _metricsLateInputApplied;
+        lateCamHits = _metricsLateCamHits;
+        packetBaseHits = _metricsPacketBaseHits;
+        lateFallbacks = _metricsLateFallbacks;
+        hudComposites = _metricsHudComposites;
+        skippedAnchorSamples = _metricsSkippedAnchorSamples;
+        directCaptures = _metricsDirectCaptures;
+        captureNotReady = _metricsCaptureNotReady;
+        uiBorrows = _metricsUiBorrows;
+        hitchHolds = _metricsHitchHolds;
+        lateInputMaxDegrees = _metricsLateInputMaxDegrees;
+        gamePresentBlockMaxMs = _metricsGamePresentBlockMaxMs;
+        gamePresentPaceMaxMs = _metricsGamePresentPaceMaxMs;
+        poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
+        lateCamAge = _metricsLateCamAgeSamples > 0 ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples : 0.0;
+
+        _runtimeMetrics.realFps = static_cast<float>(realFrames * scale);
+        _runtimeMetrics.warpFps = static_cast<float>(warpFrames * scale);
+        _runtimeMetrics.displayFps = _runtimeMetrics.warpFps;
+        _runtimeMetrics.poseAgeMs = static_cast<float>(poseAge);
+        _runtimeMetrics.targetRefreshHz = static_cast<float>(TargetRefreshHz());
+        _runtimeMetrics.warpsPerReal = _metricsMaxWarpsPerReal;
+        _runtimeMetrics.droppedWarps = _metricsDroppedWarps;
+        _runtimeMetrics.queueDepth = PacketQueueDepth();
+        _runtimeMetrics.asyncPresenter = _presenterState.load() == PresenterState::Running &&
+                                         _wrappedSwapChain != nullptr && _wrappedSwapChain->IsReprojectionVirtualized();
+        _runtimeMetrics.newAnchorDisplays = newAnchorDisplays;
+        _runtimeMetrics.repeatedAnchorDisplays = repeatedAnchorDisplays;
+        _runtimeMetrics.missedDisplaySlots = missedDisplaySlots;
+        _runtimeMetrics.droppedAnchors = skippedAnchorSamples;
+        _runtimeMetrics.directCaptures = directCaptures;
+        _runtimeMetrics.captureNotReady = captureNotReady;
+        _runtimeMetrics.uiBorrows = uiBorrows;
+        _runtimeMetrics.repeatWarpShed = _repeatWarpShed.load(std::memory_order_relaxed);
+        _runtimeMetrics.stallEmaMs = static_cast<float>(_stallEmaMs.load(std::memory_order_relaxed));
+        _runtimeMetrics.gamePresentBlockMs = gamePresentBlockMaxMs;
+        _runtimeMetrics.gamePresentPaceMs = gamePresentPaceMaxMs;
+
+        if (_presentIntervalCount > 0)
+        {
+            std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
+            meanPresentIntervalMs =
+                static_cast<float>(std::accumulate(intervals.begin(), intervals.end(), 0.0) / intervals.size());
+            const auto p95 = intervals.begin() + static_cast<size_t>((intervals.size() - 1) * 0.95);
+            std::nth_element(intervals.begin(), p95, intervals.end());
+            p95PresentIntervalMs = static_cast<float>(*p95);
+            _runtimeMetrics.meanPresentIntervalMs = meanPresentIntervalMs;
+            _runtimeMetrics.p95PresentIntervalMs = p95PresentIntervalMs;
+        }
+
+        queueDepth = _runtimeMetrics.queueDepth;
+        presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
+
         _metricsTimestamp = now;
-        return;
+        _metricsWarpFrames = 0;
+        _metricsDroppedWarps = 0;
+        _metricsMaxWarpsPerReal = 0;
+        _metricsPoseAgeTotalMs = 0.0;
+        _metricsPoseSamples = 0;
+        _metricsNewAnchorDisplays = 0;
+        _metricsRepeatedAnchorDisplays = 0;
+        _metricsSkippedAnchorSamples = 0;
+        _metricsMissedDisplaySlots = 0;
+        _metricsLateInputSamples = 0;
+        _metricsLateInputApplied = 0;
+        _metricsLateCamHits = 0;
+        _metricsPacketBaseHits = 0;
+        _metricsLateFallbacks = 0;
+        _metricsLateCamAgeTotalMs = 0.0;
+        _metricsLateCamAgeSamples = 0;
+        _metricsHudComposites = 0;
+        _metricsDirectCaptures = 0;
+        _metricsUiBorrows = 0;
+        _metricsCaptureNotReady = 0;
+        _metricsHitchHolds = 0;
+        _metricsLateInputMaxDegrees = 0.0f;
+        _metricsGamePresentBlockMaxMs = 0.0f;
+        _metricsGamePresentPaceMaxMs = 0.0f;
     }
 
-    const auto elapsed = now - _metricsTimestamp;
-    if (elapsed < 1000.0)
-        return;
-
-    const auto scale = 1000.0 / elapsed;
-    const auto poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
-    _runtimeMetrics.realFps = static_cast<float>(_metricsRealFrames * scale);
-    _runtimeMetrics.warpFps = static_cast<float>(_metricsWarpFrames * scale);
-    _runtimeMetrics.displayFps = _runtimeMetrics.warpFps;
-    _runtimeMetrics.poseAgeMs = static_cast<float>(poseAge);
-    _runtimeMetrics.targetRefreshHz = static_cast<float>(TargetRefreshHz());
-    _runtimeMetrics.warpsPerReal = _metricsMaxWarpsPerReal;
-    _runtimeMetrics.droppedWarps = _metricsDroppedWarps;
-    _runtimeMetrics.queueDepth = PacketQueueDepth();
-    _runtimeMetrics.asyncPresenter = _presenterState.load() == PresenterState::Running &&
-                                     _wrappedSwapChain != nullptr && _wrappedSwapChain->IsReprojectionVirtualized();
-    _runtimeMetrics.newAnchorDisplays = _metricsNewAnchorDisplays;
-    _runtimeMetrics.repeatedAnchorDisplays = _metricsRepeatedAnchorDisplays;
-    _runtimeMetrics.missedDisplaySlots = _metricsMissedDisplaySlots;
-    _runtimeMetrics.droppedAnchors = _metricsSkippedAnchorSamples;
-    _runtimeMetrics.directCaptures = _metricsDirectCaptures;
-    _runtimeMetrics.captureNotReady = _metricsCaptureNotReady;
-    _runtimeMetrics.uiBorrows = _metricsUiBorrows;
-    _runtimeMetrics.repeatWarpShed = _repeatWarpShed.load(std::memory_order_relaxed);
-    _runtimeMetrics.stallEmaMs = static_cast<float>(_stallEmaMs.load(std::memory_order_relaxed));
-    // block/pace report the worst game-thread cost in the one-second window.
-    // Reporting the last sample hid exactly the intermittent handoff stalls
-    // that pull an otherwise 60+ FPS source into the mid-50s.
-    _runtimeMetrics.gamePresentBlockMs = _metricsGamePresentBlockMaxMs;
-    _runtimeMetrics.gamePresentPaceMs = _metricsGamePresentPaceMaxMs;
-    if (_presentIntervalCount > 0)
-    {
-        std::vector<double> intervals(_presentIntervals, _presentIntervals + _presentIntervalCount);
-        _runtimeMetrics.meanPresentIntervalMs =
-            static_cast<float>(std::accumulate(intervals.begin(), intervals.end(), 0.0) / intervals.size());
-        const auto p95 = intervals.begin() + static_cast<size_t>((intervals.size() - 1) * 0.95);
-        std::nth_element(intervals.begin(), p95, intervals.end());
-        _runtimeMetrics.p95PresentIntervalMs = static_cast<float>(*p95);
-    }
-    const char* presenter = _runtimeMetrics.asyncPresenter ? "async virtual swapchain" : "safe sync";
-    const double lateCamAge =
-        _metricsLateCamAgeSamples > 0 ? _metricsLateCamAgeTotalMs / _metricsLateCamAgeSamples : 0.0;
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms lead={:.2f}ms sampLead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} hud={} dropAnchor={} capC={} capWait={} uiBorrow={} latch={}/{}/{} "
              "lateAge={:.1f}ms sensX={:.7f} hold={} shed={} stallEma={:.1f}ms ({}, block={:.2f}ms pace={:.2f}ms)",
-             _metricsRealFrames * scale, _metricsWarpFrames * scale, _metricsNewAnchorDisplays,
-             _metricsRepeatedAnchorDisplays, _metricsMissedDisplaySlots, _runtimeMetrics.meanPresentIntervalMs,
-             _runtimeMetrics.p95PresentIntervalMs, _dispatchLeadMs, _lastLateSampleLeadMs.load(), poseAge,
-             _runtimeMetrics.queueDepth,
-             _metricsLateInputApplied, _metricsLateInputSamples, _metricsLateInputMaxDegrees, _metricsHudComposites,
-             _metricsSkippedAnchorSamples, _metricsDirectCaptures, _metricsCaptureNotReady, _metricsUiBorrows,
-             _metricsLateCamHits, _metricsPacketBaseHits, _metricsLateFallbacks, lateCamAge,
-             _trackedMouseSensitivityX.load(std::memory_order_relaxed), _metricsHitchHolds,
+             realFrames * scale, warpFrames * scale, newAnchorDisplays,
+             repeatedAnchorDisplays, missedDisplaySlots, meanPresentIntervalMs,
+             p95PresentIntervalMs, _dispatchLeadMs, _lastLateSampleLeadMs.load(), poseAge,
+             queueDepth,
+             lateInputApplied, lateInputSamples, lateInputMaxDegrees, hudComposites,
+             skippedAnchorSamples, directCaptures, captureNotReady, uiBorrows,
+             lateCamHits, packetBaseHits, lateFallbacks, lateCamAge,
+             _trackedMouseSensitivityX.load(std::memory_order_relaxed), hitchHolds,
              _repeatWarpShed.load(std::memory_order_relaxed), _stallEmaMs.load(std::memory_order_relaxed), presenter,
-             _runtimeMetrics.gamePresentBlockMs, _runtimeMetrics.gamePresentPaceMs);
-    _metricsTimestamp = now;
-    _metricsRealFrames = 0;
-    _metricsWarpFrames = 0;
-    _metricsDroppedWarps = 0;
-    _metricsMaxWarpsPerReal = 0;
-    _metricsPoseAgeTotalMs = 0.0;
-    _metricsPoseSamples = 0;
-    _metricsNewAnchorDisplays = 0;
-    _metricsRepeatedAnchorDisplays = 0;
-    _metricsSkippedAnchorSamples = 0;
-    _metricsMissedDisplaySlots = 0;
-    _metricsLateInputSamples = 0;
-    _metricsLateInputApplied = 0;
-    _metricsLateCamHits = 0;
-    _metricsPacketBaseHits = 0;
-    _metricsLateFallbacks = 0;
-    _metricsLateCamAgeTotalMs = 0.0;
-    _metricsLateCamAgeSamples = 0;
-    _metricsHudComposites = 0;
-    _metricsDirectCaptures = 0;
-    _metricsUiBorrows = 0;
-    _metricsCaptureNotReady = 0;
-    _metricsHitchHolds = 0;
-    _metricsLateInputMaxDegrees = 0.0f;
-    _metricsGamePresentBlockMaxMs = 0.0f;
-    _metricsGamePresentPaceMaxMs = 0.0f;
+             gamePresentBlockMaxMs, gamePresentPaceMaxMs);
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -2565,10 +2632,19 @@ bool AReproj_Dx12::Present()
             // continues rendering at its natural rate.
             const auto fenceValue = ++_uiFenceValue;
             _uiAllocatorFenceValues[fIndex] = fenceValue;
+            const bool signaled = _gameCommandQueue != nullptr && _uiFence != nullptr &&
+                                  SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue));
+            const bool nonBlockingHandoff = Config::Instance()->ReprojNonBlockingHandoff.value_or_default();
+            ID3D12Fence* handoffFence = nullptr;
+            UINT64 handoffFenceValue = 0;
+            if (!nonBlockingHandoff && signaled)
+            {
+                handoffFence = _uiFence;
+                handoffFenceValue = fenceValue;
+            }
             const bool advanced =
-                _gameCommandQueue != nullptr && _uiFence != nullptr &&
-                SUCCEEDED(_gameCommandQueue->Signal(_uiFence, fenceValue)) &&
-                SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, _uiFence, fenceValue)) &&
+                wrapped != nullptr &&
+                SUCCEEDED(wrapped->SubmitReprojectionBuffer(virtualBufferIndex, handoffFence, handoffFenceValue)) &&
                 SUCCEEDED(wrapped->AdvanceReprojectionBuffer());
             if (!advanced)
                 _presenterState.store(PresenterState::Failed);

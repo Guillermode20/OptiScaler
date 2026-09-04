@@ -163,11 +163,11 @@ void FrameLimit::sleepForReprojectionSourceMs(double ms)
     if (ms <= 0.0)
         return;
 
-    // The capped game thread does not need the presenter's 1 ms Proton spin
-    // tail. Burning it on both threads can push an otherwise sustainable KCD2
-    // source below 60 FPS. Retain a short tail for deadline precision.
-    constexpr int64_t SOURCE_SPIN_NS = 200'000;
-    if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), SOURCE_SPIN_NS); res)
+    // On Linux/Proton waitable timer granularity easily overshoots 0.2ms by 1-3ms,
+    // which systematically pushes frames past deadline. Keep a 1ms spin window
+    // (matching sleepForPrecisePacingMs) on Linux for deadline precision.
+    const int64_t spinNs = State::Instance().isRunningOnLinux ? 1'000'000 : 200'000;
+    if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), spinNs); res)
         LOG_ERROR("Reprojection source pacing sleep failed: {}", res);
 }
 
@@ -198,7 +198,10 @@ void FrameLimit::paceReprojectionSource(bool active)
         return;
     }
 
-    const uint64_t intervalNs = std::clamp(static_cast<uint64_t>(1'000'000'000.0 / capHz), 1ULL, 100'000'000'000ULL);
+    // Small target headroom (0.2%) ensures 60 FPS pacing completes 60 frames per second
+    // instead of letting microsecond scheduler jitter pull the measured rate down to 57-58 FPS.
+    const double targetHz = capHz > 0.0f ? static_cast<double>(capHz) * 1.002 : 0.0;
+    const uint64_t intervalNs = std::clamp(static_cast<uint64_t>(1'000'000'000.0 / targetHz), 1ULL, 100'000'000'000ULL);
     const uint64_t nowNs = get_timestamp();
     g_reprojectionSourceCapHz.store(capHz, std::memory_order_relaxed);
 
@@ -232,6 +235,8 @@ void FrameLimit::paceReprojectionSource(bool active)
     g_reprojectionSourceTimingErrorMs.store(
         static_cast<float>(static_cast<double>(completedNs - deadlineNs) / 1'000'000.0), std::memory_order_relaxed);
     pacer.nextDeadlineNs = deadlineNs + intervalNs;
+    if (completedNs > pacer.nextDeadlineNs - intervalNs / 4)
+        pacer.nextDeadlineNs = completedNs + intervalNs;
 }
 
 FrameLimit::SourcePacingStats FrameLimit::reprojectionSourcePacingStats()

@@ -293,7 +293,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void LogPipelineMetricsIfDue();
 
     double _metricsTimestamp = 0.0;
-    uint32_t _metricsRealFrames = 0;
+    std::atomic<uint32_t> _metricsRealFrames { 0 };
     uint32_t _metricsWarpFrames = 0;
     uint32_t _metricsDroppedWarps = 0;
     uint32_t _metricsMaxWarpsPerReal = 0;

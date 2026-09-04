@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.42 (2026-09-04)
+* Fix 57-58 FPS source dips from pacer overshoot and present logging
+
 ## v10.0.1.41 (2026-09-04)
 * Reproj: remove depth capture path and protect source frame budget
 
