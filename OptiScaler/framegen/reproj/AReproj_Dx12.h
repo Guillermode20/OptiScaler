@@ -124,10 +124,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
     bool _forceBorderless = false;
 
-    // Swap-smooth blend factor applied to the FIRST warp of each new anchor
-    // (fraction of the held previous anchor's warped color). 0.0 = no blend.
-    static constexpr float kSwapBlendFactor = 0.25f;
-
     // Adaptive late-latch sample lead (DispatchPacketWarp): the sample time is
     // scanned backward from the present deadline (SAMPLE_LEAD_MAX_MS) toward
     // SAMPLE_LEAD_MIN_MS; each slot measures headroom after the warp completes
@@ -210,7 +206,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     float _metricsTxCmTotal = 0.0f;
     uint32_t _metricsTxSamples = 0;
     uint32_t _metricsUiBorrows = 0; // slots that composited the held previous anchor's UI
-    int _heldPacketIndex = -1;      // previous anchor held one extra slot for UI borrow + swap blend
+    int _heldPacketIndex = -1;      // previous anchor held one extra slot for the UI borrow
 
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
@@ -233,8 +229,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool EnqueueCapture(int packetIndex);
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
-    bool DispatchPacketWarp(int packetIndex, int uiPacketIndex, int prevPacketIndex, float timeStep,
-                            double scanoutDeadlineMs = 0.0, uint32_t telemetryQueryStart = UINT32_MAX);
+    bool DispatchPacketWarp(int packetIndex, int uiPacketIndex, float timeStep, double scanoutDeadlineMs = 0.0,
+                            uint32_t telemetryQueryStart = UINT32_MAX);
     bool DisplayPacket(int packetIndex, bool composeUi, int uiPacketIndex = -1,
                        uint32_t telemetryQueryStart = UINT32_MAX);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,

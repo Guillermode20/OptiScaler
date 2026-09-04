@@ -1874,7 +1874,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex, bool composeUi, int uiPacketIn
     return true;
 }
 
-bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int prevPacketIndex, float timeStep,
+bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, float timeStep,
                                       double scanoutDeadlineMs, uint32_t telemetryQueryStart)
 {
     auto& packet = _packets[packetIndex];
@@ -1883,10 +1883,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int pr
         !packet.warpAllowed)
         return false;
     // UI comes from the newest completed UI packet (borrowed from the held
-    // previous anchor when this anchor's own UI copy still trails); the blend
-    // source is the held previous anchor's color.
+    // previous anchor when this anchor's own UI copy still trails).
     auto& uiPacket = _packets[uiPacketIndex >= 0 && uiPacketIndex < BUFFER_COUNT ? uiPacketIndex : packetIndex];
-    auto& prevPacket = _packets[prevPacketIndex >= 0 && prevPacketIndex < BUFFER_COUNT ? prevPacketIndex : packetIndex];
 
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
@@ -1935,11 +1933,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int pr
         cmdList->EndQuery(_warpTimestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, timestampStart);
     auto constants = content.constants;
     constants.timeStep = timeStep;
-    // Swap-smooth blend: the first warp of a new anchor lerps the held
-    // previous anchor's warped color (strength is unused by the rotation-only
-    // mode-2 path, so it carries the blend factor; 0 = no blend).
-    const bool blendSwap = prevPacketIndex >= 0 && prevPacketIndex != packetIndex && prevPacket.color != nullptr;
-    constants.strength = blendSwap ? kSwapBlendFactor : 0.0f;
     // The independent COMPUTE queue can safely wait for a CPU fence without
     // being serialized behind KCD2's DIRECT queue. Sample at scanout instead
     // of four milliseconds early; DIRECT fallback stays immediate.
@@ -1951,8 +1944,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, int uiPacketIndex, int pr
     }
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
                                     outputIndex, deferredLateLatch, uiPacket.ui, uiPacket.uiState, packet.depth,
-                                    packet.depthState, blendSwap ? prevPacket.color : nullptr,
-                                    blendSwap ? prevPacket.colorState : D3D12_RESOURCE_STATE_COMMON);
+                                    packet.depthState);
     if (!ok)
     {
         backBuffer->Release();

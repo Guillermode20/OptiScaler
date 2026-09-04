@@ -589,23 +589,36 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("ownUiComplete", presenter)
         self.assertIn("_heldPacketIndex", presenter)
 
-    def test_swap_blend_and_ui_borrow_hold_previous_anchor(self):
+    def test_ui_borrow_holds_previous_anchor_without_swap_blend(self):
+        # v37's swap blend sampled the PREVIOUS anchor's image with the CURRENT
+        # anchor's baked output-pixel -> source-UV homography. That misaligns the
+        # previous frame by the full inter-anchor rotation whenever the camera
+        # moves, ghosting/doubling on look-around. It was removed in v40; the
+        # UI-borrow hold that shared _heldPacketIndex must remain.
         root = Path(__file__).resolve().parents[2]
         presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         dispatch = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8").split(
             "bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split("bool AReproj_Dx12::DispatchWarp", 1)[0]
         shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
         common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")
+        # UI borrow survives: the held previous anchor's UI composites while the
+        # new anchor's own UI copy trails, tracked/retired via _heldPacketIndex.
         self.assertIn("_heldPacketIndex = activePacketIndex", presenter)
-        self.assertIn("prevPacketIndex = _heldPacketIndex", presenter)
         self.assertIn("uiPacketIndex = _heldPacketIndex", presenter)
-        self.assertIn("constants.strength = blendSwap ? kSwapBlendFactor : 0.0f", dispatch)
-        self.assertIn("Texture2D<float4> PrevColor : register(t3)", shader)
-        self.assertIn("world = lerp(world, prevWarped, Strength)", shader)
-        self.assertIn("Texture2D<float4> PrevColor : register(t3)", common)
         self.assertIn("_metricsUiBorrows", presenter)
         log = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         self.assertIn("uiBorrow={}", log)
+        # Swap blend fully removed: no prev-color dispatch wiring, no blend
+        # factor, no PrevColor SRV, no blend in either shader copy.
+        self.assertNotIn("prevPacketIndex", presenter)
+        self.assertNotIn("prevPacketIndex", dispatch)
+        self.assertNotIn("kSwapBlendFactor", dispatch)
+        self.assertNotIn("blendSwap", dispatch)
+        self.assertNotIn("PrevColor", dispatch)
+        self.assertNotIn("PrevColor", shader)
+        self.assertNotIn("prevWarped", shader)
+        self.assertNotIn("PrevColor", common)
+        self.assertNotIn("prevWarped", common)
 
     def test_midframe_world_fence_is_safe_without_perpass_submission(self):
         # The world-completion signal rides on the CL-submit hook: on per-pass

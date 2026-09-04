@@ -762,10 +762,10 @@ void AReproj_Dx12::PresenterMain()
         }
 
         // The previous anchor stays Presenting until the NEXT new-anchor
-        // switch (or loop exit): its UI (composited while the new anchor's own
-        // UI copy trails) and its color (swap-blend source) are needed by the
-        // first slot of the new anchor. Tracked in _heldPacketIndex so every
-        // early exit path (occlusion, failure, stop) still retires it.
+        // switch (or loop exit): its UI is composited while the new anchor's
+        // own UI copy trails, so the first slot of the new anchor borrows it.
+        // Tracked in _heldPacketIndex so every early exit path (occlusion,
+        // failure, stop) still retires it.
         bool newAnchor = false;
         // A claimed packet is complete by construction above.
         if (newestPacketIndex >= 0)
@@ -868,11 +868,8 @@ void AReproj_Dx12::PresenterMain()
         // Latency pass: composite the newest completed UI. The new anchor's own
         // UI copy trails its color copy by a few ms, so the first display of a
         // new anchor borrows the held previous anchor's UI (16 ms stale is
-        // invisible on HUD elements). Swap-smooth blend piggybacks on the same
-        // hold: the first warp of a new anchor lerps the previous anchor's
-        // warped color so the 60 Hz content swap does not snap.
+        // invisible on HUD elements).
         int uiPacketIndex = activePacketIndex;
-        int prevPacketIndex = -1;
         if (newContent)
         {
             auto* uiFence = packet.completionFence != nullptr ? packet.completionFence : _uiFence;
@@ -880,12 +877,10 @@ void AReproj_Dx12::PresenterMain()
                                     uiFence->GetCompletedValue() >= packet.captureFenceValue;
             if (!ownUiReady && _heldPacketIndex >= 0)
                 uiPacketIndex = _heldPacketIndex;
-            if (_heldPacketIndex >= 0 && _heldPacketIndex != activePacketIndex)
-                prevPacketIndex = _heldPacketIndex;
         }
         const bool dispatched = shouldWarp
-                                    ? DispatchPacketWarp(activePacketIndex, uiPacketIndex, prevPacketIndex, timeStep,
-                                                         targetDisplayMs, queryStart)
+                                    ? DispatchPacketWarp(activePacketIndex, uiPacketIndex, timeStep, targetDisplayMs,
+                                                         queryStart)
                                     : DisplayPacket(activePacketIndex, true, uiPacketIndex, queryStart);
 
         if (!dispatched)

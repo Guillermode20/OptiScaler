@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.40 (2026-09-04)
+* Remove swap-smooth color blend (v37 PrevColor t3 SRV): it sampled the held previous anchor's image with the CURRENT anchor's baked homography, so during camera motion the previous frame was misaligned by the full inter-anchor rotation - a visible ghost/double when looking around (first runnable build carrying it was v39; v37/v38 crashed at startup). UI borrow (held previous anchor's UI on the first slot of a new anchor) is unchanged; the 4th SRV/root-signature entry and the blend block are gone from both shader copies and the CSO is regenerated.
+
 ## v10.0.1.39 (2026-09-03)
 * Fix startup crash: TryRedirect held the isolation g_mutex and MarkWorldSnapshotCl re-locked the same non-recursive mutex (EDEADLK -> uncaught std::system_error) the moment the async presenter armed the world fence; the marker now runs under the caller's lock.
 
