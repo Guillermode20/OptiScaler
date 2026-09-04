@@ -174,6 +174,8 @@ When the game stops publishing anchors for more than ~2.5 source periods (stream
 
 ### Current status
 
+- **Failed live FPS experiments (2026-09-04 — do not repeat):** An uncapped 60 Hz repeat-warp shed floor (`565f9a16`, reverted by `12f77a00`) engaged at ~58.8 FPS and turned repeat ATW outputs into unwarped DIRECT blits. It made 58–59 FPS feel dramatically worse because the visible cadence fell back toward the irregular source cadence; `ReprojPipe` proved it via `repeatBlit>0` / `repeatWarp=0`. Keep the existing cap-only 1.15x/1.03x shed policy and `RepeatWarp=true` for normal use. A local `SourceFramerateLimit=60` A/B also failed: even while its pacer slept 7–9 ms/frame, source remained ~56–59 FPS and display fell to ~113–117 with misses; the scene was GPU-bound, so a cap could not create budget and added timing jitter. Restore `SourceFramerateLimit=0` after this test. Alt-tabbing is not evidence of a foreground 60-FPS recovery: KCD2 entered its background ~30 FPS limiter (`source≈30`, `pubN=7–8/250ms`) while the presenter still produced 120 outputs.
+
 - Efficiency + tab in/out pass: occlusion backoff (~20 Hz, grid reset, no missed burst), explicit DIRECT→capture and COMPUTE→present queue waits, COPY-first capture, depth copies skipped unless enabled, DIRECT-only unwarped blits, symmetric lead control, dead per-slot telemetry stripped from the presenter loop.
 
 - v10.0.1-pre26 (2026-09-03): depth fully removed (code, shaders, CSO, config, probe, INI key). v1 regressed feel, v2 blend unvalidated with no test channel — stopping point is the rotation baseline + non-blocking capture + 0.11 rad ceiling + hitch hold. Known limitation stands: translation judder while walking, worst on hills/near geometry.
