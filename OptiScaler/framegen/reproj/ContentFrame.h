@@ -13,8 +13,13 @@ struct ContentFrame
 {
     ID3D12Resource* color = nullptr;
     ID3D12Resource* ui = nullptr;
+    ID3D12Resource* depth = nullptr; // optional depth-assisted residual source (same inline capture submit)
     D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_COMMON;
     D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON;
+    D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON;
+    std::uint32_t depthWidth = 0;
+    std::uint32_t depthHeight = 0;
+    DXGI_FORMAT depthFormat = DXGI_FORMAT_UNKNOWN;
     RP_Constants constants {};
     double renderTimestamp = 0.0;
     double sourcePoseTimestamp = 0.0;

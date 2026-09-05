@@ -10,9 +10,15 @@
 
 #define RP_NUM_OF_HEAPS BUFFER_COUNT
 
+// Map a captured depth-resource format to the DXGI format its SRV must use so
+// the warp shader can read depth as a float in [0,1]. Returns UNKNOWN when the
+// resource cannot be viewed as an SRV (typed non-typeless depth target); the
+// caller then keeps that slot bound to color and depth stays disabled.
+DXGI_FORMAT ReprojDepthSrvViewFormat(DXGI_FORMAT format);
+
 // Async camera warp pass. The isolated UI is composited in the
 // same compute dispatch so the presenter never has to cross back to DIRECT.
-// Root signature: 2 SRVs (color, ui), 1 UAV, 1 CBV, 1 static
+// Root signature: 3 SRVs (color, ui, optional depth), 1 UAV, 1 CBV, 1 static
 // bilinear-clamp sampler.
 class RP_Dx12 : public Shader_Dx12
 {
@@ -28,9 +34,13 @@ class RP_Dx12 : public Shader_Dx12
     // Warps `lastColor` forward to the fake-frame time and writes `output`.
     // Inputs are transitioned to NON_PIXEL_SHADER_RESOURCE; `output` is transitioned
     // from COPY_SOURCE to UNORDERED_ACCESS (the caller returns it to COPY_SOURCE).
+    // `depth` is optional: when non-null and shader-viewable it binds at t2 for
+    // the depth-assisted translation residual; the root signature always has the
+    // third SRV slot (bound to `lastColor` when no depth is present).
     bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor, D3D12_RESOURCE_STATES lastColorState,
                   ID3D12Resource* output, RP_Constants& constants, int constantSlot = -1, bool deferConstants = false,
-                  ID3D12Resource* ui = nullptr, D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON);
+                  ID3D12Resource* ui = nullptr, D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON,
+                  ID3D12Resource* depth = nullptr, D3D12_RESOURCE_STATES depthState = D3D12_RESOURCE_STATE_COMMON);
 
     // Completes a deferred dispatch after the command list has been queued
     // behind a CPU-signaled fence. Each slot is immutable until its SC fence

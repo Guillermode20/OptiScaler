@@ -4238,6 +4238,47 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("KCD2 only. Redirects the late Scaleform pass into an isolated texture so "
                        "the warp composites an unwarped HUD. Off = the composed frame (HUD warps "
                        "with the world). Applies from the next captured frame.");
+        // Edge-fill / guard-band A/B keys (defaults = live-validated behavior).
+        float edgeExtPx = config->ReprojEdgeExtensionPx.value_or_default();
+        if (ImGui::InputFloat("Edge extension px##reproj-live", &edgeExtPx, 4.0f, 16.0f, "%.0f"))
+            config->ReprojEdgeExtensionPx = std::clamp(edgeExtPx, 0.0f, 256.0f);
+        ShowHelpMarker("0 = static unwarped edge fallback (default). >0 = motion-coherent edge "
+                       "extension limit in px (clamped boundary stretch + inward blur) so the "
+                       "disoccluded wedge moves with the warp.");
+        float guardPct = config->ReprojGuardCropPercent.value_or_default();
+        if (ImGui::InputFloat("Guard crop %##reproj-live", &guardPct, 0.1f, 0.5f, "%.2f"))
+            config->ReprojGuardCropPercent = std::clamp(guardPct, 0.0f, 3.0f);
+        ShowHelpMarker("Fixed per-side guard margin (% of the image) cropped before reprojection. "
+                       "Rotation reveals this reserve before the captured edge is exhausted. "
+                       "Costs a small permanent zoom. 0 = off (default).");
+        // Depth-assisted translation residual v1 (KCD2, opt-in A/B).
+        bool depthEnabled = config->ReprojDepthEnabled.value_or_default();
+        if (ImGui::Checkbox("Depth residual##reproj-live", &depthEnabled))
+            config->ReprojDepthEnabled = depthEnabled;
+        ShowHelpMarker("KCD2 only. Rotation stays canonical; a small confidence-gated, "
+                       "magnitude-clamped translation residual from the tracked depth buffer "
+                       "corrects walking parallax. Off by default (A/B). Requires a tracked "
+                       "depth resource (KCD2 R24G8 reversed-Z).");
+        if (config->ReprojDepthEnabled.value_or_default())
+        {
+            float maxResid = config->ReprojDepthMaxResidualPx.value_or_default();
+            if (ImGui::SliderFloat("Depth residual max px##reproj-live", &maxResid, 2.0f, 24.0f, "%.0f"))
+                config->ReprojDepthMaxResidualPx = std::clamp(maxResid, 1.0f, 48.0f);
+            float vScale = config->ReprojDepthVerticalScale.value_or_default();
+            if (ImGui::SliderFloat("Depth vertical scale##reproj-live", &vScale, 0.0f, 1.0f, "%.2f"))
+                config->ReprojDepthVerticalScale = std::clamp(vScale, 0.0f, 1.0f);
+            ShowHelpMarker("World-Z (bob) share of the translation residual; horizontal is always "
+                           "applied at 100%.");
+            bool depthInverted = config->ReprojDepthInverted.value_or_default();
+            if (ImGui::Checkbox("Depth inverted##reproj-live", &depthInverted))
+                config->ReprojDepthInverted = depthInverted;
+        }
+        bool continuity = config->ReprojContinuityLatch.value_or_default();
+        if (ImGui::Checkbox("Anchor-switch continuity##reproj-live", &continuity))
+            config->ReprojContinuityLatch = continuity;
+        ShowHelpMarker("Eases a freshly-arrived anchor onto the pose the previous (possibly stale) "
+                       "anchor extrapolated to, decaying over two display slots, so stale-anchor "
+                       "switches never snap. Off by default (A/B).");
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {

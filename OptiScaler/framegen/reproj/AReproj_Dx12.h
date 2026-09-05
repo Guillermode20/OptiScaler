@@ -156,6 +156,18 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
     void FillConstants(int fIndex, RP_Constants& constants);
     bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet);
+    // Depth-assisted translation residual v1 (KCD2). Fills the per-slot camera-
+    // space translation residual and focal/plane constants from the freshest
+    // CView pose. Returns false when the residual cannot be trusted (no fresh
+    // camera, cut, or tiny translation) and clears depthEnabled.
+    bool FillTranslationResidual(RP_Constants& constants, const ReprojFramePacket& packet);
+    // Anchor-switch continuity latch: when a newer anchor finally becomes ready,
+    // the stale anchor's extrapolation may have drifted from the fresh anchor's
+    // predicted pose; carry the difference onto the new anchor and decay it over
+    // ~2 display slots so the switch never snaps. Presenter thread only.
+    void ApplyAnchorSwitchContinuity(int previousPacketIndex, int nextPacketIndex, double deadlineMs);
+    bool PredictAnchorBasisMs(const ReprojFramePacket& packet, double deadlineMs, float right[3], float up[3],
+                              float forward[3]);
     void UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp);
     int AcquirePacket();
     void RetirePackets();
@@ -187,6 +199,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void LogMetricsIfDue();
 
     double _metricsTimestamp = 0.0;
+    // Anchor-switch continuity latch state (presenter thread only).
+    double _continuityYawRadians = 0.0;
+    double _continuityPitchRadians = 0.0;
+    int _continuitySlotsRemaining = 0;
+    std::uint64_t _continuityCutGeneration = 0;
+
     std::atomic<uint32_t> _metricsRealFrames { 0 };
     uint32_t _metricsWarpFrames = 0;
     uint32_t _metricsDroppedWarps = 0;

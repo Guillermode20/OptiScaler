@@ -269,6 +269,7 @@ void AReproj_Dx12::PresenterMain()
                 presenterOccluded = true;
                 occlusionProbeCount = 0;
                 consecutiveJammedPresents = 0;
+                _continuitySlotsRemaining = 0;
                 resetPresentationClock();
                 LOG_INFO("Reproj: window minimized, pausing presenter GPU work");
             }
@@ -365,8 +366,17 @@ void AReproj_Dx12::PresenterMain()
                 // immutable until retirement, so the warp queue needs no
                 // additional ordering against the game DIRECT queue.
                 auto& newest = _packets[newestPacketIndex];
+                // Anchor-switch continuity latch (opt-in): compare where the
+                // previous anchor extrapolates to at this deadline vs where the
+                // newly-arrived anchor predicts, and ease the difference onto
+                // the new anchor's first warp(s) instead of snapping.
                 if (activePacketIndex >= 0)
+                {
+                    const double selectionDeadlineMs =
+                        nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
+                    ApplyAnchorSwitchContinuity(activePacketIndex, newestPacketIndex, selectionDeadlineMs);
                     _packets[activePacketIndex].state.store(PacketState::Retired);
+                }
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
@@ -389,6 +399,7 @@ void AReproj_Dx12::PresenterMain()
         if (activePacketIndex < 0)
         {
             nextDeadlineMs = 0.0;
+            _continuitySlotsRemaining = 0; // no anchor in flight: nothing to ease
             std::unique_lock lock(_presentMutex);
             _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(refreshPeriodMs),
                                 [&] { return _stopPresenter.load() || _readyFrameId.load() > activeFrame; });

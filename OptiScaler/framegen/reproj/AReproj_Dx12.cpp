@@ -509,7 +509,190 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
     StoreReprojVec3(constants.prevCameraForward, pixelRow(denominator));
 }
 
+// Decompose the rotation that takes basis `from` toward the orientation of `to`
+// into (yaw, pitch) parameters matching PrepareRotationConstants' input-latched
+// composition convention: yaw about `yawAxis` with the same handedness, then
+// pitch about the yawed right axis. Returns false when the forward axes are
+// nearly parallel to the yaw axis (degenerate).
+bool AlignBasisYawPitch(const ReprojVec3& fromRight, const ReprojVec3& fromUp, const ReprojVec3& fromForward,
+                        const ReprojVec3& toForward, const ReprojVec3& yawAxis, float* yawRadians,
+                        float* pitchRadians)
+{
+    const auto rejectFromAxis = [](ReprojVec3 v, ReprojVec3 axis)
+    { return v - axis * DotReprojVec3(v, axis); };
+    const ReprojVec3 rawPf = rejectFromAxis(fromForward, yawAxis);
+    const ReprojVec3 rawPt = rejectFromAxis(toForward, yawAxis);
+    const float lenPf = std::sqrt(DotReprojVec3(rawPf, rawPf));
+    const float lenPt = std::sqrt(DotReprojVec3(rawPt, rawPt));
+    if (lenPf < 1.0e-3f || lenPt < 1.0e-3f)
+        return false;
+    const ReprojVec3 pf = rawPf * (1.0f / lenPf);
+    const ReprojVec3 pt = rawPt * (1.0f / lenPt);
+
+    // Composition convention (PrepareRotationConstants, inputLatched):
+    //   Rotate(v, yawAxis, -yaw)  then  Rotate(v, yawedRight, +pitch).
+    // A right-hand rotation of `from` toward `to` by +theta about yawAxis is
+    // therefore produced by the parameter yaw = -theta.
+    const float theta =
+        std::atan2(DotReprojVec3(CrossReprojVec3(pf, pt), yawAxis), DotReprojVec3(pf, pt));
+    const float yaw = -theta;
+    const ReprojVec3 yawedRight = NormalizeReprojVec3(RotateReprojVec3(fromRight, yawAxis, -yaw));
+    const ReprojVec3 yawedForward = RotateReprojVec3(fromForward, yawAxis, -yaw);
+    const float pitch = std::atan2(DotReprojVec3(CrossReprojVec3(yawedForward, toForward), yawedRight),
+                                   DotReprojVec3(yawedForward, toForward));
+    *yawRadians = yaw;
+    *pitchRadians = pitch;
+    return true;
+}
+
+// Per-slot edge-fill / guard-crop / depth-residual scalars derived from the
+// config each display slot. Applied to every warp constants copy so the shader
+// tail is always coherent (edge/guard fields are 0 unless the A/B keys are set).
+void ApplyPerSlotWarpConstants(RP_Constants& c, uint32_t displayWidth, uint32_t displayHeight)
+{
+    const float extPx = std::clamp(Config::Instance()->ReprojEdgeExtensionPx.value_or_default(), 0.0f, 256.0f);
+    c.edgeExtensionPx = extPx;
+    const float guardPct = std::clamp(Config::Instance()->ReprojGuardCropPercent.value_or_default(), 0.0f, 3.0f);
+    c.guardCropPxX = guardPct * 0.01f * static_cast<float>(displayWidth);
+    c.guardCropPxY = guardPct * 0.01f * static_cast<float>(displayHeight);
+    c.edgeBlendPx = extPx > 0.0f ? std::clamp(extPx * 0.25f, 2.0f, 12.0f) : 0.0f;
+    c.maxResidualPx = std::clamp(Config::Instance()->ReprojDepthMaxResidualPx.value_or_default(), 1.0f, 48.0f);
+    c.verticalScale = std::clamp(Config::Instance()->ReprojDepthVerticalScale.value_or_default(), 0.0f, 1.0f);
+}
+
 } // namespace
+
+bool AReproj_Dx12::PredictAnchorBasisMs(const ReprojFramePacket& packet, double deadlineMs, float outRight[3],
+                                        float outUp[3], float outForward[3])
+{
+    const auto& c = packet.constants;
+    if (!packet.hasCamera || c.mode != 2 || packet.sourcePoseInterval <= 0.0)
+        return false;
+    const double refreshHz = TargetRefreshHz();
+    const double refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
+    const double represented = packet.sourcePoseInterval > 1.0 ? packet.sourcePoseInterval
+                              : (packet.rawFrameDelta > 1.0 ? packet.rawFrameDelta : packet.frameDelta);
+    const double realPeriodMs = std::max(represented, refreshPeriodMs);
+    const double anchorAgeMs = std::max(0.0, deadlineMs - packet.renderTimestamp);
+    constexpr float kMaxWarpStep = 2.5f; // must match the presenter's maxTimeStep
+    const float timeStep =
+        std::clamp(static_cast<float>(anchorAgeMs / std::max(realPeriodMs, 1.0)), 0.0f, kMaxWarpStep);
+
+    const auto right = NormalizeReprojVec3(LoadReprojVec3(c.cameraRight));
+    const auto up = NormalizeReprojVec3(LoadReprojVec3(c.cameraUp));
+    const auto forward = NormalizeReprojVec3(LoadReprojVec3(c.cameraForward));
+    if (timeStep <= 0.0f)
+    {
+        StoreReprojVec3(outRight, right);
+        StoreReprojVec3(outUp, up);
+        StoreReprojVec3(outForward, forward);
+        return true;
+    }
+    RP_Constants temp = c;
+    temp.timeStep = timeStep;
+    ReprojVec3 predictedRight {}, predictedUp {}, predictedForward {};
+    if (!ExtrapolateCameraRotation(temp, right, up, forward, &predictedRight, &predictedUp, &predictedForward))
+        return false;
+    StoreReprojVec3(outRight, predictedRight);
+    StoreReprojVec3(outUp, predictedUp);
+    StoreReprojVec3(outForward, predictedForward);
+    return true;
+}
+
+void AReproj_Dx12::ApplyAnchorSwitchContinuity(int previousPacketIndex, int nextPacketIndex, double deadlineMs)
+{
+    // Presenter thread only. Cleared (including on every new switch) so a stale
+    // latch can never leak across unrelated selections.
+    _continuityYawRadians = 0.0;
+    _continuityPitchRadians = 0.0;
+    _continuitySlotsRemaining = 0;
+    _continuityCutGeneration = 0;
+    if (!Config::Instance()->ReprojContinuityLatch.value_or_default() || previousPacketIndex < 0 ||
+        nextPacketIndex < 0 || previousPacketIndex == nextPacketIndex)
+        return;
+    const auto& prevPacket = _packets[previousPacketIndex];
+    const auto& nextPacket = _packets[nextPacketIndex];
+    // Only camera warps participate; reset/unwarped anchors (blits) never carry.
+    if (!prevPacket.hasCamera || !nextPacket.hasCamera || !prevPacket.warpAllowed || !nextPacket.warpAllowed)
+        return;
+    // Never carry across a camera cut or an unknown build (cut generation 0).
+    if (nextPacket.sourceCutGeneration == 0 ||
+        nextPacket.sourceCutGeneration != prevPacket.sourceCutGeneration)
+        return;
+
+    float oldRight[3] {}, oldUp[3] {}, oldForward[3] {};
+    float newRight[3] {}, newUp[3] {}, newForward[3] {};
+    if (!PredictAnchorBasisMs(prevPacket, deadlineMs, oldRight, oldUp, oldForward) ||
+        !PredictAnchorBasisMs(nextPacket, deadlineMs, newRight, newUp, newForward))
+        return;
+
+    // yaw about world-up (KCD2 +Z) when the hook is present, matching
+    // PrepareRotationConstants; generic cameras keep their local up.
+    const auto yawAxis = Kcd2Camera::IsAvailable()
+                             ? ReprojVec3 { 0.0f, 0.0f, 1.0f }
+                             : NormalizeReprojVec3(LoadReprojVec3(newUp));
+    const auto fromRight = LoadReprojVec3(newRight);
+    const auto fromUp = LoadReprojVec3(newUp);
+    const auto fromForward = LoadReprojVec3(newForward);
+    float yawErr = 0.0f;
+    float pitchErr = 0.0f;
+    if (!AlignBasisYawPitch(fromRight, fromUp, fromForward, LoadReprojVec3(oldForward), yawAxis, &yawErr, &pitchErr))
+        return;
+    // Ceiling: never inject more rotation than a plausible single-slot warp.
+    constexpr float maxCarry = 0.06f; // ~3.4 degrees
+    yawErr = std::clamp(yawErr, -maxCarry, maxCarry);
+    pitchErr = std::clamp(pitchErr, -maxCarry, maxCarry);
+    if (std::abs(yawErr) < 1.0e-4f && std::abs(pitchErr) < 1.0e-4f)
+        return;
+    _continuityYawRadians = yawErr;
+    _continuityPitchRadians = pitchErr;
+    _continuitySlotsRemaining = 2; // slot 0 at 100%, slot 1 at 40%, then zero
+    _continuityCutGeneration = nextPacket.sourceCutGeneration;
+}
+
+bool AReproj_Dx12::FillTranslationResidual(RP_Constants& constants, const ReprojFramePacket& packet)
+{
+    // Depth-assisted residual v1 is KCD2-specific: it needs the fresh CView
+    // world position alongside the anchor's. Everything else (including stalls
+    // and camera cuts) stays rotation-only, which is the point of the gating.
+    constants.depthEnabled = 0; // conservative until proven fresh and sane below
+    if (packet.constants.depthEnabled == 0 || !packet.hasCamera || !Kcd2Camera::IsAvailable())
+        return false;
+    Kcd2Camera::Snapshot latest {};
+    Kcd2Camera::Snapshot previous {};
+    if (!Kcd2Camera::ReadSnapshots(latest, previous))
+        return false;
+    if (latest.timestampMs <= packet.sourcePoseTimestamp || latest.cutGeneration != packet.sourceCutGeneration)
+        return false; // no newer pose (stall/cut): rotation-only
+
+    const float* anchorPos = packet.constants.cameraPosition;
+    const double dx = static_cast<double>(latest.position[0]) - anchorPos[0];
+    const double dy = static_cast<double>(latest.position[1]) - anchorPos[1];
+    const double dz = static_cast<double>(latest.position[2]) - anchorPos[2];
+    const double horizontal = std::sqrt(dx * dx + dy * dy);
+    const double verticalRaw = std::abs(dz);
+    // Sub-millimeter jitter (standing/idle bob, tracking noise) stays rotation-only.
+    if (horizontal + verticalRaw < 0.0015)
+        return false;
+    // Teleport/lunge guard: never correct a translation jump of more than 0.75 m.
+    if (horizontal > 0.75 || verticalRaw > 0.75)
+        return false;
+
+    // Vertical (world-Z, KCD2 up) bob damp: walking bob is high-frequency and
+    // fights the residual; v1 starts at 25% and the key is exposed for A/B.
+    const float vScale = std::clamp(Config::Instance()->ReprojDepthVerticalScale.value_or_default(), 0.0f, 1.0f);
+    const ReprojVec3 worldDelta { static_cast<float>(dx), static_cast<float>(dy),
+                                 static_cast<float>(dz * static_cast<double>(vScale)) };
+    const auto right = NormalizeReprojVec3(LoadReprojVec3(packet.constants.cameraRight));
+    const auto up = NormalizeReprojVec3(LoadReprojVec3(packet.constants.cameraUp));
+    const auto forward = NormalizeReprojVec3(LoadReprojVec3(packet.constants.cameraForward));
+    constants.txCameraSpace[0] = DotReprojVec3(right, worldDelta);
+    constants.txCameraSpace[1] = DotReprojVec3(up, worldDelta);
+    constants.txCameraSpace[2] = DotReprojVec3(forward, worldDelta);
+    constants.txCameraSpace[3] = 0.0f;
+    constants.depthEnabled = 1; // planes/focal/inverted stay as captured
+    return true;
+}
 
 bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet)
 {
@@ -578,7 +761,20 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     if (!std::isfinite(yaw) || !std::isfinite(pitch))
         return false;
 
-    // Ceiling per slot: beyond this the warp under-rotates and the correction
+    // Anchor-switch continuity latch (opt-in): when a newer anchor finally
+    // arrives its predicted pose at this deadline can differ from where the
+    // previous (possibly stale) anchor was extrapolated to. Carry that
+    // difference onto this anchor's first output(s) so the world position never
+    // snaps; decay 100% -> ~40% -> 0 across the first display slots.
+    if (_continuitySlotsRemaining > 0 && packet.sourceCutGeneration == _continuityCutGeneration)
+    {
+        const double carry = _continuitySlotsRemaining >= 2 ? 1.0 : 0.4;
+        yaw += _continuityYawRadians * carry;
+        pitch += _continuityPitchRadians * carry;
+    }
+
+    // Ceiling per slot (applied to the final combined rotation, continuity
+    // carry included): beyond this the warp under-rotates and the correction
     // lands next slot (fast-flick stutter). Live logs showed slots binding at
     // the old 0.08 ceiling, so it now admits ~660 deg/s flicks; the cost is
     // larger transient edge disocclusion on extreme flicks only.
@@ -590,9 +786,16 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         pitch *= maxRotation / rotation;
     }
 
+    // Depth translation residual (KCD2, opt-in): fill the per-slot camera-space
+    // translation from the freshest CView pose. On failure depthEnabled stays
+    // cleared and this slot warps rotation-only.
+    FillTranslationResidual(constants, packet);
+
     PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch), pBaseRight, pBaseUp,
                              pBaseForward);
     ++_metricsLateInputApplied;
+    if (_continuitySlotsRemaining > 0)
+        --_continuitySlotsRemaining;
     _metricsLateInputMaxDegrees = std::max(
         _metricsLateInputMaxDegrees, static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
     return true;
@@ -834,10 +1037,17 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
     // applied below, after the metrics scope, so the pacing sleep is never
     // counted as present block.
     const auto doneMs = Util::MillisecondsNow();
-    std::scoped_lock metricsLock(_metricsMutex);
-    ++_metricsSkippedAnchorSamples;
-    _metricsGamePresentBlockMaxMs =
-        std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStartMs));
+    {
+        // Metrics scope is closed before the pacer: the game thread may sleep
+        // most of a source interval in paceReprojectionSource, and holding
+        // _metricsMutex across that sleep would stall the presenter behind it
+        // (RecordWarpFrame / the log line / GetRuntimeMetrics all take the
+        // lock), which can itself produce missed display slots.
+        std::scoped_lock metricsLock(_metricsMutex);
+        ++_metricsSkippedAnchorSamples;
+        _metricsGamePresentBlockMaxMs =
+            std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStartMs));
+    }
     // Opt-in source cap (60->120 A/B test): sleep this game-present thread onto
     // the absolute cap grid after the anchor handoff, so the next frame starts
     // on cadence. 0 / uncapped clears the grid and never sleeps; the cap only
@@ -895,6 +1105,54 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
          (!packet.hasUi || CopyPacketResource(cmdList, ui, kcd2UiState, &packet.ui, packet.uiState, L"Reproj_PacketUI"));
     if (!ok)
         return false;
+
+    // Depth-assisted residual source (optional, fail-open, opt-in A/B key). The
+    // tracked per-frame depth resource (KCD2 probe: R24G8_TYPELESS, reversed-Z,
+    // internal render resolution) is copied on the SAME inline submit as color/
+    // UI, so it is as fresh as the color and gated by the same capture fence —
+    // no worker, no second queue. When the tracker has no depth, the resource is
+    // not shader-viewable, or the copy fails, the packet simply stays
+    // rotation-only. The anchor itself never fails because of depth.
+    // The residual v1 is KCD2-specific (fresh CView pose required), so the
+    // capture only runs when the hook is live — other games (DRG regression)
+    // never pay the extra depth copy even if the key is left enabled.
+    if (Config::Instance()->ReprojDepthEnabled.value_or_default() && Kcd2Camera::IsAvailable())
+    {
+        auto depthRes = GetResource(FG_ResourceType::Depth, sourceIndex);
+        if (depthRes && depthRes->GetResource() != nullptr && IsResourceReady(FG_ResourceType::Depth, sourceIndex))
+        {
+            auto* depthSource = depthRes->GetResource();
+            if (CopyPacketResource(cmdList, depthSource, depthRes->state, &packet.depth, packet.depthState,
+                                   L"Reproj_PacketDepth"))
+            {
+                const auto dd = packet.depth->GetDesc();
+                packet.depthWidth = static_cast<uint32_t>(dd.Width);
+                packet.depthHeight = dd.Height;
+                packet.depthFormat = dd.Format;
+            }
+            else
+            {
+                SAFE_RELEASE(packet.depth);
+                packet.depthState = D3D12_RESOURCE_STATE_COMMON;
+                packet.depthWidth = packet.depthHeight = 0;
+                packet.depthFormat = DXGI_FORMAT_UNKNOWN;
+            }
+        }
+        else
+        {
+            SAFE_RELEASE(packet.depth);
+            packet.depthState = D3D12_RESOURCE_STATE_COMMON;
+            packet.depthWidth = packet.depthHeight = 0;
+            packet.depthFormat = DXGI_FORMAT_UNKNOWN;
+        }
+    }
+    else
+    {
+        SAFE_RELEASE(packet.depth);
+        packet.depthState = D3D12_RESOURCE_STATE_COMMON;
+        packet.depthWidth = packet.depthHeight = 0;
+        packet.depthFormat = DXGI_FORMAT_UNKNOWN;
+    }
 
     Kcd2HudIsolation::OnFrameCaptured(gameBackBuffer);
 
@@ -972,6 +1230,38 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.retirementFenceValue = 0;
     packet.frameId = ++_publishedFrameId;
     packet.sourcePoseTimestamp = sourceTimestamp;
+
+    // Depth metadata (v1, KCD2): engage the residual only when a depth copy
+    // exists, the anchor carries a real camera pose, the projection is sane, and
+    // the resource can be viewed by the warp shader. txCameraSpace stays zeroed
+    // here — the per-slot late latch fills it from the freshest CView pose, so a
+    // slot with no fresh camera automatically degrades to rotation-only.
+    packet.constants.depthEnabled = 0;
+    packet.constants.txCameraSpace[0] = 0.0f;
+    packet.constants.txCameraSpace[1] = 0.0f;
+    packet.constants.txCameraSpace[2] = 0.0f;
+    packet.constants.txCameraSpace[3] = 0.0f;
+    if (packet.hasCamera && packet.depth != nullptr && packet.depthWidth > 0 && packet.depthHeight > 0 &&
+        ReprojDepthSrvViewFormat(packet.depthFormat) != DXGI_FORMAT_UNKNOWN)
+    {
+        const float nearP = haveKcd2Snapshots ? currentCamera.nearPlane : _cameraNear[sourceIndex];
+        const float farP = haveKcd2Snapshots ? currentCamera.farPlane : _cameraFar[sourceIndex];
+        const float vFov = packet.constants.cameraVFov;
+        const float aspect = packet.constants.cameraAspect;
+        if (nearP > 0.0f && farP > nearP && vFov > 0.01f && vFov < 3.0f && aspect > 0.01f)
+        {
+            const float tanHalf = std::tan(vFov * 0.5f);
+            const auto cd = colorDesc;
+            packet.constants.depthEnabled = 1;
+            packet.constants.depthInverted = Config::Instance()->ReprojDepthInverted.value_or_default() ? 1u : 0u;
+            packet.constants.depthPlanes[0] = nearP;
+            packet.constants.depthPlanes[1] = farP;
+            // Color-image focal lengths (px): fx = W/(2*aspect*tan(vfov/2)), fy = H/(2*tan(vfov/2)).
+            packet.constants.focalPxX =
+                tanHalf > 1.0e-6f ? static_cast<float>(cd.Width) / (2.0f * aspect * tanHalf) : 0.0f;
+            packet.constants.focalPxY = tanHalf > 1.0e-6f ? static_cast<float>(cd.Height) / (2.0f * tanHalf) : 0.0f;
+        }
+    }
 
     // Submit the inline capture on the game DIRECT queue and record the fence
     // value the presenter waits on before warping this anchor.
@@ -1144,13 +1434,19 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
     auto constants = content.constants;
     constants.timeStep = timeStep;
+    // Edge-fill / guard-crop / residual scalars come from the config per slot
+    // (defaults are 0/off, so this branch's validated behavior is unchanged).
+    ApplyPerSlotWarpConstants(constants, content.constants.displayWidth, content.constants.displayHeight);
     const bool deferredLateLatch = _lateLatchFence != nullptr && _presentQueue != nullptr;
     if (!deferredLateLatch)
     {
         // Safe fallback for partial initialization: constants are written before
         // execution when no latch fence is available.
         if (!ApplyLateInput(constants, packet))
+        {
+            constants.depthEnabled = 0; // the residual only rides a late-latched slot
             PrepareRotationConstants(constants, false);
+        }
     }
     else
     {
@@ -1168,10 +1464,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
     // The isolated UI (when the anchor was captured with HUD isolation) is
     // composited unwarped in the same dispatch; a composed capture dispatches
-    // with ui == nullptr (RPD then samples color for both SRVs).
+    // with ui == nullptr (RPD then samples color for both SRVs). The optional
+    // depth residual binds at t2 only when this anchor carried a depth copy.
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
                                     outputIndex, deferredLateLatch, packet.hasUi ? packet.ui : nullptr,
-                                    packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON);
+                                    packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON, content.depth,
+                                    content.depthState);
     if (!ok)
     {
         backBuffer->Release();
@@ -1232,8 +1530,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
+        ApplyPerSlotWarpConstants(lateConstants, content.constants.displayWidth, content.constants.displayHeight);
         if (!ApplyLateInput(lateConstants, packet))
+        {
+            lateConstants.depthEnabled = 0; // the residual only rides a late-latched slot
             PrepareRotationConstants(lateConstants, false);
+        }
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         // Publish the persistent upload-buffer write before releasing the GPU
@@ -1648,12 +1950,16 @@ bool AReproj_Dx12::Present()
             }
             Kcd2HudIsolation::OnFrameCaptured(gameBackBuffer);
             SAFE_RELEASE(gameBackBuffer);
-            std::scoped_lock metricsLock(_metricsMutex);
-            // block= covers the whole present; the opt-in source cap is applied
-            // below, after metrics, so the pacing sleep is not counted as block.
             const auto doneMs = Util::MillisecondsNow();
-            _metricsGamePresentBlockMaxMs =
-                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            {
+                // block= covers the whole present; the opt-in source cap is
+                // applied below. The metrics scope is closed before the pacer
+                // so the pacing sleep never holds _metricsMutex (see
+                // SkipAnchorPublication) and is not counted as block.
+                std::scoped_lock metricsLock(_metricsMutex);
+                _metricsGamePresentBlockMaxMs =
+                    std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            }
             // Opt-in source cap (60->120 A/B test); see SkipAnchorPublication.
             FrameLimit::paceReprojectionSource(true);
             return advanced;
@@ -1706,13 +2012,16 @@ bool AReproj_Dx12::Present()
             _readyFrameId.store(packet.frameId);
             _presentCv.notify_one();
             SAFE_RELEASE(gameBackBuffer);
-            std::scoped_lock metricsLock(_metricsMutex);
-            // block= covers the present (capture submit + publication) here;
-            // the opt-in source cap is applied below, after metrics, so the
-            // pacing sleep is never counted as present block.
             const auto doneMs = Util::MillisecondsNow();
-            _metricsGamePresentBlockMaxMs =
-                std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            {
+                // block= covers the present (capture submit + publication)
+                // here. The metrics scope is closed before the pacer so the
+                // pacing sleep never holds _metricsMutex (see
+                // SkipAnchorPublication) and is never counted as present block.
+                std::scoped_lock metricsLock(_metricsMutex);
+                _metricsGamePresentBlockMaxMs =
+                    std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            }
             // Opt-in source cap (60->120 A/B test): sleep this game-present
             // thread onto the absolute cap grid after publication so the next
             // frame starts on cadence. 0 / uncapped clears the grid and never
@@ -2541,8 +2850,13 @@ void AReproj_Dx12::ReleaseObjects()
     {
         SAFE_RELEASE(_packets[i].color);
         SAFE_RELEASE(_packets[i].ui);
+        SAFE_RELEASE(_packets[i].depth);
         _packets[i].colorState = D3D12_RESOURCE_STATE_COMMON;
         _packets[i].uiState = D3D12_RESOURCE_STATE_COMMON;
+        _packets[i].depthState = D3D12_RESOURCE_STATE_COMMON;
+        _packets[i].depthWidth = 0;
+        _packets[i].depthHeight = 0;
+        _packets[i].depthFormat = DXGI_FORMAT_UNKNOWN;
         _packets[i].captureFenceValue = 0;
         _packets[i].completionFence = nullptr;
         _packets[i].completionFenceValue = 0;
