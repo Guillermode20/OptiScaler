@@ -4193,11 +4193,11 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->FGEnabled = enabled;
             state.fgChanged = true;
         }
-        // async-simple: one fixed pipeline — composed capture on the game DIRECT
-        // queue, rotation-only warp on the presenter's single DIRECT queue, always
-        // warp repeated slots, never pace the game. The experimental toggles that
-        // used to live here control machinery that no longer exists (COMPUTE warp
-        // queue, HUD isolation, adaptive late latch, source cap) and are removed.
+        // async-simple: one fixed pipeline — composed capture on the game
+        // DIRECT queue, rotation-only warp on the presenter's single DIRECT
+        // queue, always warp repeated slots. Only controls with live machinery
+        // on this branch are exposed; the rest of the experimental surface
+        // (COMPUTE warp queue, capture worker, adaptive late latch) is gone.
         ImGui::TextDisabled("composed frame -> display-rate rotation warp");
         ImGui::Spacing();
         ImGui::PushItemWidth(180.0f * menuResScale);
@@ -4209,12 +4209,42 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::SliderFloat("Smoothing##reproj-live", &smooth, 0.0f, 0.95f, "%.2f"))
             config->ReprojSmoothing = std::clamp(smooth, 0.0f, 0.95f);
         ShowHelpMarker("EMA on KCD2 camera angular velocity. 0=off. 0.25 default.");
+        float sourceCap = config->ReprojSourceFramerateLimit.value_or_default();
+        if (ImGui::InputFloat("Source FPS cap##reproj-live", &sourceCap, 1.0f, 10.0f, "%.1f Hz"))
+            config->ReprojSourceFramerateLimit = std::clamp(sourceCap, 0.0f, 1000.0f);
+        ShowHelpMarker("Opt-in game-thread cap for the 60->120 A/B test. 0 = uncapped "
+                       "(default; the game owns source cadence). 60 on a 120 Hz display yields "
+                       "~60 new + 60 repeated warped outputs. Only applied while the async "
+                       "presenter is running and the chain is virtualized.");
+        float latchLead = config->ReprojLateSampleLead.value_or_default();
+        if (ImGui::InputFloat("Late sample lead##reproj-live", &latchLead, 0.5f, 1.0f, "%.1f ms"))
+            config->ReprojLateSampleLead = std::clamp(latchLead, 0.0f, 20.0f);
+        ShowHelpMarker("ms before the present deadline to release the deferred latch and sample "
+                       "input. Values <= 0.5 are treated as auto (fixed 3 ms default). Smaller = "
+                       "fresher input; too small misses display slots.");
+        float sensX = config->ReprojMouseSensitivityX.value_or_default();
+        if (ImGui::InputFloat("Mouse sens X##reproj-live", &sensX, 0.0001f, 0.001f, "%.5f"))
+            config->ReprojMouseSensitivityX = std::clamp(sensX, 0.0f, 0.00065f);
+        ShowHelpMarker("Radians per raw-mouse count for the late latch. 0 = auto-tracked from "
+                       "rendered pose pairs.");
+        float sensY = config->ReprojMouseSensitivityY.value_or_default();
+        if (ImGui::InputFloat("Mouse sens Y##reproj-live", &sensY, 0.0001f, 0.001f, "%.5f"))
+            config->ReprojMouseSensitivityY = std::clamp(sensY, 0.0f, 0.00065f);
+        ShowHelpMarker("Radians per raw-mouse count for the late latch. 0 = auto-tracked from "
+                       "rendered pose pairs.");
+        bool hudIsolation = config->ReprojHudIsolation.value_or_default();
+        if (ImGui::Checkbox("KCD2 HUD isolation##reproj-live", &hudIsolation))
+            config->ReprojHudIsolation = hudIsolation;
+        ShowHelpMarker("KCD2 only. Redirects the late Scaleform pass into an isolated texture so "
+                       "the warp composites an unwarped HUD. Off = the composed frame (HUD warps "
+                       "with the world). Applies from the next captured frame.");
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {
             auto m = reproj->GetRuntimeMetrics();
             ImGui::Separator();
-            ImGui::TextDisabled("poseAge %.1f ms | capWait %u | rotation", m.poseAgeMs, m.captureNotReady);
+            ImGui::TextDisabled("poseAge %.1f ms | capWait %u | rotation | source cap %.0f Hz", m.poseAgeMs,
+                                m.captureNotReady, config->ReprojSourceFramerateLimit.value_or_default());
         }
     }
 

@@ -206,12 +206,14 @@ class ReprojectionTests(unittest.TestCase):
         # Final spin window is 1.0ms on Proton for timer granularity, 0.2ms on Windows
         self.assertIn("spinWindowMs", wait)
         frame_limit = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
-        # async-simple: the source pacer trio is gone; sleepForPrecisePacingMs
-        # is the only remaining precise sleeper and owns the Proton spin tail.
-        self.assertNotIn("paceReprojectionSource", frame_limit)
+        # async-simple: sleepForPrecisePacingMs owns the Proton spin tail for
+        # the presenter AND the opt-in source cap (which must not overshoot its
+        # 60 Hz grid by 1-3 ms on Wine, so it reuses this precise sleeper).
         self.assertIn("void FrameLimit::sleepForPrecisePacingMs", frame_limit)
         self.assertIn("spinNs", frame_limit)
         self.assertIn("200'000", frame_limit)
+        self.assertIn("void FrameLimit::paceReprojectionSource", frame_limit)
+        self.assertIn("sleepForPrecisePacingMs(static_cast<double>(deadlineNs - nowNs)", frame_limit)
 
     def test_completion_clock_cannot_run_away_from_present(self):
         # Wine advances frame statistics per composed output, so the presenter
@@ -252,21 +254,27 @@ class ReprojectionTests(unittest.TestCase):
             embedded = common.split(marker, 1)[1].split('\n)";', 1)[0]
             self.assertEqual(embedded.strip(), source_path.read_text(encoding="utf-8").strip())
 
-    def test_reproj_never_paces_the_game_thread(self):
-        # async-simple P1: every source-pacing call site is gone from the reproj
-        # path. The game thread publishes anchors and returns without OptiScaler
-        # ever sleeping or throttling it; FG_Hooks never applies the half-rate
-        # rule to a reprojection output either.
+    def test_source_cap_is_opt_in_and_only_on_virtualized_publication(self):
+        # async-simple keeps its default of never throttling the game thread,
+        # but exposes an OPT-IN [AsyncTimewarp] SourceFramerateLimit for the
+        # 60->120 A/B test. The pacer therefore exists only at the game-present
+        # publication sites (skip, inline skip, captured-advanced) that run
+        # while the async presenter is Running and the chain is virtualized.
+        # FG_Hooks still never applies the half-rate rule to a reproj output,
+        # and the generic FrameLimit::sleep stays bypassed.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         hooks = (root / "OptiScaler/hooks/FG_Hooks.cpp").read_text(encoding="utf-8")
-        self.assertNotIn("paceReprojectionSource", source)
         self.assertNotIn("paceReprojectionSource", hooks)
         self.assertNotIn("sleepForReprojectionSourceMs", source)
+        self.assertEqual(source.count("FrameLimit::paceReprojectionSource(true)"), 3)
+        self.assertEqual(source.count("FrameLimit::paceReprojectionSource(false)"), 0)
         publish = source.split("if (captured && submitted && advanced)", 1)[1].split(
-            "// Hard publication failures", 1)[0]
-        # The published frame still notifies the presenter before returning.
+            "// Any failed virtual-buffer handoff is a hard ownership failure", 1)[0]
+        # The published frame still notifies the presenter before the opt-in
+        # pacing sleep, and the sleep is outside the block= metrics scope.
         self.assertIn("_presentCv.notify_one()", publish)
+        self.assertIn("FrameLimit::paceReprojectionSource(true)", publish)
         self.assertIn("return true", publish)
 
     def test_shared_frame_limiter_bypasses_reprojection(self):
@@ -285,13 +293,16 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("metrics.displayFps", menu)
         self.assertIn("Source: %6.1f | Display: %6.1f", menu)
 
-    def test_every_source_frame_is_captured_without_pacing(self):
+    def test_every_source_frame_is_captured_with_optional_cap_after(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        # Every virtualized present publishes an anchor (no sampling skip) and
-        # none of them sleep for a source cap afterwards.
+        # Every virtualized present publishes an anchor (no sampling skip); the
+        # opt-in source cap (default 0/off) sleeps after publication, never
+        # before capture, so capped cadence never delays an anchor submission.
         self.assertIn("constexpr bool captureThisPresent = true", source)
-        self.assertNotIn("FrameLimit::paceReprojectionSource", source)
+        capture = source.split("bool AReproj_Dx12::CaptureFramePacket", 1)[1].split(
+            "bool AReproj_Dx12::DisplayPacket", 1)[0]
+        self.assertNotIn("paceReprojectionSource", capture)
 
     def test_hud_isolation_split_capture_rides_the_single_inline_submit(self):
         # HUD-fix rollover: when Kcd2HudIsolation redirected the HUD into an
@@ -448,16 +459,24 @@ class ReprojectionTests(unittest.TestCase):
         # async-simple: the source limit still parses but defaults to 0 (never pace).
         self.assertIn("ReprojSourceFramerateLimit { 0.0f }", config)
 
-    def test_source_pacer_is_fully_removed_from_frame_limit(self):
-        # async-simple P1 deleted the whole source-cap machinery:
-        # paceReprojectionSource, its sleep helper, and the stats getter no
-        # longer exist in FrameLimit. The presenter sleepers survive.
+    def test_source_pacer_is_an_opt_in_absolute_grid_pacer(self):
+        # The 60->120 A/B source cap is an opt-in absolute-grid pacer (default
+        # 0 = off): overshoots advance the grid without sleeping so cadence
+        # recovers instead of drifting down to 57-58 FPS. It reads ONLY
+        # ReprojSourceFramerateLimit (no generic-FramerateLimit fallback) and
+        # reuses the precise sleeper's Proton spin tail.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
-        self.assertNotIn("paceReprojectionSource", source)
+        pacer = source.split("void FrameLimit::paceReprojectionSource", 1)[1]
         self.assertNotIn("sleepForReprojectionSourceMs", source)
         self.assertNotIn("SourcePacingStats", source)
         self.assertNotIn("g_reprojectionSourceCapHz", source)
+        self.assertIn("ReprojSourceFramerateLimit.value_or_default()", pacer)
+        # Reads only the reproj key — never falls back to the generic limiter.
+        self.assertNotIn("Config::Instance()->FramerateLimit.value_or_default()", pacer)
+        self.assertIn("capChanged", pacer)
+        self.assertIn("stalled", pacer)
+        self.assertIn("sleepForPrecisePacingMs", pacer)
         self.assertIn("void FrameLimit::sleepForPrecisePacingMs", source)
 
     def test_kcd2_input_yaw_uses_world_up_before_pitch(self):

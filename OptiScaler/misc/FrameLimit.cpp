@@ -158,3 +158,70 @@ void FrameLimit::sleepForPrecisePacingMs(double ms)
     if (auto res = combined_sleep(static_cast<int64_t>(ms * 1'000'000.0), spinNs); res)
         LOG_ERROR("Precise pacing sleep failed: {}", res);
 }
+
+void FrameLimit::paceReprojectionSource(bool active)
+{
+    // Opt-in source cap for the async-timewarp 60->120 A/B test (see header).
+    // The grid is absolute, not "minimum interval since last present", so
+    // render jitter cannot accumulate into a cadence that drifts down to
+    // 57-58 FPS (the pacer-overshoot failure mode of the old interval pacer on
+    // Proton). Overshoots advance the grid without sleeping so one slow frame
+    // lets the next frame recover cadence instead of being dragged late too.
+    struct SourcePacer
+    {
+        uint64_t nextDeadlineNs = 0;
+        float capHz = 0.0f;
+    };
+    thread_local SourcePacer pacer;
+
+    float requestedCap = 0.0f;
+    if (active)
+        requestedCap = Config::Instance()->ReprojSourceFramerateLimit.value_or_default();
+    const float capHz = std::clamp(std::isfinite(requestedCap) ? requestedCap : 0.0f, 0.0f, 1000.0f);
+    if (capHz <= 0.0f)
+    {
+        // Uncapped (the shipped default) or disabled: clear the grid so a later
+        // re-enable starts on a fresh deadline instead of an old one.
+        pacer = {};
+        return;
+    }
+
+    // Small target headroom (0.2%) ensures a 60 FPS cap completes 60 frames
+    // per second instead of letting microsecond scheduler jitter pull the
+    // measured rate down to 57-58 FPS.
+    const double targetHz = static_cast<double>(capHz) * 1.002;
+    const uint64_t intervalNs = std::clamp(static_cast<uint64_t>(1'000'000'000.0 / targetHz), 1ULL, 100'000'000'000ULL);
+    const uint64_t nowNs = get_timestamp();
+
+    // Only reset the absolute grid on the first frame, a cap change, or a large
+    // stall (> 2 intervals). Resetting on minor late frames prevents the pacer
+    // from recovering cadence and pulls sustainable 60 FPS down to 55 FPS.
+    const bool capChanged = std::abs(pacer.capHz - capHz) > 0.001f;
+    const bool stalled = pacer.nextDeadlineNs != 0 && (nowNs > pacer.nextDeadlineNs + 2 * intervalNs);
+    if (pacer.nextDeadlineNs == 0 || capChanged || stalled)
+    {
+        pacer.nextDeadlineNs = nowNs + intervalNs;
+        pacer.capHz = capHz;
+        return;
+    }
+
+    if (nowNs >= pacer.nextDeadlineNs)
+    {
+        // The frame finished behind schedule. Advance to the next grid slot
+        // without sleeping so the subsequent frame can recover cadence.
+        while (pacer.nextDeadlineNs <= nowNs)
+            pacer.nextDeadlineNs += intervalNs;
+        return;
+    }
+
+    const uint64_t deadlineNs = pacer.nextDeadlineNs;
+    // Keep the larger Proton spin tail: a coarse timer sleep alone overshoots
+    // the 16.67 ms grid by 1-3 ms on Wine, which reads as source FPS dips.
+    sleepForPrecisePacingMs(static_cast<double>(deadlineNs - nowNs) / 1'000'000.0);
+    const uint64_t completedNs = get_timestamp();
+    pacer.nextDeadlineNs = deadlineNs + intervalNs;
+    // If the sleep overshot by more than a quarter interval, re-anchor the grid
+    // to completion so the error does not carry into the next frame.
+    if (completedNs > pacer.nextDeadlineNs - intervalNs / 4)
+        pacer.nextDeadlineNs = completedNs + intervalNs;
+}

@@ -611,12 +611,12 @@ class Config
 
     // Async timewarp: one fixed pipeline — composed capture on the game DIRECT
     // queue, rotation-only warp on the presenter's single DIRECT queue, always
-    // warp repeated slots, never pace the game. Keep this surface deliberately
-    // small; removed experimental keys (COMPUTE warp queue, HUD isolation
-    // toggles, source pacing, and adaptive late latch) are not coming back.
+    // warp repeated slots, never pace the game by default. Keep this surface
+    // deliberately small; removed experimental machinery (COMPUTE warp queue,
+    // capture worker, adaptive late latch) is not coming back.
     CustomOptional<bool> ReprojEnabled { true };
     CustomOptional<float> ReprojTargetRefresh { 0.0f };         // 0 = active display refresh
-    CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // inert compat read; 0 = never pace the game thread
+    CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // OPT-IN 60->120 A/B source cap; 0 = never pace (default)
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f };     // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojSmoothing { 0.25f };            // EMA filter on camera angular velocity (0=off)

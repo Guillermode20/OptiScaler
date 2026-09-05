@@ -19,6 +19,7 @@
 #include <Util.h>
 #include <hooks/FG_Hooks.h>
 #include <menu/menu_overlay_dx.h>
+#include <misc/FrameLimit.h>
 #include <nvapi/fakenvapi.h>
 #include <wrapped/wrapped_swapchain.h>
 #include <menu/input/input_system.h>
@@ -829,13 +830,19 @@ void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuf
         _presenterState.store(PresenterState::Failed);
     RecordWarpFrame(false, true, 0.0f);
     SAFE_RELEASE(gameBackBuffer);
-    // async-simple: OptiScaler never paces the game thread. block= covers all
-    // game-present work here (the SourceFramerateLimit pacer is gone).
+    // block= covers all game-present work here; the opt-in source cap is
+    // applied below, after the metrics scope, so the pacing sleep is never
+    // counted as present block.
     const auto doneMs = Util::MillisecondsNow();
     std::scoped_lock metricsLock(_metricsMutex);
     ++_metricsSkippedAnchorSamples;
     _metricsGamePresentBlockMaxMs =
         std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStartMs));
+    // Opt-in source cap (60->120 A/B test): sleep this game-present thread onto
+    // the absolute cap grid after the anchor handoff, so the next frame starts
+    // on cadence. 0 / uncapped clears the grid and never sleeps; the cap only
+    // engages while the caller is publishing virtualized anchors.
+    FrameLimit::paceReprojectionSource(true);
 }
 
 bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Resource* gameBackBuffer,
@@ -1642,10 +1649,13 @@ bool AReproj_Dx12::Present()
             Kcd2HudIsolation::OnFrameCaptured(gameBackBuffer);
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
-            // async-simple: no source pacing; block= covers the whole present.
+            // block= covers the whole present; the opt-in source cap is applied
+            // below, after metrics, so the pacing sleep is not counted as block.
             const auto doneMs = Util::MillisecondsNow();
             _metricsGamePresentBlockMaxMs =
                 std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            // Opt-in source cap (60->120 A/B test); see SkipAnchorPublication.
+            FrameLimit::paceReprojectionSource(true);
             return advanced;
         }
 
@@ -1697,12 +1707,19 @@ bool AReproj_Dx12::Present()
             _presentCv.notify_one();
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
-            // async-simple: no source pacing. The presenter owns display
-            // cadence and needs no game-thread cap; block= covers the whole
-            // present (capture submit + publication) here.
+            // block= covers the present (capture submit + publication) here;
+            // the opt-in source cap is applied below, after metrics, so the
+            // pacing sleep is never counted as present block.
             const auto doneMs = Util::MillisecondsNow();
             _metricsGamePresentBlockMaxMs =
                 std::max(_metricsGamePresentBlockMaxMs, static_cast<float>(doneMs - presentStart));
+            // Opt-in source cap (60->120 A/B test): sleep this game-present
+            // thread onto the absolute cap grid after publication so the next
+            // frame starts on cadence. 0 / uncapped clears the grid and never
+            // sleeps. Only reached while the async presenter is Running and
+            // the swapchain is virtualized; every other return path above is
+            // intentionally un-paced.
+            FrameLimit::paceReprojectionSource(true);
             return true;
         }
 

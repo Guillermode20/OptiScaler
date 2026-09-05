@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.45 (2026-09-05)
+* Add opt-in async-timewarp source FPS cap (60->120 A/B) with in-game menu control; re-enable live ATW menu tuning (late sample lead, mouse sens, KCD2 HUD isolation)
+
 ## v10.0.1.44 (2026-09-05)
 * Composite isolated Scaleform UI on fallback/inactive blit path and advance virtual swapchain
 
