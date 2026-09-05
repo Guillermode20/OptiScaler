@@ -1467,6 +1467,38 @@ bool AReproj_Dx12::BlitGameFrameToReal(int fIndex, ID3D12Resource* gameBackBuffe
     ResourceBarrier(cmdList, realBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     ResourceBarrier(cmdList, gameBackBuffer, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
     realBuffer->Release();
+
+    D3D12_RESOURCE_STATES kcd2UiState = D3D12_RESOURCE_STATE_COMMON;
+    auto* ui = Kcd2HudIsolation::GetUIColor(gameBackBuffer, &kcd2UiState);
+    if (ui == nullptr)
+        ui = Kcd2HudIsolation::GetUIColor(fIndex, &kcd2UiState);
+
+    if (ui != nullptr)
+    {
+        if (_device == nullptr)
+            _device = State::Instance().currentD3D12Device;
+        if (_device == nullptr && gameBackBuffer != nullptr)
+            gameBackBuffer->GetDevice(IID_PPV_ARGS(&_device));
+
+        if (State::Instance().currentSwapchain == nullptr && _swapChain != nullptr)
+            State::Instance().currentSwapchain = _swapChain;
+
+        if (_renderUI == nullptr ||
+            Config::Instance()->FGUIPremultipliedAlpha.value_or_default() != _renderUI->IsPreMultipliedAlpha())
+        {
+            if (_device != nullptr)
+                _renderUI = std::make_unique<RUI_Dx12>(
+                    "ReprojUI", _device, Config::Instance()->FGUIPremultipliedAlpha.value_or_default());
+        }
+
+        if (_renderUI != nullptr && _renderUI->IsInit())
+        {
+            _renderUI->Dispatch(realSwapChain, cmdList, ui, kcd2UiState);
+        }
+    }
+
+    Kcd2HudIsolation::OnFrameCaptured(gameBackBuffer);
+
     return SubmitUICommandList(static_cast<UINT>(fIndex));
 }
 
@@ -1514,6 +1546,8 @@ bool AReproj_Dx12::Present()
                 SAFE_RELEASE(gameBackBuffer);
                 return false;
             }
+            wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0);
+            wrapped->AdvanceReprojectionBuffer();
         }
         const auto result = PresentFrame(syncInterval, presentFlags);
         SAFE_RELEASE(gameBackBuffer);
@@ -1705,7 +1739,11 @@ bool AReproj_Dx12::Present()
     if (virtualized)
     {
         if (BlitGameFrameToReal(fIndex, gameBackBuffer))
+        {
+            wrapped->SubmitReprojectionBuffer(virtualBufferIndex, nullptr, 0);
+            wrapped->AdvanceReprojectionBuffer();
             fallbackResult = PresentFrame(syncInterval, presentFlags);
+        }
     }
     else
         fallbackResult = PresentFrame(syncInterval, presentFlags);

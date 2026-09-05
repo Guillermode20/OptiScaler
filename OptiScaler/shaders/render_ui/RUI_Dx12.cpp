@@ -59,7 +59,12 @@ RUI_Dx12::RUI_Dx12(std::string InName, ID3D12Device* InDevice, bool preMultiplie
     _pm = preMultipliedAlpha;
 
     DXGI_SWAP_CHAIN_DESC scDesc {};
-    if (State::Instance().currentSwapchain->GetDesc(&scDesc) != S_OK)
+    auto sc = State::Instance().currentSwapchain;
+    if (sc == nullptr)
+        sc = State::Instance().currentFGSwapchain;
+    if (sc == nullptr)
+        sc = State::Instance().currentRealSwapchain;
+    if (sc == nullptr || sc->GetDesc(&scDesc) != S_OK)
     {
         LOG_ERROR("Can't get swapchain desc!");
         return;
@@ -182,10 +187,10 @@ bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList,
     }
 
     // Check Hudless Buffer
+    D3D12_RESOURCE_DESC scBufferDesc = scBuffer->GetDesc();
     D3D12_RESOURCE_DESC hudlessDesc = hudless->GetDesc();
 
-    if (/*hudlessDesc.Format != scDesc.BufferDesc.Format ||*/ hudlessDesc.Width != scDesc.BufferDesc.Width ||
-        hudlessDesc.Height != scDesc.BufferDesc.Height)
+    if (hudlessDesc.Width != scBufferDesc.Width || hudlessDesc.Height != scBufferDesc.Height)
     {
         scBuffer->Release();
         return false;
@@ -215,8 +220,8 @@ bool RUI_Dx12::Dispatch(IDXGISwapChain3* sc, ID3D12GraphicsCommandList* cmdList,
         ResourceBarrier(cmdList, hudless, state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
     // Start setting pipeline
-    UINT outWidth = scDesc.BufferDesc.Width;
-    UINT outHeight = scDesc.BufferDesc.Height;
+    UINT outWidth = static_cast<UINT>(scBufferDesc.Width);
+    UINT outHeight = scBufferDesc.Height;
 
     FrameDescriptorHeap& currentHeap = _frameHeaps[_counter];
 

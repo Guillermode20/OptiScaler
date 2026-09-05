@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.44 (2026-09-05)
+* Composite isolated Scaleform UI on fallback/inactive blit path and advance virtual swapchain
+
 ## v10.0.1.43 (2026-09-05)
 * Fix KCD2 UI rendering in async timewarp: composite UI in DisplayPacket and stop multi-pass Scaleform wiping
 
