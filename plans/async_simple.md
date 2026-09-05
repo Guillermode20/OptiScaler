@@ -1,502 +1,540 @@
-# async-simple: Brutally Minimal Async Timewarp Baseline
+# async-simple: Low-Latency Async Timewarp Roadmap
 
-> **Branch:** `async-simple` (created from `async-timewarp` @ `b6668d95`).
-> **Reference:** keep `async-timewarp` untouched; it is the machinery museum this
-> branch strips from. Every line/function name below is from `b6668d95`.
+> **Branch:** `async-simple`
+> **Reference branch:** `async-timewarp`
+> **Updated:** 2026-09-05
+>
+> This roadmap starts from the simplified runtime that is already working. The priority from
+> here is motion-to-photon latency and stable display cadence, not adding more machinery.
 
-## Implementation status
+## 0. Current position
 
-- **P1 (pacing removal + A0 gate): landed.** The reproj game thread is never paced:
-  every `paceReprojectionSource` call site in `AReproj_Dx12.cpp` is gone along with
-  the `FrameLimit` pacer itself (`sleepForReprojectionSourceMs`, `SourcePacingStats`,
-  `reprojectionSourcePacingStats`); `FG_Hooks` never lets a reprojection output reach
-  `FrameLimit::sleep`, so the fgActive half-rate rule cannot apply; `ReprojSourceFramerateLimit`
-  defaults to `0` (INI `SourceFramerateLimit=0`); and `kAsyncSimpleStage = 0` implements the
-  A0 identity stage below (presenter live, warp shader never dispatched). `ReprojTelemetry`
-  reports no active source cap. Test pins updated (`tests/reprojection/test_display_clock.py`).
-- **P2 (single-queue composed capture + FrameSlot[3]): landed.** `CaptureFramePacket` now
-  copies exactly one composed frame (HUD included) inline on the game DIRECT queue's UI
-  command list and records the `_uiFence` value as the single warp/readiness/recycle gate.
-  The capture COPY queue, its worker thread, the mid-frame world fence, and the deferred
-  handoff fences are deleted (`handoff` is unconditionally `nullptr/0` — same-queue
-  ordering makes it fence-free); `ReprojHudIsolation` defaults to `false` so the isolation
-  code is inert. The packet ring is trimmed to `kReprojFrameSlots = 3` (`FrameSlot[3]`).
-  Warping is still gated behind `kAsyncSimpleStage` (0 = A0 identity-blit; 1 = warps on).
-- **P3.4 (PresenterMain slim): landed.** `EvaluateRepeatWarpShed` + all shed state
-  (`_repeatWarpShed`, stall/cadence EMAs, `_latestGameStallMs`, feed sites in the game
-  present path) are deleted; `shouldWarp` is unconditional per slot when `kAsyncSimpleStage
-  >= 1` (RepeatWarp absorbed — repeated slots always warp). ui-borrow (`_heldPacketIndex`,
-  `_metricsUiBorrows`) and hitch hold (`_metricsHitchHolds`) are gone — on a real switch the
-  previous anchor retires immediately. The dispatch lead is the fixed `kDispatchLeadMs =
-  3.0` constant (the `_dispatchLeadMs` adaptive controller is deleted); the 1 Hz log dropped
-  its `uiBorrow=`/`hold=`/`shed=`/`stallEma=` keys and `lead=` prints the constant.  Parser
-  tests pinned the deletions (shed/borrow tests inverted to absence); 35/35 pass.
-- **P3.5 (sync-fallback deletion): landed.** `PresentVirtualFrameSync`, `CopyLastFrame`,
-  `DispatchWarp`, and the sync arrays (`_lastColor`/`_uiColor`/`_syncHasUi`/`_syncFence`)
-  are deleted; `_renderUI` is never created by AReproj (RUI composite + the vestigial UI
-  packet param are gone from `DisplayPacket`/`DispatchPacketWarp`). `Present()`'s inactive /
-  paused / failed / non-virtualized paths are plain passthrough: presenter stopped, one
-  same-queue `BlitGameFrameToReal` (virtual buffer → real backbuffer on the game DIRECT
-  queue) when virtualization is up, then `PresentFrame`. No generated frame is ever
-  presented. `_warpOutput` is kept. Parser tests re-pinned (sync-fallback pins inverted to
-  absence, dispatch split re-anchored at `DrainGpuWork`); 35/35 pass.
+`async-simple` has completed the architectural simplification. The branch no longer needs a
+second rewrite.
 
-  **P3 complete** — the runtime is Capture (one DIRECT UI list) + FrameSlot[3] + Presenter
-  (one DIRECT SC queue, one warp shader, one `_scFence`). Warps stay gated behind
-  `kAsyncSimpleStage` (0 = blit) until a CI + KCD2 pass validates this queue model.
-- **P4 (telemetry trim): landed.** `ReprojTelemetry.{h,cpp}` deleted (slot records,
-  snapshots, GPU queries, `TRACE_SLOT_COUNT`); the query heap/readback and
-  `_presentTimestampFrequency` are gone from `CreateAsyncPresenter`; `_currentTelemetrySlot`,
-  `GetTelemetry/GetTelemetrySnapshot`, every `RecordPipeline*` + `_pipe*` atomic, and the
-  `ReprojPipe v=1` 4 Hz line are deleted, along with the now-dead
-  `_reprojectionAdvanceWait*` stats in the wrapped swapchain (their only consumer was
-  ReprojPipe). `DispatchPacketWarp`/`DisplayPacket` lost their `telemetryQueryStart`
-  plumbing. The 1 Hz line is now:
-  `Reproj: source=… display=… (new=… repeat=…) missed=… interval=mean/p95 lead=3.0 poseAge=… queue=… late=applied/samples maxDeg=… dropAnchor=… capC=… capWait=… (mode, block=…)`
-  — dropped `sampLead`, `hud`, `latch/lateAge`, `sensX`, `pace` keys and their dead
-  counters (`_metricsLateCam*`, `_metricsHudComposites`, `_metricsGamePresentPaceMaxMs`).
-  `_trackedMouseSensitivityX` stays (ApplyLateInput steering still uses it).  Parser tests
-  re-pinned (sampLead/hud/ReprojPipe → absence, new key set); 35/35 pass.
-- **P5 (menu/config sweep) + stage flip: landed.** Live KCD2 session (2026-09-04)
-  confirmed the A0 identity pipeline runs clean (async presenter ~100–115 display FPS,
-  zero errors/downgrades) but by design never dispatches the warp — the user-visible
-  "timewarp does nothing". `kAsyncSimpleStage` flipped **0 → 1**: rotation warps now run
-  on the single DIRECT queue. The live reproj menu block (menu_common.cpp, outside the
-  `#if 0` experimental block) toggled machinery deleted in P2/P3 — Source FPS cap,
-  HUD Isolation, Allow Composed Warp, Warp Repeated Slots, Async Compute Queue,
-  Non-blocking handoff, Adaptive late sample — and is trimmed to the real controls
-  (Enable, Target refresh, Smoothing + metrics line). Dead config keys
-  `ReprojAllowComposedWarp`/`ReprojNonBlockingHandoff`/`ReprojRepeatWarp`/
-  `ReprojAsyncComputeWarp` removed from Config.h/Config.cpp;
-  `ReprojHudIsolation`/`ReprojLateSampleLead`/`ReprojSourceFramerateLimit` stay as inert
-  compat reads (Kcd2HudIsolation.cpp compiles reads of the first; tests pin the latter two).
-- **P6 (HUD fix + adaptive late-sample rollover): landed.** The two pieces of parent
-  machinery the user asked back are re-rolled onto the single-queue model.
-  (a) **HUD isolation is live again**: `ReprojHudIsolation` defaults back to `true`
-  (INI `HudIsolation=auto`; the stale `AllowComposedWarp`/`NonBlockingHandoff`/
-  `RepeatWarp`/`AsyncComputeWarp` keys are dropped from the shipped INI).
-  `CaptureFramePacket` queries `Kcd2HudIsolation::GetHudlessColor/GetUIColor` and, when
-  valid for this backbuffer, copies the HUD-less world → `packet.color` AND the isolated
-  UI → `packet.ui` in the **same inline submit** (one list, one `_uiFence` gate — the UI
-  is always as fresh as the color, so no borrow, no world fence, no MarkFrameCaptured:
-  same-queue ordering protects the copies). Composed capture remains the fallback.
-  `DispatchPacketWarp` passes `packet.ui` to the warp so RPD composites the UI unwarped
-  after the rotation warp (`hudlessSource` = premultiplied by default, parent semantics).
-  (b) **Adaptive late-sample lead is back**: the `SAMPLE_LEAD_*` constants and
-  `_lateSampleLeadMs` return, but the controller rides the presenter's own DIRECT queue —
-  after submit the presenter waits for the warp on `_scFence`, measures headroom to the
-  present deadline, and slides the next slot's dispatch/sample lead ±0.25 ms within
-  [2.0, 6.0] (reduce > 2.0 ms headroom, grow < 0.9 ms), so the mouse is sampled as late
-  as the warp allows. `ReprojLateSampleLead` > 0.5 overrides with a constant; `lead=` in
-  the 1 Hz line reports the effective value. Parser tests re-pinned (isolation/controller
-  pins inverted back to presence); 35/35 pass.
+Landed:
 
-## 1. Goal
+- **P1:** removed reprojection source pacing and the FG half-rate interaction.
+- **P2:** reduced capture to inline copies on the game's DIRECT queue and `FrameSlot[3]`.
+- **P3:** reduced the presenter to one DIRECT queue, one warp path, and `_scFence`; removed the
+  COPY worker, COMPUTE warp queue, sync generated-frame fallback, UI borrowing, repeat-warp
+  shedding, and hitch-hold machinery.
+- **P4:** removed per-slot/pipeline telemetry and retained a small 1 Hz runtime summary.
+- **P5:** validated the identity presenter in KCD2 at roughly 100-115 display FPS with no
+  errors/downgrades, then enabled rotation warps.
+- **P6:** restored KCD2 HUD isolation on the single-submit capture path and restored adaptive
+  dispatch-time input sampling without restoring the old queue graph.
 
-Reduce `AReproj` to the smallest runtime that still demonstrates async timewarp in
-KCD2, then prove — with boring acceptance tests, not quality eyeballing — that none
-of the machinery *around* the warp is what poisons the source cadence (the recurring
-57–59 FPS dips). One captured texture, one presenter, one output:
+The current runtime is a valid minimal async-timewarp prototype. The next work should improve
+latency and prove performance, while preserving this architecture.
+
+## 1. Primary goal
+
+Make camera rotation respond as close to scanout as the hardware and OS allow, while keeping
+KCD2's renderer independent of the reprojection presenter.
+
+The desired end state is:
 
 ```text
-KCD2 renders frame
-    ↓
-copy final color (composed backbuffer)        ← Capture: ONE command queue
-    ↓
-publish latest frame (color + source camera + fence)
-    ↓
-return from Present immediately               ← NO pacing calls on the game thread
+KCD2 source renderer                    async presenter
 
-separate presenter thread:
-    ↓
-wait for display slot
-    ↓
-warp latest color (rotation-only)             ← Presenter: ONE queue, ONE warp shader, ONE fence
-    ↓
-present
+render source frame
+      |
+      v
+capture newest anchor
+      |
+      +------------------------------------+
+      |                                    |
+return immediately                        v
+      |                           choose newest complete anchor
+render next source frame                  |
+                                           v
+                                  prepare warp command list
+                                           |
+                                           v
+                                  submit behind latch gate
+                                           |
+                                  GPU waits on latch fence
+                                           |
+                              near predicted scanout deadline
+                                           |
+                                  sample newest input/pose
+                                           |
+                                  write final warp constants
+                                           |
+                                  signal latch fence
+                                           |
+                                           v
+                                    rotation warp
+                                           |
+                                     HUD composite
+                                           |
+                                           v
+                                        Present
 ```
 
-Target data model:
+The source game can still update simulation, animation, movement, combat, and world state at
+60 FPS. The rotational view correction should instead track the presenter cadence, for
+example 120, 144, 165, or 240 Hz.
+
+"Near-zero latency" means removing most of the source render pipeline from rotational
+mouse-look latency. Absolute zero motion-to-photon latency is impossible because input
+polling, warp GPU time, scanout, display processing, and pixel response remain.
+
+## 2. Architecture freeze
+
+Do not redesign the runtime unless measurements prove one of these decisions is wrong.
+
+### Keep
 
 ```text
-AReproj
-│
-├── Capture
-│   └── one command queue                     (the game's DIRECT queue)
-│
-├── FrameSlot[3]                              (kReprojFrameSlots = 3)
-│   ├── color                                 (full-res composed copy)
-│   ├── source camera                         (RP_Constants pose data @ capture time)
-│   └── fence                                 (one capture-completion value on _uiFence)
-│
-└── Presenter
-    ├── one queue                             (_presentQueue, DIRECT)
-    ├── one warp shader                       (RP_Dx12 + RPD.hlsl, unchanged)
-    └── one fence                             (retirement on _scFence)
+Capture:
+  game DIRECT queue
+  one inline color copy
+  optional isolated UI copy in the same submit
+  _uiFence as capture completion gate
+
+Packets:
+  FrameSlot[3]
+  latest completed anchor wins
+  unfinished anchor never blocks presenter
+  packet pressure never blocks game thread
+
+Presenter:
+  _presentQueue, DIRECT, normal priority
+  RP_Dx12 rotation warp
+  _scFence for retirement/completion
+  one real present per display slot
+
+Input:
+  KCD2 camera hook
+  raw-input pump
+  ApplyLateInput
 ```
 
-### Non-goals (cut, not ported)
-
-- Source pacing of any kind (`paceReprojectionSource`, `SourceFramerateLimit`).
-- Depth / MV warping. Already gone on the parent branch; stays gone.
-- Translation warp. Rotation-only, exactly like the parent's proven baseline.
-- Dedicated COPY capture queue + capture worker thread + world fence (mid-frame gating).
-- Deferred COMPUTE warp + late-latch fence (CPU `_lateLatchFence` constant rewrite).
-- Adaptive controllers: repeat-warp shed, adaptive dispatch lead, auto-tracked mouse
-  sensitivity, KCD2 calibration. The adaptive **sample** lead is back (P6) — it rides the
-  presenter's own DIRECT queue instead of the deleted compute deferred-latch path.
-- Per-slot telemetry and the `ReprojPipe v=1` aggregate line (keep only the 1 Hz `Reproj:` line).
-- Synchronous generated-frame fallback (`PresentVirtualFrameSync`, `DispatchWarp`,
-  `_lastColor`/`_uiColor` sync capture). Non-virtualized → plain passthrough present.
-- Generic (non-KCD2) upscaler-isolation resource capture (`FG_ResourceType::HudlessColor/UiColor`).
-- The `FrameLimit::sleep(fgActive)` half-rate rule for reprojection outputs.
-- Reproj menu controls (the surviving non-`#if 0` ones) — keys go inert, then out.
-
-The warp math, KCD2 camera hook, swapchain virtualization, and DXGI present ownership
-are **not** up for debate on this branch — they are the pieces that work.
-
-### Deliberate deviations from mainline `AGENTS.md` invariants (branch-local)
-
-1. **The HUD is composited unwarped via parent-validated isolation (P6).**
-   `ReprojHudIsolation` defaults to `true`; when the KCD2 Scaleform split is live,
-   CaptureFramePacket copies the HUD-less world + isolated UI in one submit and RPD
-   composites the UI after the rotation warp — the parent's validated behavior on the
-   simplified single-submit model (no borrow, no world fence). A composed frame (world +
-   HUD) is warped only as the isolation-unavailable fallback; that fallback remains a
-   deliberate deviation from mainline (mainline never warps a composed HUD) but is now
-   the exception rather than the rule.
-2. **The game thread is never paced by OptiScaler in reproj mode.** `SourceFramerateLimit`
-   effectively becomes 0; KCD2's own limiter (or an external cap) owns source cadence.
-3. **The packet ring is 3 slots** (`FrameSlot[3]`), not `BUFFER_COUNT == 4`.
-
-## 2. Current inventory (what we are stripping)
-
-Baseline `b6668d95`. All line numbers refer to that commit.
-
-### 2.1 Queues (four today, plus the game queue)
-
-| # | Queue | Owned by | Work it does today | async-simple |
-|---|-------|----------|--------------------|--------------|
-| 1 | Game DIRECT (`_gameCommandQueue`) | game | rendering; `_uiCommandList` capture fallback; sync UI submits | **Capture queue** (kept) |
-| 2 | Present DIRECT (`_presentQueue`, in `CreateAsyncPresenter`) | presenter | SC lists: blits, unwarped UI raster, DIRECT-fallback warps | **Presenter queue** (kept, sole) |
-| 3 | Warp COMPUTE (`_computeQueue`, `CreateAsyncPresenter`) | presenter | deferred-latch rotation warps via `RPD` | **delete** |
-| 4 | Capture COPY (`_captureQueue`, `CreateAsyncPresenter`; falls back COPY→COMPUTE) | capture worker | DMA world+UI copies, world-fence gated | **delete** |
-
-### 2.2 Fences / events / threads
-
-| Object | Location | async-simple |
-|--------|----------|--------------|
-| `_uiFence` + `_uiFenceEvent`, `_uiAllocator[]`, `_uiCommandList[]` (base `IFGFeature_Dx12` path, game DIRECT) | `CreateObjects` | **keep** — this is the single capture queue+fence |
-| `_scFence` + `_scFenceEvent`, `_scAllocator[]`, `_scCommandList[]` (DIRECT, per real output index) | `CreateObjects` | **keep** — the single presenter fence |
-| `_captureFence`, `_captureInputFence`, `_worldFence`, `_captureFenceEvent` | `CreateAsyncPresenter` / `CreateObjects` | **delete** |
-| `_lateLatchFence` | `CreateObjects` | **delete** (late latch becomes inline) |
-| `_computeFence` + compute allocators/lists | `CreateAsyncPresenter` | **delete** |
-| `_captureThread` / `CaptureWorkerMain` + `_captureWork*` | `AReproj_Dx12.cpp:1507–1680` | **delete** |
-| `_presentThread` / `PresenterMain` | `AReprojPresenter.cpp:575–988` | keep, rewritten slim |
-| Input pump (`OptiInput::StartRawInputPump`) | `StartAsyncPresenter` | delete for v0 (see §5.4); re-add later if wanted |
-
-### 2.3 Frame slot → packet fields to delete (`AReproj_Dx12.h`, `ReprojFramePacket` + `ContentFrame`)
-
-Delete: `ui`, `uiState`, `worldFenceValue`, `handoffFence/handoffFenceValue` (always null in
-v0), `captureSrcColor/Ui/Composed` + states + `captureInputFenceValue`, `captureViaWorker`,
-`colorFenceValue`, `sourceCutGeneration`, `inputLatchReady` (v0), `syncInterval`/`presentFlags`
-(if unused after rewrite).
-
-Keep: `color`+`colorState`, `captureFenceValue`, `frameId`, `constants` (RP_Constants =
-source camera), `renderTimestamp`, `sourcePoseTimestamp`, `sourcePoseInterval`, `frameDelta`/
-`rawFrameDelta`, `hasCamera`, `warpAllowed`, `sourceMouseX/Y/Timestamp` (for a later inline
-late-latch phase), `state`.
-
-### 2.4 Features and where they live
-
-| Feature | Files / functions | Fate |
-|---------|-------------------|------|
-| Source pacing | `FrameLimit.cpp:174–259` (`paceReprojectionSource`), call sites `AReproj_Dx12.cpp:1118, 2536, 2566, 2659, 2739, 2795`; `ReprojSourceFramerateLimit` (Config.h:616) | delete calls; drop default to 0; keep `FrameLimit.cpp` helpers only for presenter sleeps |
-| FG half-rate | `FG_Hooks.cpp:1395–1403` (`FrameLimit::sleep(reprojActive)`) | reproj passes `false` (or is excluded) so `min_interval_us *= 2` (`FrameLimit.cpp:108`) never applies |
-| Capture worker path | `CaptureFramePacket` (1128–1496): isolation lookup (1138–1166), worker enqueue (1432–1467), UI fallback; `EnqueueCapture`/`ProcessCapturePacket`/`FailCapturePacket` | rewrite to: composed `gameBackBuffer` only → `SubmitUICommandList(packetIndex)` on `_uiFence` |
-| World fence / mid-frame gate | `Kcd2HudIsolation::TakeWorldSignalValue/MarkFrameCaptured/SetWorldSignalContext`, `_worldFence` | stays deleted from AReproj (inline same-queue capture needs no mid-frame gate); the isolation files' world-fence code is inert — AReproj never calls `SetWorldSignalContext` |
-| HUD isolation per-draw | `ResTrack_dx12.cpp:1144–1178`, `Hudfix_Dx12.cpp:464`, `dllmain.cpp:2101`, `CaptureFramePacket` | live: `ReprojHudIsolation=true` default; ResTrack OM hook + Hudfix `ArmForFrame` drive the split; capture copies world+UI in one submit (P6) |
-| Presenter selection + capWait/uiBorrow/hold | `PresenterMain` (AReprojPresenter.cpp:575–988) | rewrite: newest READY w/ completed fence, else reuse active |
-| Repeat-warp shed | `EvaluateRepeatWarpShed` (AReprojPresenter.cpp:501–573) + state in header | delete (always full warps on repeats) |
-| Adaptive dispatch lead | `PresenterMain` lead control (~604–630) | constant lead (§5.5) |
-| Adaptive sample lead | `SAMPLE_LEAD_*` consts + `DispatchPacketWarp` post-warp headroom | back (P6): rides the presenter DIRECT queue — `_scFence` wait after submit, ±0.25 ms in [2.0, 6.0] |
-| Deferred late latch | `DispatchPacketWarp` | inline only: constants baked at dispatch; the adaptive lead makes the dispatch (and so the mouse sample) land as late as the warp allows |
-| Sensitivity tracking/calibration | `UpdateMouseSensitivity` (868), `_kcd2Calibration*` fields | delete for v0 |
-| Hitches/hold | `PresenterMain` `hitchHold` (~790) | omit in v0 |
-| Sync fallback presentation | `PresentVirtualFrameSync` (2446), `CopyLastFrame` (320), `DispatchWarp` (1982), `_lastColor`/`_uiColor`/`_syncHasUi`/`_warpOutput` sync uses | delete; non-virtualized ⇒ `PresentFrame` passthrough only |
-| Per-slot + pipeline telemetry | `ReprojTelemetry.cpp/.h`, `_pipe*` atomics, `RecordPipeline*` (2115–2250), `ReprojSlotRecord` | delete; keep only 1 Hz `LogMetricsIfDue` fields the log line prints |
-| Metrics plumbing for removed controllers | `_latestGameStallMs`, `_stallEmaMs`, `_cadenceEmaMs`, `_repeatWarpShed`, `shed`/`stallEma=` log keys | delete |
-| RUI overlay composite (`RUI_Dx12`) | `_renderUI`, `DisplayPacket`/`PresentVirtualFrameSync` UI dispatch | delete (no UI overlay) |
-| Generic upscaler-isolation capture | `GetResource(HudlessColor/UiColor)`, `IsResourceReady` | delete from capture path |
-
-### 2.5 What stays essentially untouched
-
-- `IFGFeature_Dx12` interface surface (virtuals `AReproj_Dx12` overrides; callers in
-  `FG_Hooks`, `State`, `menu`, `wrapped_swapchain`).
-- `WrappedIDXGISwapChain4` virtualization: `IsReprojectionVirtualized`,
-  `GetReprojectionBuffer`, `SubmitReprojectionBuffer`, `AdvanceReprojectionBuffer`
-  (`wrapped_swapchain.{h,cpp}`). The game keeps rendering into virtual buffers; the
-  presenter keeps owning the real chain. **Non-blocking handoff becomes unconditional**
-  (no capture fence ever rides the virtual-buffer handoff — the capture only reads the
-  *composed copy target* the game just finished, so ring reuse needs no GPU wait).
-- `CreateSwapchain`/`CreateSwapchain1`/`ReleaseSwapchain` coercions (≥3 buffers, waitable,
-  wrapper install), `SetGameBufferCount`, `EvaluateState` capability rules.
-- KCD2 camera: `Kcd2Camera.{h,cpp}` (frustum hook, RTTI validation, seqlock, pose→constants
-  via `ApplyToConstants`, `packet.constants.mode = 2` rotation literal at 1411).
-- `RP_Dx12` + `RPD.hlsl` + `RP_Common.h` + `RPD_Shader.h` (three representations must stay
-  in sync; no shader edit expected — `hudlessSource` stays 0 on every slot).
-- `PrepareRotationConstants`, `FillConstants` (minus calibration), `ApplyLateInput` (kept for
-  the later inline-latch phase), warp-output UAV texture (`CreateWarpOutput`).
-- Occlusion/minimize backoff, presenter watchdog, and completion-clock pacing shape in
-  `PresenterMain` (with adaptive control removed).
-- fakenvapi `reportFGPresent` on real presents; `FGHooks::SkipPresent` framing in `PresentFrame`.
-- Config parse/write plumbing for the keys that survive.
-
-## 3. v0 behavioral spec (hardcode, do not re-generalize yet)
-
-First make the 60 → 120 sequence perfect (per the guidance this branch came from):
+### Add only for P7
 
 ```text
-0.000  anchor A
-0.008  warp A
-0.016  anchor B
-0.025  warp B
-0.033  anchor C
+_lateLatchFence
+_lateLatchFenceValue
 ```
 
-Concretely:
+One latch fence is allowed because it directly reduces input age. It must not grow back into
+the parent branch's multi-queue dependency graph.
 
-1. **Source cadence: untouched.** No `paceReprojectionSource`, no `FrameLimit::sleep` with
-   reproj active, no half-rate. KCD2 renders as fast as it wants / its own cap dictates.
-2. **Presenter cadence:** one `Present(1, 0)` per display slot at `TargetRefreshHz()`
-   (display refresh; `TargetRefresh` override honored — don't hardcode 120 into code, hardcode
-   the *policy*: presenter owns display cadence, exactly one output per slot, new anchor or
-   repeat, always warped).
-3. **Every output is a warp** of the newest completed anchor (repeat slots included —
-   `RepeatWarp` behavior unconditional). `timeStep` = (slot deadline − anchor renderTimestamp)
-   / represented period, clamped to `[0, 2.5]`; no velocity filters, no EMA extrapolation
-   beyond what `PrepareRotationConstants` already does from the captured pose pair.
-4. **Warp gate = capture completion:** a slot only switches to a new anchor whose
-   `captureFenceValue` is already `<= _uiFence->GetCompletedValue()` (CPU check, never a
-   presenter-queue wait). Color and UI are one submit, so the single value gates the whole
-   anchor (`hasUi` only marks the split-capture variant). Otherwise it re-warps the active
-   anchor. No `uiBorrow` (UI is always as fresh as color), no `hold`.
-5. **Late input:** `ApplyLateInput` runs inline at dispatch (freshest raw mouse + latest
-   KCD2 camera pose). The dispatch lead is **adaptive** (P6): the presenter waits for the
-   warp on `_scFence` after submit, measures headroom to the present deadline, and slides
-   the next slot's lead ±0.25 ms within `[2.0, 6.0]` ms (`SAMPLE_LEAD_*`), so the sample is
-   taken as late as the warp allows. `ReprojLateSampleLead` > 0.5 overrides.
-6. **Dispatch lead bounds:** adaptive lead clamped into the slot window
-   (`min(lead, max(3, min(20, 0.75·period)))`). Occlusion backoff and watchdog stay as-is.
-7. **Capture:** on every game `Present`, `CopyResource` the composed virtual backbuffer into
-   `FrameSlot[k].color` on the game DIRECT queue (one `_uiCommandList` submit, one `_uiFence`
-   signal). If the slot's allocator is still busy (previous frame in flight), **skip
-   publication** — advance the virtual ring, never wait (invariant below). Camera pose is
-   captured at the same `Present` via the existing constants path.
-8. **Deactivate/Stop order** unchanged: stop + join presenter (and any worker) before
-   draining or releasing D3D12 objects.
+### Do not restore by default
 
-### Invariants that survive the strip (hard rules)
+- source pacing or `SourceFramerateLimit` control;
+- dedicated COPY capture queue or capture worker;
+- mid-frame world fence;
+- COMPUTE warp queue;
+- UI borrowing or separate UI readiness;
+- repeat-warp shedding;
+- synchronous generated-frame fallback;
+- heavy per-slot telemetry;
+- depth, motion-vector, or translation reprojection;
+- generic feature expansion before KCD2 rotation-only latency is solved.
 
-- Game thread never waits on the GPU in the capture path: allocator busy ⇒ skip anchor.
-- Virtual buffers belong to the swapchain; an FG context reset stops the presenter but does
-  not destroy them (`DestroyFGContext` keeps them).
-- Packet lifecycle `FREE → CAPTURING → READY → PRESENTING → RETIRED → FREE`; recycling needs
-  capture completion (`_uiFence`) **and** presenter retirement (`_scFence`).
-- Presenter stop/join precedes any release of queues/fences/packets.
-- Rotation warp math and `PrepareRotationConstants`' baked homography rows are untouched.
-- Unwarped fallback only when the real swapchain isn't virtualized or the presenter failed —
-  then plain passthrough `PresentFrame`, no generated frames.
+A COMPUTE presenter may be tested later only if P8 proves that the second DIRECT queue itself
+is materially damaging KCD2 source cadence.
 
-## 4. Acceptance ladder (do not skip stages)
+## 3. Hard invariants
 
-> From the design conversation: *"Async mode enabled, warp amount = zero. KCD2 must behave
-> identically to vanilla and hold the exact same 60 FPS."* until that passes, don't even
-> test timewarp quality.
+These rules are more important than individual features.
 
-Implement behind one compile-time stage switch, e.g. `constexpr int kAsyncSimpleStage = 0..3`
-in `AReproj_Dx12.cpp`, so each stage is one line to flip and the branch never needs
-uncommitted hacks:
+1. **The game thread never CPU-waits for reprojection GPU work.** If capture resources or
+   packet slots are busy, drop the anchor and keep rendering.
+2. **No reprojection source pacer.** The game, an external limiter, or the user owns source
+   cadence.
+3. **Latest completed anchor wins.** Never stall the presenter waiting for a newer incomplete
+   anchor.
+4. **Repeated display slots are real warps.** Re-warp the active anchor with a fresh target
+   pose/input sample.
+5. **HUD isolation stays single-submit.** World and UI copies share the game DIRECT capture
+   submission and the same completion gate.
+6. **Presenter stop is deadlock-proof.** Any outstanding latch gate must be released before
+   joining/draining the presenter.
+7. **Rotation warp remains the baseline.** No depth/MV complexity until latency and cadence
+   are proven.
+8. **Failures degrade to plain passthrough.** Do not resurrect synchronous generated-frame
+   fallback machinery.
 
-| Stage | What runs | Acceptance |
-|-------|-----------|------------|
-| **A0** (`0`) | Async presenter live, virtualization on, but the warp shader is **never dispatched** — every display slot identity-blits the newest completed anchor (capture still runs; it is the blit's source). Zero warp cost through the async plumbing. | Source FPS identical to reproj-off in the same scene (±1 FPS); no new `block`; toggle-off/on clean. |
-| **A1** (`1`) | + capture (one copy per game present on game DIRECT queue). | Still identical source FPS; `block` ≤ ~1 ms over the A0 value; no dropped anchors. |
-| **A2** (`2`) | + presenter owns the real swapchain at display cadence (blit outputs, no warp). | Display at target (~118–120); source untouched; no missed-slot bursts; alt-tab in/out clean. |
-| **A3** (`3`) | + rotation warp on every output. | 60→120 cadence, `missed` < 2/s steady, `new`≈`repeat`, late-rotations sane while turning; **then** start judging warp feel. |
+## 4. Latency model
 
-Measure and record, per stage, the four timings the design conversation calls for:
-real frame interval, `Present()` blocking time, capture GPU time, warp GPU time — the 1 Hz
-`Reproj:` line already carries source/display/block/pace; GPU times come from the warp
-duration implied by `sampLead`/dispatch headroom or a temporary `EndQuery` pair (do not ship
-per-slot queries).
+The current P6 path samples input before the warp submission is allowed to execute:
 
-## 5. Implementation phases (each phase ends compilable)
+```text
+sample input -> build constants -> submit warp -> GPU executes -> Present
+```
 
-Work in `OptiScaler/framegen/reproj/` unless noted. Keep `AReproj_Dx12.h` fields and method
-declarations in lockstep; delete dead includes.
+Its minimum achievable input age therefore includes the whole dispatch/queue/warp critical
+path.
 
-### P1 — Disconnect OptiScaler from game cadence (A0)
+The target P7 path is:
 
-1. Delete every `FrameLimit::paceReprojectionSource(...)` call in `AReproj_Dx12.cpp`
-   (lines 1118, 2536, 2566, 2659, 2739, 2795 — `Present`, `SkipAnchorPublication`,
-   `CaptureFramePacket` pacing tail).
-2. Set `ReprojSourceFramerateLimit` default to `0.0f` (Config.h:616) and ship
-   `SourceFramerateLimit=0` in the INI; keep reading the key so old INIs don't break, but the
-   code path it fed is gone.
-3. `FG_Hooks.cpp:1395–1403`: for reprojection outputs never call `FrameLimit::sleep(...)`
-   (the virtualized branch already skips it — make the non-virtualized fallback pass
-   `false` / skip too). `FrameLimit::sleep` half-rate stays DLSSG-only.
-4. Keep `FrameLimit::sleepForMs`/`sleepForPrecisePacingMs` (presenter sleeps still need them);
-   delete `paceReprojectionSource`, `sleepForReprojectionSourceMs`, and their stats when no
-   callers remain. Update `tests/reprojection/test_display_clock.py` expectations that pin
-   the pacer (the file already needs a rewrite per AGENTS.md — do it in this phase).
-5. **Stage gate A0** blit-only path; run KCD2 (see §7 workflow), record source FPS.
+```text
+prepare + submit early
+        |
+GPU waits at latch fence
+        |
+sample input as late as safely possible
+        |
+rewrite constants
+        |
+release fence
+        |
+warp -> Present
+```
 
-### P2 — Single-queue capture, FrameSlot[3] (A1)
+This separates **submission lead** from **input-sample lead**. CPU scheduling and command-list
+submission can happen early without making the pose old.
 
-1. Rewrite `CaptureFramePacket` to ignore isolation: `color = gameBackBuffer` (composed,
-   `D3D12_RESOURCE_STATE_PRESENT`), `packet.hasUi = false` always. Delete the
-   hudless/UI lookups (1138–1166), the `_captureQueue` branches (1200–1467), the
-   `usingKcd2Isolation`/`allowComposed` logic — composed warping is unconditional now.
-2. Capture submit = `SubmitUICommandList((UINT) packetIndex)`; `packet.completionFence =
-   _uiFence`; `packet.captureFenceValue = _uiAllocatorFenceValues[packetIndex]`. Delete
-   `colorFenceValue`/`worldFenceValue`/`handoffFence` gating (handoff always
-   null/0 ⇒ `wrapped->SubmitReprojectionBuffer(idx, nullptr, 0)`).
-3. Delete the capture-worker subsystem: `EnqueueCapture`, `CaptureWorkerMain`,
-   `ProcessCapturePacket`, `FailCapturePacket`, `StopCaptureWorker`, `_captureWork*`,
-   capture allocators/lists/fences/event, `WaitForCaptureAllocator`,
-   `GetCaptureCommandList`, `SubmitCaptureCommandList`. (Keep `CaptureAllocatorReady`'s
-   non-blocking "allocator busy ⇒ skip" semantics, now polling the `_uiAllocator` fence.)
-4. Trim the packet ring to exactly 3: `static constexpr int kReprojFrameSlots = 3;` for
-   `_packets[]` and slot math; per-real-output arrays (`_scAllocator*`) keep `BUFFER_COUNT`
-   sizing (real chain can be 3+). Rework `AcquirePacket`/`RetirePackets`/`PacketQueueDepth`
-   and the `Present()` skip paths to the new count; verify `Deactivate`'s force-free loop and
-   `ReleaseObjects` iterate the right bounds.
-5. Capture camera at present into the slot's constants exactly as today
-   (`Kcd2Camera::ApplyToConstants`, `SetCameraData`, `FillConstants`); delete
-   `Kcd2Scaleform::Initialize()` call (1317) and calibration accumulation (1328–1395);
-   `warpAllowed = warpAllowed && hasCamera` (composed always allowed).
+The latency controller should ultimately optimize:
 
-### P3 — Slim presenter, one queue + one fence (A2)
+```text
+latch lead ~= measured warp + copy critical path + small safety margin
+```
 
-Status: **items 1–2 + 4 done** (queue/fence deletion + PresenterMain slim); items 3 and 5
-remain (DisplayPacket RUI/query drop; sync-fallback deletion) and do not change the queue model.
+not:
 
-1. ✅ `CreateAsyncPresenter` (AReprojPresenter.cpp:18–300): delete the COMPUTE queue +
-   allocators/lists/fence block (99–230) and the COPY capture queue block (231–300). Only
-   create `_presentQueue` (DIRECT, normal priority) and grab the present waitable +
-   `SetMaximumFrameLatency(1)`. `DestroyAsyncPresenter` mirrors: release `_presentQueue`,
-   no capture/compute teardown, no `_warpTimestamp*`.
-2. ✅ Delete `DispatchPacketWarp`'s compute branch + deferred late latch (AReproj_Dx12.cpp:
-   1785–1980) and `SubmitComputeCommandList`/`GetComputeCommandList`/
-   `WaitForComputeAllocator`. Warp path = `GetSCCommandList(outputIndex)` on `_presentQueue`
-   (`RP_Dx12::Dispatch` with `ui = nullptr`), copy `_warpOutput` → real backbuffer, submit via
-   `SubmitSCCommandList`, retirement value on `_scFence` (this is the existing DIRECT fallback
-   shape today's code already uses when `AsyncComputeWarp=false`). Also deleted: the
-   `SAMPLE_LEAD_*` adaptive-lead constants, `_lateSampleLeadMs`, and the `_lateLatchFence`
-   creation/release sites. `ApplyLateInput` still runs inline at dispatch (parent DIRECT
-   behavior); the raw-input pump is untouched.
-3. ✅ `DisplayPacket`: drop RUI composite + UI packet param — copy `packet.color` → real
-   backbuffer on the same SC list; used only when warping is disallowed. (Telemetry
-   timestamp-query writes remain until P4.)
-4. ✅ `PresenterMain`: delete `EvaluateRepeatWarpShed` call/state, ui-borrow selection, hitch
-   hold, adaptive lead updates. Fixed lead 3 ms (`kDispatchLeadMs`); always-warp repeats;
-   select newest READY packet whose capture value completed, else reuse active; retire
-   previous anchor only on a real switch (drop `_heldPacketIndex`). Keep occlusion backoff,
-   watchdog, completion clock, `WaitForPresentSlot`, `PresentCompositorFrame` (minus
-   waitable double-wait subtleties). The 1 Hz `Reproj:` line lost its
-   `uiBorrow=`/`hold=`/`shed=`/`stallEma=` keys here (P4 trims the rest).
-5. ✅ Delete the sync-fallback block: `PresentVirtualFrameSync`, `CopyLastFrame`,
-   `DispatchWarp`, `_lastColor`/`_uiColor`/`_syncHasUi` sync arrays (kept `_warpOutput`
-   per-output), RUI `_renderUI` creation, and their use in `Present()`. Non-virtualized /
-   presenter-failed ⇒ `PresentFrame` passthrough + `_asyncDowngraded` + one
-   `BlitGameFrameToReal` same-queue copy when virtualization is up.
+```text
+dispatch lead ~= whole CPU submission + warp critical path + safety margin
+```
 
-### P4 — Trim telemetry to the 1 Hz line (A2/A3)
+Software timing can measure input-sample age, queue completion, and present timing. It cannot
+prove photon latency. Final motion-to-photon claims require an external high-speed camera,
+LDAT-style setup, or equivalent hardware measurement.
 
-1. Delete `ReprojTelemetry.cpp` per-slot machinery usage: `_currentTelemetrySlot`,
-   `GetTelemetry/GetTelemetrySnapshot` consumers in `Present()`/`PresenterMain`, `_warpTimestamp*`
-   query heap, `RecordPipeline*` + all `_pipe*` atomics, `RecordWarpFrame`'s heavy fields.
-2. Keep a hand-rolled 1 Hz summary log (source/display, new/repeat, missed, mean/p95 interval,
-   block, warp FPS, pose age) — field names can diverge from the current `Reproj:` line once
-   this branch's semantics differ (no pace/shed/stallEma/uiBorrow). Update the log keys here,
-   and the docs (AGENTS.md `Reading the once-per-second log line` section) to match at the end.
+## 5. Next implementation phases
 
-### P5 — Config, menu, docs, dead-file sweep
+### P7 - Minimal deferred late latch
 
-1. Config.h: remove deleted keys (`ReprojSourceFramerateLimit`→ keep as inert 0 read, or drop;
-   `ReprojAsyncComputeWarp`, `ReprojLateSampleLead`, `ReprojRepeatWarp`(absorbed),
-   `ReprojHudIsolation` → default **false** branch-wide, `ReprojAllowComposedWarp` → default
-   **true** branch-wide, `ReprojNonBlockingHandoff` absorbed-true). Keep `TargetRefresh`,
-   `Enabled`, smoothing keys that still exist in code. Update Config.cpp + shipped INI.
-2. menu_common.cpp: delete the reproj key toggles (3923–3930, 4153–4203) or leave behind the
-   same `#if 0` treatment as the experimental block.
-3. Dead-file pass (only after a clean CI build with code above): remove
-   `Kcd2HudIsolation.{h,cpp}`, `Kcd2Scaleform.{h,cpp}`, `ReprojTelemetry.{h,cpp}` from the
-   vcxproj + filters and their includes in `dllmain.cpp`, `ResTrack_dx12.cpp`,
-   `Hudfix_Dx12.cpp`, `AReprojPresenter.cpp`. **Do this as its own commit**; until then the
-   isolation files stay compiled but inert because every entry point gates on
-   `ReprojHudIsolation` (verified: Kcd2HudIsolation.cpp:221, 304, 326, 345, 367).
+**Priority: next.**
 
-### P6 — Later phases (explicitly not v0)
+Reintroduce only the deferred constant latch from `async-timewarp`, adapted to the simplified
+DIRECT presenter.
 
-- Inline late-latch mouse (sample just before dispatch on the presenter thread; re-enable
-  pump + `ApplyLateInput`), then decide if auto-sensitivity returns.
-- Hitch hold re-added once the baseline cadence is proven.
-- Anything the A0–A3 data shows is actually needed. **Do not add ahead of data.**
+#### P7.1 Fence and lifecycle
 
-## 6. Cross-cutting hooks you must not break (verify by grep before CI)
+Add one CPU-signallable D3D12 fence owned by AReproj:
+
+```text
+_lateLatchFence
+_lateLatchFenceValue
+```
+
+Requirements:
+
+- create/release it with the async presenter objects;
+- never attach it to the game queue;
+- before shutdown, failure downgrade, device reset, or drain, signal any outstanding latch
+  value so `_presentQueue` can never remain parked forever;
+- no new worker thread and no new command queue.
+
+#### P7.2 Submit early, release late
+
+For a warp slot:
+
+1. Select the newest completed anchor exactly as today.
+2. Record the normal warp + output copy on the SC command list.
+3. Use a per-output constant allocation that can be updated safely while the GPU is parked.
+4. Queue `_presentQueue->Wait(_lateLatchFence, latchValue)` before the warp command list.
+5. Submit the warp command list early enough that presenter-thread scheduling jitter does not
+   threaten the slot.
+6. Wait on the CPU until the late-latch deadline.
+7. Read the newest raw mouse totals and latest valid KCD2 camera state.
+8. Build the final rotation constants and call `RP_Dx12::WriteConstants(...)`.
+9. Publish the CPU writes, then signal `_lateLatchFence` from the CPU.
+10. Let the already-submitted GPU work run immediately.
+11. Complete/present using the existing `_scFence` path.
+
+The game DIRECT queue must never wait on `_lateLatchFence`.
+
+#### P7.3 Fixed latch lead first
+
+Do not start with another adaptive controller.
+
+First validate fixed latch leads, for example:
+
+```text
+3.0 ms
+2.0 ms
+1.5 ms
+1.0 ms
+```
+
+Find the smallest lead that does not create missed display slots in the repeatable KCD2 test
+scene.
+
+Only after that works should adaptive tuning return.
+
+#### P7.4 Adaptive latch lead
+
+Replace the current adaptive **dispatch** lead with adaptive **latch** lead.
+
+Use actual warp completion headroom:
+
+```text
+too much headroom -> latch later next slot
+too little headroom -> latch earlier next slot
+missed slot         -> immediately increase safety margin
+```
+
+Keep the controller slow and bounded. A sensible initial policy is the existing 0.25 ms step,
+with conservative bounds determined from P7.3 rather than assumed in advance.
+
+Submission itself should stay comfortably early. Only the final pose release hunts toward
+scanout.
+
+#### P7 acceptance
+
+P7 is complete when all of the following are true:
+
+- 60 -> 120 rotation feels at least as stable as P6;
+- fixed-latch mode survives enable/disable, alt-tab, minimize, loading screens, and device
+  teardown without a deadlock;
+- late-latched input is measurably newer than P6 dispatch-time input;
+- no new game-thread wait appears;
+- presenter missed-slot rate does not materially regress;
+- adaptive latch lead converges without oscillating by multiple milliseconds;
+- HUD remains unwarped when KCD2 isolation is available.
+
+### P8 - Performance and queue-contention proof
+
+**Do this before adding another feature.**
+
+The main unresolved performance question is whether the presenter DIRECT queue and full-screen
+warp/copies are disturbing KCD2's render queue under Proton/VKD3D.
+
+Run a controlled matrix in the same 1440p scene:
+
+| Test | Warp | HUD isolation | Late latch |
+|---|---|---|---|
+| B0 | off, reproj disabled | n/a | n/a |
+| B1 | identity presenter | off | off |
+| B2 | rotation | off | inline P6 |
+| B3 | rotation | on | inline P6 |
+| B4 | rotation | on | deferred fixed P7 |
+| B5 | rotation | on | deferred adaptive P7 |
+
+Test the primary 60 -> 120 case first. Then repeat at the monitor's native/high target refresh.
+
+Record:
+
+- source FPS and source frame-time median/p95/p99;
+- maximum game `Present()` block time;
+- display FPS;
+- display interval mean/p95;
+- missed display slots;
+- new/repeat ratio;
+- dropped anchors and capture-not-ready count;
+- effective latch lead;
+- temporary GPU warp duration if needed.
+
+Temporary GPU timestamp queries are acceptable for this phase. Do not restore the old telemetry
+system.
+
+#### P8 acceptance
+
+Target:
+
+- no repeatable source-FPS loss versus reproj-off caused by CPU blocking;
+- source frame-time median and p95 remain close to baseline;
+- steady presenter miss rate below roughly 1% of display slots;
+- no periodic 57-59 FPS source cadence pattern caused by reprojection;
+- 60 -> 120 produces the expected approximately 60 new + 60 repeated warped outputs;
+- higher refresh targets scale by adding repeat warps rather than throttling the source.
+
+If B1 is clean and B2 causes the source regression, the warp/presenter GPU path is the problem.
+Do not add scheduling logic to hide it.
+
+### P9 - Minimize the warp critical path
+
+Only optimize what P8 measures.
+
+Investigate, in order:
+
+1. shader execution time in `RPD`;
+2. `_warpOutput` UAV -> real backbuffer copy cost;
+3. HUD composite cost;
+4. presenter DIRECT queue scheduling/serialization under VKD3D;
+5. unnecessary barriers or allocator waits.
+
+The goal is to shorten the interval between latch release and scanout. Every millisecond removed
+from the warp critical path can move the input sample roughly one millisecond later.
+
+#### COMPUTE experiment gate
+
+If, and only if, P8 proves that `_presentQueue` DIRECT work is being serialized against KCD2's
+game DIRECT queue badly enough to damage source cadence, create a small experiment that moves
+only the warp execution to COMPUTE.
+
+That experiment must keep:
+
+- the same `FrameSlot[3]`;
+- the same game DIRECT capture;
+- the same latest-completed-anchor policy;
+- the same minimal late-latch concept;
+- no COPY worker, world fence, UI borrowing, or source pacing.
+
+Do not merge COMPUTE back merely because the parent branch used it. It has to win measured
+source cadence and total latency on Proton.
+
+### P10 - Input coverage and rotational prediction
+
+Mouse is the first-class latency target because raw motion can be sampled independently of the
+game frame.
+
+After P7-P9 are stable:
+
+- keep the KCD2 camera snapshot as the authoritative rendered-pose baseline;
+- keep raw mouse totals for sub-frame rotation correction;
+- validate sensitivity tracking across FOV, menus, mounted states, and different sensitivity
+  settings;
+- add cut/reset rejection so camera teleports never extrapolate;
+- investigate controller support separately.
+
+Controller input should not be faked by treating stick values as mouse counts. Without
+intercepting the game's input-to-camera mapping, controller timewarp can still extrapolate the
+latest observed camera angular velocity, but truly sub-frame controller response may require a
+KCD2-specific input hook.
+
+### P11 - Quality hardening
+
+Only after latency and cadence are solved:
+
+- edge/disocclusion handling for larger rotations;
+- fast-flick clamp tuning;
+- FOV/aspect transitions;
+- menus, cutscenes, photo mode, focus loss, and loading transitions;
+- unknown-build KCD2 camera fail-closed behavior;
+- long-session packet/fence stability;
+- DRG or another title as a regression test for generic OptiScaler integration.
+
+Depth/MV/translation work is a separate future project. It is not a prerequisite for excellent
+rotation-only latency.
+
+## 6. Acceptance ladder from this point
+
+The old A0-A3 ladder proved the simplified presenter. Do not repeat the whole branch rebuild.
+
+Use this forward ladder:
+
+| Stage | Purpose | Required result |
+|---|---|---|
+| **L0** | Current P6 baseline | Stable rotation warp and known source/display metrics |
+| **L1** | Deferred latch, fixed conservative lead | Same cadence as L0, no deadlocks |
+| **L2** | Reduce fixed lead | Find hardware-safe minimum without slot misses |
+| **L3** | Adaptive latch lead | Converges near the L2 boundary without oscillation |
+| **L4** | HUD + latch + full KCD2 session | Stable gameplay, menus, alt-tab, loads |
+| **L5** | High-refresh targets | 120/144/165/240 as hardware allows, source remains independent |
+
+A stage fails if it improves apparent latency by sacrificing source cadence or introducing
+frequent display misses. A lower-latency missed frame is still a bad output.
+
+## 7. Metrics to keep
+
+Keep the 1 Hz log small, but make it answer the actual questions.
+
+Recommended steady-state fields:
+
+```text
+source=
+display=
+new=
+repeat=
+missed=
+interval=mean/p95
+poseAge=
+queue=
+dropAnchor=
+capWait=
+block=
+latchLead=
+late=applied/samples
+maxDeg=
+```
+
+For P7/P8 debug builds only, add temporary:
+
+```text
+warpGpuMs=
+latchToWarpDoneMs=
+latchToPresentMs=
+```
+
+Do not reintroduce high-frequency per-slot logging in release builds. Logging itself can disturb
+the timing being measured.
+
+## 8. Validation workflow
+
+For every runtime change:
+
+1. Build `async-simple` cleanly before stacking another change.
+2. Run parser/unit tests that pin the simplified architecture.
+3. Test KCD2 in the same 1440p scene with reprojection off first.
+4. Run the matching L-stage and capture at least 30-60 seconds of steady metrics.
+5. Test stationary view, slow pan, fast flick, and renderer hitch separately.
+6. Test enable/disable, alt-tab/minimize, loading screen, save load, and exit.
+7. Compare source frame-time distribution, not only average FPS.
+8. Only judge latency/feel after cadence passes.
+
+For final latency validation, use an external camera or latency measurement device. Software
+timestamps should guide tuning, not be presented as definitive motion-to-photon numbers.
+
+## 9. Cross-cutting checks
+
+Before CI/review:
 
 ```bash
-# All consumers of the pieces being removed — every hit must be explained or gone:
+# Source pacing must stay gone.
 rg 'paceReprojectionSource|sleepForReprojectionSourceMs' OptiScaler
-rg '_captureQueue|_captureFence|_captureInputFence|_worldFence|_captureThread|_computeQueue|_computeFence|_lateLatchFence' OptiScaler/framegen OptiScaler/hooks
-rg 'Kcd2HudIsolation|Kcd2Scaleform' OptiScaler   # expect: Config gates + files themselves until P5
-rg 'ReprojSourceFramerateLimit|ReprojLateSampleLead|ReprojAsyncComputeWarp|ReprojRepeatWarp' OptiScaler
-rg 'GetTelemetrySnapshot|RecordPipeline|_pipe[A-Z]|_currentTelemetrySlot|_repeatWarpShed|_stallEmaMs|_heldPacketIndex' OptiScaler/framegen/reproj
+
+# Old capture/compute machinery must stay gone unless P9's measured COMPUTE experiment exists.
+rg '_captureQueue|_captureFence|_captureInputFence|_worldFence|_captureThread|_computeQueue|_computeFence' \
+  OptiScaler/framegen/reproj
+
+# After P7, late latch should be a small presenter-only mechanism.
+rg '_lateLatchFence|lateLatch' OptiScaler/framegen/reproj
+
+# Removed controllers/telemetry must not creep back accidentally.
+rg 'GetTelemetrySnapshot|RecordPipeline|_pipe[A-Z]|_repeatWarpShed|_heldPacketIndex' \
+  OptiScaler/framegen/reproj
+
 git diff --check
 ```
 
-The base-class UI command-list path (`GetUICommandList`/`SubmitUICommandList`, `_uiFence`,
-`_uiAllocator*`) lives in `IFGFeature_Dx12` and is shared with other FG features — do not
-rename or re-layout it; only AReproj's use of it changes.
+Expected after P7: `_lateLatchFence` hits are limited to presenter creation/destruction,
+dispatch/latch release, and safe shutdown/drain handling.
 
-## 7. Build / validation workflow (mandatory)
+## 10. Decision rules
 
-Every stage flip (A0→A3) or phase commit that touches runtime code goes through the full
-chain — no exceptions, no "small change" shortcuts:
+When a test fails, use these rules instead of adding machinery reflexively.
 
-1. Commit on `async-simple`, push to the fork (`git push fork async-simple`).
-2. `gh workflow run "Build (No Signing)" --repo Guillermode20/OptiScaler --ref async-simple`
-   then `gh run watch --exit-status`. Any compile error is fixed before the next stage.
-3. `python scripts/install_latest.py --both --run-id <run_id>` (or `--ref async-simple`).
-4. KCD2: same 1440p scene used for the 57–59 FPS reports. Record the 1 Hz line + source FPS
-   with reproj **off** first, then per stage. DRG only as a final regression sanity check.
-5. Version bumps: use `scripts/bump_version.py --bump-build` per merged stage, per repo rules.
+- **Source FPS drops in identity mode:** investigate virtualization/capture/game-present path.
+- **Identity is clean, rotation hurts source FPS:** investigate GPU warp cost or DIRECT queue
+  contention.
+- **Source is clean, display misses:** investigate presenter clock, `Present(1)`, latch lead,
+  and warp critical path.
+- **Display is clean but input feels one source frame behind:** investigate input baseline,
+  KCD2 camera snapshot matching, and late-latch release timing.
+- **HUD smears:** fix KCD2 isolation validity, do not add UI borrowing.
+- **Fast flick under-rotates:** inspect raw-input baseline/sensitivity and max-rotation clamp
+  before increasing extrapolation complexity.
+- **Proton DIRECT queues prove pathological:** run the isolated P9 COMPUTE experiment.
+- **A feature requires the game thread to wait:** reject the design.
 
-## 8. Risks / open decisions
+## 11. Merge criteria
 
-- **Warped HUD artifacts** (menus, subtitles, crosshair smear) are expected in v0 — that is
-  the price of dropping isolation. Decide after A3 whether KCD2 isolation deserves a minimal
-  *re-add* (one snapshot copy, no UI texture, warp world + blit UI) or stays out.
-- **Presenter on DIRECT vs COMPUTE:** the parent branch moved warps to COMPUTE because VKD3D
-  serialized DIRECT queues 10–17 ms behind the game. v0's whole premise is that with no source
-  pacing and one warp per slot the DIRECT presenter behaves; if A2/A3 regresses display
-  cadence, the first fix is re-checking `_presentQueue` priority/serialization, not
-  re-importing the compute + deferred-latch machinery wholesale.
-- **Uncapped source saturation:** if KCD2 runs 90+ FPS uncapped on the RX 6600 XT, the
-  60→120 rhythm never forms. The acceptance scenes assume the game's own 60 cap is on; record
-  source behavior under both and pick the primary scene accordingly.
-- **`Kcd2Camera` unknown-build fail-closed:** unchanged behavior, but now it directly gates
-  `warpAllowed` (no HUD fallback crutch). Fine — that is the fail-closed design working.
-- **tests/reprojection:** the display-clock parser tests pin parent-branch behavior (pacer
-  calls, isolation strings). They are stale per AGENTS.md; update them to the async-simple
-  source, or move them out of the way in P1 and re-target later.
+`async-simple` is ready to become the preferred implementation when:
 
-## 9. Merge / rollback notes
+1. 60 -> 120 is stable for normal KCD2 gameplay.
+2. Higher display targets behave predictably on capable hardware.
+3. Reprojection does not create a repeatable source-cadence regression.
+4. Deferred late latch is stable and measurably reduces input age.
+5. HUD isolation works without adding a second readiness pipeline.
+6. Enable/disable, alt-tab, loading, and shutdown are deadlock-free.
+7. The code still looks like the architecture in section 2.
 
-- `async-timewarp` stays the reference. Do not merge async-simple back until the composed-HUD
-  deviation and pacing policy are consciously accepted or reverted.
-- If `async-timewarp` advances, re-base async-simple by cherry-picking only the *proven*
-  rotation/pacing-relevant fixes — never a wholesale merge of the machinery being stripped.
+`async-timewarp` remains a reference for proven ideas, not a branch to merge wholesale. Port
+only mechanisms that win a specific measurement on `async-simple`.
