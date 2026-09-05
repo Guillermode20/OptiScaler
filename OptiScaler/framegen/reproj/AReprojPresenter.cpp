@@ -76,7 +76,8 @@ bool AReproj_Dx12::CreateAsyncPresenter()
     // async-simple: the presenter owns exactly one queue (_presentQueue,
     // DIRECT) and one retirement fence (_scFence). Warps and unwarped blits
     // are recorded on the SC command lists and submitted here; there is no
-    // COMPUTE warp queue and no deferred late-latch fence. Anchor capture runs
+    // COMPUTE warp queue. The one deferred late-latch fence is CPU-signaled
+    // by the presenter and never enters the game queue. Anchor capture runs
     // inline on the game's DIRECT queue via the base-class _uiCommandList
     // (see CaptureFramePacket) — no dedicated capture queue exists either.
     LOG_INFO("Reproj: async presenter created (capture: game DIRECT, warp: DIRECT)");
@@ -236,20 +237,18 @@ void AReproj_Dx12::PresenterMain()
     {
         const auto refreshHz = TargetRefreshHz();
         auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
-        // A serial Present(1) loop cannot make a preparation lead longer than
-        // one refresh useful: after Present returns, an older grid deadline can
-        // already be in the past. The dispatch lead is adaptive by default:
-        // DispatchPacketWarp slides _lateSampleLeadMs from post-warp headroom
-        // so the mouse sample lands as late as the warp allows, then the lead
-        // is capped at 75% of the refresh period with a small safety margin.
-        // ReprojLateSampleLead > 0.5 overrides with a constant lead.
+        // Submit the command list early enough for CPU scheduling jitter, then
+        // let DispatchPacketWarp hold the GPU behind the CPU-signaled latch
+        // until the fixed initial sample lead. P7 deliberately does not tune
+        // this lead adaptively until fixed-lead cadence and teardown behavior
+        // have been measured.
         const auto maxUsableLeadMs = std::max(3.0, std::min(20.0, refreshPeriodMs * 0.75));
         const auto lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
-        const auto adaptiveLeadMs =
-            lateLeadCfg > 0.5f ? static_cast<double>(lateLeadCfg)
-                               : std::clamp(_lateSampleLeadMs, SAMPLE_LEAD_MIN_MS, SAMPLE_LEAD_MAX_MS);
-        const auto dispatchLeadMs = std::min(adaptiveLeadMs, maxUsableLeadMs);
-        _lastLateSampleLeadMs.store(dispatchLeadMs, std::memory_order_relaxed);
+        const auto latchLeadMs =
+            std::clamp(lateLeadCfg > 0.5f ? static_cast<double>(lateLeadCfg) : LATE_LATCH_DEFAULT_MS, LATE_LATCH_MIN_MS,
+                       LATE_LATCH_MAX_MS);
+        const auto dispatchLeadMs = std::min(std::max(latchLeadMs + 1.0, 4.0), maxUsableLeadMs);
+        _lastLateSampleLeadMs.store(latchLeadMs, std::memory_order_relaxed);
 
         // Handle TargetRefresh change without restart: reset the grid so a
         // 240→120 switch doesn't stay stuck at the old period.

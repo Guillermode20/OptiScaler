@@ -100,19 +100,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     //   Live-validated at 1 on KCD2 (2026-09-04): the async presenter held
     //   ~100-115 display FPS with zero errors/downgrades in a full session.
     static constexpr int kAsyncSimpleStage = 1;
-    // Adaptive late-sample lead (late-latch as late as possible, parent-branch
-    // tuning): every slot wakes to dispatch its warp `lead` ms before the
-    // present deadline, and the lead hunts the sample as late as the warp
-    // allows. DispatchPacketWarp measures post-warp headroom to the deadline
-    // and slides the lead ±SAMPLE_LEAD_STEP_MS: reduce when the warp left
-    // > REDUCE_HEADROOM slack (sample taken too soon), grow when it crowds the
-    // vblank below GROW_HEADROOM. Settles at warp+copy cost plus ~1.5 ms of
-    // CPU wake/Present margin (plans/async_simple.md §3.6).
-    static constexpr double SAMPLE_LEAD_MIN_MS = 2.0;
-    static constexpr double SAMPLE_LEAD_MAX_MS = 6.0;
-    static constexpr double SAMPLE_LEAD_STEP_MS = 0.25;
-    static constexpr double SAMPLE_LEAD_REDUCE_HEADROOM_MS = 2.0;
-    static constexpr double SAMPLE_LEAD_GROW_HEADROOM_MS = 0.9;
+    // P7 starts with a fixed deferred latch. Keep the initial safety margin
+    // explicit and bounded; adaptive latch tuning comes only after fixed-lead
+    // cadence/teardown validation.
+    static constexpr double LATE_LATCH_DEFAULT_MS = 3.0;
+    static constexpr double LATE_LATCH_MIN_MS = 1.0;
+    static constexpr double LATE_LATCH_MAX_MS = 20.0;
     // FrameSlot[3]: three capture slots for the composed color + source camera
     // + fence. Distinct from BUFFER_COUNT (real-chain/output arrays stay 4).
     static constexpr int kReprojFrameSlots = 3;
@@ -132,16 +125,20 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool _asyncDowngraded = false;
 
     // async-simple: warps run on the presenter's single DIRECT queue
-    // (_presentQueue), and _scFence is the one retirement fence. There is no
-    // COMPUTE queue and no deferred late-latch fence (constants are baked at
-    // dispatch time on the presenter thread). Anchor capture runs inline on the
-    // game's DIRECT queue via
+    // (_presentQueue), and _scFence is the one retirement fence. The one
+    // additional _lateLatchFence is CPU-signaled only: the presenter queues a
+    // warp behind it, writes the per-output upload constants, then releases
+    // the queue near the display deadline. It is never attached to the game
+    // DIRECT queue. Anchor capture runs inline on the game's DIRECT queue via
     // the base-class _uiCommandList/_uiFence. There is no dedicated capture
     // queue, capture worker, or mid-frame world fence. Same-queue ordering
     // makes the virtual-buffer handoff fence-free.
     UINT _bufferCount = 0;
     UINT _gameBufferCount = 0; // count requested before FGHooks coerces the private chain
     UINT64 _scFenceValue = 0;  // monotonic SC fence value (fence outlives context recreate)
+    ID3D12Fence* _lateLatchFence = nullptr;
+    UINT64 _lateLatchFenceValue = 0;
+    UINT64 _lateLatchPendingValue = 0; // presenter thread only; released before teardown
 
     static DXGI_FORMAT NormalizeReprojFormat(DXGI_FORMAT format);
     bool VirtualAnchorReady() const;
@@ -177,6 +174,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void WaitUntil(double deadlineMs) const;
     bool WaitForPresenterDeadline(double deadlineMs);
     bool DrainGpuWork();
+    bool SignalLateLatch();
     HRESULT PresentFrame(UINT SyncInterval, UINT Flags, bool interpolated = false); // skip-flag wrapped present
     bool SubmitSCCommandList(int fIndex); // close + execute the SC command list
     bool WaitForSCAllocator(int fIndex);  // wait for the previous warp on this slot to finish
@@ -205,12 +203,9 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
 
-    // Adaptive late-sample controller state. _lateSampleLeadMs is written by
-    // the presenter thread only (DispatchPacketWarp); _lastLateSampleLeadMs is
-    // the effective per-slot lead the 1 Hz log line reports (written by
-    // PresenterMain, read by LogMetricsIfDue on the game thread).
-    double _lateSampleLeadMs = 4.0; // presenter thread only; starts at the parent's initial constant
-    std::atomic<double> _lastLateSampleLeadMs { 4.0 };
+    // Effective fixed latch lead reported by the 1 Hz summary. A configured
+    // LateSampleLead > 0.5 overrides the conservative auto/default lead.
+    std::atomic<double> _lastLateSampleLeadMs { LATE_LATCH_DEFAULT_MS };
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;

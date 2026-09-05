@@ -107,6 +107,29 @@ bool AReproj_Dx12::SubmitSCCommandList(int fIndex)
     return true;
 }
 
+bool AReproj_Dx12::SignalLateLatch()
+{
+    if (_lateLatchPendingValue == 0)
+        return true;
+
+    if (_lateLatchFence == nullptr)
+    {
+        LOG_ERROR("Reproj: cannot release pending late-latch value {} without a fence", _lateLatchPendingValue);
+        return false;
+    }
+
+    const auto value = _lateLatchPendingValue;
+    const auto result = _lateLatchFence->Signal(value);
+    if (FAILED(result))
+    {
+        LOG_ERROR("Reproj: late-latch fence signal failed for value {}: {:X}", value, (UINT) result);
+        return false;
+    }
+
+    _lateLatchPendingValue = 0;
+    return true;
+}
+
 bool AReproj_Dx12::WaitForSCAllocator(int fIndex)
 {
     if (_scFence == nullptr || _scFenceEvent == nullptr)
@@ -1031,10 +1054,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
     // async-simple: the presenter's one DIRECT queue (_presentQueue) owns the
     // warp. The warp and the final copy-to-backbuffer are recorded on the same
-    // SC command list, and _scFence is the single retirement fence. There is no
-    // COMPUTE queue and no deferred late-latch fence — input is baked into the
-    // constants at dispatch time, so the adaptive lead below makes the sample
-    // happen as close to the present deadline as the warp allows.
+    // SC command list, and _scFence is the single retirement fence. The only
+    // extra synchronization is the CPU-signaled late-latch fence: the queue
+    // waits on it before the dispatch, while the presenter writes the selected
+    // output's upload constants near the display deadline.
     if (!CreateWarpOutput(outputIndex, backBuffer) || !WaitForSCAllocator(outputIndex))
     {
         backBuffer->Release();
@@ -1054,16 +1077,33 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
     auto constants = content.constants;
     constants.timeStep = timeStep;
-    // Constants are baked at dispatch time on the presenter thread; fresh
-    // raw-mouse motion is composed here when available (ApplyLateInput). No
-    // deferred GPU-side constant rewrite on the minimal path.
-    if (!ApplyLateInput(constants, packet))
+    const bool deferredLateLatch = _lateLatchFence != nullptr && _presentQueue != nullptr;
+    if (!deferredLateLatch)
+    {
+        // Safe fallback for partial initialization: constants are written before
+        // execution when no latch fence is available.
+        if (!ApplyLateInput(constants, packet))
+            PrepareRotationConstants(constants, false);
+    }
+    else
+    {
+        // Populate a valid baseline before queuing the command list. The GPU is
+        // parked before it can read this upload buffer; the final pose replaces
+        // it after submission and before the latch fence is released.
         PrepareRotationConstants(constants, false);
+        if (!_warp->WriteConstants(outputIndex, constants))
+        {
+            backBuffer->Release();
+            SubmitSCCommandList(outputIndex);
+            packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
+            return false;
+        }
+    }
     // The isolated UI (when the anchor was captured with HUD isolation) is
     // composited unwarped in the same dispatch; a composed capture dispatches
     // with ui == nullptr (RPD then samples color for both SRVs).
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
-                                    outputIndex, false, packet.hasUi ? packet.ui : nullptr,
+                                    outputIndex, deferredLateLatch, packet.hasUi ? packet.ui : nullptr,
                                     packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON);
     if (!ok)
     {
@@ -1081,42 +1121,73 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     backBuffer->Release();
 
+    UINT64 lateLatchValue = 0;
+    if (deferredLateLatch)
+    {
+        lateLatchValue = ++_lateLatchFenceValue;
+        _lateLatchPendingValue = lateLatchValue;
+        const auto waitResult = _presentQueue->Wait(_lateLatchFence, lateLatchValue);
+        if (FAILED(waitResult))
+        {
+            SignalLateLatch();
+            SubmitSCCommandList(outputIndex);
+            packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
+            return false;
+        }
+    }
+
     if (!SubmitSCCommandList(outputIndex))
+    {
+        SignalLateLatch();
         return false;
+    }
 
     // async-simple: _scFence is the single retirement fence — SubmitSCCommandList
     // signaled it after the warp+copy dispatch on _presentQueue.
     packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
 
-    // Adaptive late sample (late-latch as late as possible): wait on the
-    // presenter's own queue for the warp to complete, then measure the headroom
-    // to the present deadline. Reduce the next slot's dispatch/sample lead when
-    // the warp finished early (this slot's sample was taken too soon), grow it
-    // when the warp is crowding the vblank. The lead settles at warp+copy cost
-    // plus ~1.5 ms of CPU wake/Present margin, so the mouse is sampled as close
-    // to scanout as the hardware allows. A fixed ReprojLateSampleLead > 0.5 ms
-    // overrides the controller (parent-branch semantics).
-    const auto lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
-    const bool adaptiveLateSample = !(lateLeadCfg > 0.5f);
-    if (adaptiveLateSample && _scFence != nullptr && _scFenceEvent != nullptr)
+    if (deferredLateLatch)
     {
-        const auto warpFenceValue = _scAllocatorFenceValues[outputIndex];
-        if (_scFence->GetCompletedValue() < warpFenceValue)
+        const auto lateLeadCfg = Config::Instance()->ReprojLateSampleLead.value_or_default();
+        const auto refreshHz = TargetRefreshHz();
+        const auto refreshPeriodMs = refreshHz > 1.0 ? 1000.0 / refreshHz : 8.333;
+        const auto maxUsableLeadMs = std::max(3.0, std::min(LATE_LATCH_MAX_MS, refreshPeriodMs * 0.75));
+        const auto lateLatchLeadMs =
+            std::min(std::clamp(lateLeadCfg > 0.5f ? static_cast<double>(lateLeadCfg) : LATE_LATCH_DEFAULT_MS,
+                                LATE_LATCH_MIN_MS, LATE_LATCH_MAX_MS),
+                     maxUsableLeadMs);
+        _lastLateSampleLeadMs.store(lateLatchLeadMs, std::memory_order_relaxed);
+        if (!WaitForPresenterDeadline(scanoutDeadlineMs - lateLatchLeadMs))
         {
-            if (SUCCEEDED(_scFence->SetEventOnCompletion(warpFenceValue, _scFenceEvent)))
-                WaitForSingleObject(_scFenceEvent, 5000);
+            SignalLateLatch();
+            return false;
         }
-        const double headroomMs = scanoutDeadlineMs - Util::MillisecondsNow();
-        if (headroomMs > SAMPLE_LEAD_REDUCE_HEADROOM_MS)
-            _lateSampleLeadMs = std::max(SAMPLE_LEAD_MIN_MS, _lateSampleLeadMs - SAMPLE_LEAD_STEP_MS);
-        else if (headroomMs < SAMPLE_LEAD_GROW_HEADROOM_MS)
-            _lateSampleLeadMs = std::min(SAMPLE_LEAD_MAX_MS, _lateSampleLeadMs + SAMPLE_LEAD_STEP_MS);
+
+        auto lateConstants = content.constants;
+        lateConstants.timeStep = timeStep;
+        if (!ApplyLateInput(lateConstants, packet))
+            PrepareRotationConstants(lateConstants, false);
+
+        const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
+        // Publish the persistent upload-buffer write before releasing the GPU
+        // wait. The fence is intentionally CPU-signaled; it never enters the
+        // game's DIRECT queue.
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        const bool latchReleased = SignalLateLatch();
+        if (!constantsWritten || !latchReleased)
+            return false;
     }
     return true;
 }
 
 bool AReproj_Dx12::DrainGpuWork()
 {
+    // A presenter failure can leave the DIRECT queue parked behind the latch
+    // gate. Release it before submitting or waiting for any remaining command
+    // lists, and before the fence/queue objects can be destroyed.
+    if (!SignalLateLatch())
+        return false;
+
     for (int i = 0; i < BUFFER_COUNT; ++i)
     {
         if (_uiCommandListResetted[i] && !SubmitUICommandList(i))
@@ -1276,7 +1347,7 @@ void AReproj_Dx12::LogMetricsIfDue()
     }
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
-             "interval={:.2f}/{:.2f}ms lead={:.2f}ms poseAge={:.1f}ms queue={} "
+             "interval={:.2f}/{:.2f}ms latchLead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} "
              "({}, block={:.2f}ms)",
              realFrames * scale, warpFrames * scale, newAnchorDisplays,
@@ -1296,7 +1367,7 @@ AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
 bool AReproj_Dx12::VirtualAnchorReady() const
 {
     if (_device == nullptr || _gameCommandQueue == nullptr || _uiFence == nullptr || _uiFenceEvent == nullptr ||
-        _scFence == nullptr || _scFenceEvent == nullptr)
+        _scFence == nullptr || _scFenceEvent == nullptr || _lateLatchFence == nullptr)
         return false;
 
     for (int i = 0; i < BUFFER_COUNT; ++i)
@@ -2366,6 +2437,7 @@ void AReproj_Dx12::ReleaseObjects()
 
     SAFE_RELEASE(_uiFence);
     SAFE_RELEASE(_scFence);
+    SAFE_RELEASE(_lateLatchFence);
     if (_uiFenceEvent != nullptr)
     {
         CloseHandle(_uiFenceEvent);
@@ -2379,6 +2451,8 @@ void AReproj_Dx12::ReleaseObjects()
 
     _uiFenceValue = 0;
     _scFenceValue = 0;
+    _lateLatchFenceValue = 0;
+    _lateLatchPendingValue = 0;
     _publishedFrameId.store(0);
     _readyFrameId.store(0);
     _presenterState.store(PresenterState::Stopped);
@@ -2496,6 +2570,17 @@ void AReproj_Dx12::CreateObjects(ID3D12Device* InDevice)
                     LOG_ERROR("Create SC fence failed: {:X}", (UINT) result);
                     break;
                 }
+            }
+
+            if (_lateLatchFence == nullptr)
+            {
+                result = InDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_lateLatchFence));
+                if (FAILED(result))
+                {
+                    LOG_ERROR("Create late-latch fence failed: {:X}", (UINT) result);
+                    break;
+                }
+                _lateLatchFence->SetName(L"Reproj_LateLatchFence");
             }
 
             if (_scFenceEvent == nullptr)

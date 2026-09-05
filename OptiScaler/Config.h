@@ -613,7 +613,7 @@ class Config
     // queue, rotation-only warp on the presenter's single DIRECT queue, always
     // warp repeated slots, never pace the game. Keep this surface deliberately
     // small; removed experimental keys (COMPUTE warp queue, HUD isolation
-    // toggles, adaptive late latch, source cap) are not coming back.
+    // toggles, source pacing, and adaptive late latch) are not coming back.
     CustomOptional<bool> ReprojEnabled { true };
     CustomOptional<float> ReprojTargetRefresh { 0.0f };         // 0 = active display refresh
     CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // inert compat read; 0 = never pace the game thread
@@ -623,7 +623,7 @@ class Config
     CustomOptional<bool> ReprojHudIsolation { true }; // separate Scaleform HUD from 3D world (KCD2), composited unwarped
     CustomOptional<float> ReprojLateSampleLead {
         0.0f
-    }; // 0/auto = adaptive: sample mouse input as late as the warp allows; fixed float >0.5 overrides
+    }; // 0/auto = fixed 3 ms deferred latch; fixed float >0.5 overrides (bounded by the slot)
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

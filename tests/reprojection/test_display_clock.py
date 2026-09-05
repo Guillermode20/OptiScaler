@@ -136,42 +136,47 @@ class ReprojectionTests(unittest.TestCase):
         # self-locking behavior.
         self.assertEqual(redirect.count("MarkWorldSnapshotCl(commandList)"), 1)
 
-    def test_adaptive_sample_lead_controller_rides_the_presenter_direct_queue(self):
-        # HUD-fix/late-latch rollover: the adaptive sample-lead hunt is back,
-        # but it rides the presenter's single DIRECT queue instead of the
-        # deleted compute deferred-latch path. DispatchPacketWarp waits for the
-        # warp on _scFence (its own queue), measures headroom to the present
-        # deadline, and slides _lateSampleLeadMs; PresenterMain uses that lead
-        # for the next slot's dispatch so the mouse is sampled as late as the
-        # warp allows. ReprojLateSampleLead > 0.5 overrides with a constant.
+    def test_deferred_late_latch_uses_the_presenter_direct_queue(self):
+        # P7: the single DIRECT presenter queue waits on one CPU-signaled latch
+        # fence while the presenter writes the per-output upload constants. The
+        # first implementation uses a fixed conservative lead; adaptive tuning
+        # is intentionally deferred until fixed-lead cadence is measured.
         root = Path(__file__).resolve().parents[2]
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         dispatch = reproj.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
             "bool AReproj_Dx12::DrainGpuWork", 1)[0]
-        self.assertIn("adaptiveLateSample", dispatch)
-        self.assertIn("SAMPLE_LEAD_MIN_MS", dispatch)
-        self.assertIn("SAMPLE_LEAD_MAX_MS", dispatch)
-        self.assertIn("SAMPLE_LEAD_REDUCE_HEADROOM_MS", dispatch)
-        self.assertIn("SAMPLE_LEAD_GROW_HEADROOM_MS", dispatch)
+        self.assertIn("deferredLateLatch", dispatch)
+        self.assertIn("_lateLatchFence", dispatch)
+        self.assertIn("_presentQueue->Wait(_lateLatchFence", dispatch)
+        self.assertNotIn("_gameCommandQueue->Wait(_lateLatchFence", reproj)
+        self.assertIn("SignalLateLatch()", dispatch)
+        self.assertIn("WriteConstants", dispatch)
         self.assertIn("lateLeadCfg", dispatch)
-        # Post-warp headroom is measured on the presenter's own fence: no
-        # deferred constant rewrite, no compute path.
-        self.assertIn("WaitForSingleObject(_scFenceEvent, 5000)", dispatch)
-        self.assertIn("scanoutDeadlineMs - Util::MillisecondsNow()", dispatch)
-        self.assertNotIn("lateLatchValue", dispatch)
-        self.assertNotIn("WriteConstants", dispatch)
-        self.assertNotIn("WaitForPresenterDeadline", dispatch)
-        # The 1 Hz log reports the effective (adaptive) lead, not a constant.
+        self.assertIn("WaitForPresenterDeadline", dispatch)
+        self.assertIn("scanoutDeadlineMs - lateLatchLeadMs", dispatch)
+        self.assertNotIn("adaptiveLateSample", dispatch)
+        # The 1 Hz log reports the effective fixed latch lead.
         log = reproj.split("void AReproj_Dx12::LogMetricsIfDue", 1)[1]
         self.assertNotIn("sampLead=", log)
         self.assertIn("_lastLateSampleLeadMs.load(std::memory_order_relaxed)", log)
-        self.assertIn("lead={:.2f}ms", log)
-        # The controller constants and state live on the class definition.
+        self.assertIn("latchLead={:.2f}ms", log)
+        # The latch constants and state live on the class definition.
         header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
-        self.assertIn("SAMPLE_LEAD_MIN_MS", header)
-        self.assertIn("SAMPLE_LEAD_MAX_MS", header)
-        self.assertIn("_lateSampleLeadMs", header)
+        self.assertIn("LATE_LATCH_DEFAULT_MS", header)
+        self.assertIn("LATE_LATCH_MIN_MS", header)
+        self.assertIn("_lateLatchFence", header)
         self.assertIn("_lastLateSampleLeadMs", header)
+        self.assertIn("SAFE_RELEASE(_lateLatchFence)", reproj)
+        self.assertIn("CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_lateLatchFence))", reproj)
+        drain = reproj.split("bool AReproj_Dx12::DrainGpuWork", 1)[1].split(
+            "void AReproj_Dx12::RecordRealFrame", 1
+        )[0]
+        release = reproj.split("void AReproj_Dx12::ReleaseObjects", 1)[1].split(
+            "void AReproj_Dx12::CreateObjects", 1
+        )[0]
+        self.assertIn("if (!SignalLateLatch())", drain)
+        self.assertLess(drain.index("SignalLateLatch()"), drain.index("for (int i = 0; i < BUFFER_COUNT"))
+        self.assertLess(release.index("DrainGpuWork()"), release.index("SAFE_RELEASE(_lateLatchFence)"))
         # INI key stays readable; auto still resolves to the 0 default.
         config_h = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
         block = config_h.split("CustomOptional<float> ReprojLateSampleLead", 1)[1]
@@ -298,10 +303,10 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("hudlessSource", capture)
 
     def test_async_warp_dispatches_on_the_presenter_direct_queue(self):
-        # async-simple P3: DispatchPacketWarp records the warp + copy-to-
+        # async-simple P7: DispatchPacketWarp records the warp + copy-to-
         # backbuffer on the presenter's SC (DIRECT) command list and retires on
-        # _scFence — the single warp queue and the single retirement fence. The
-        # COMPUTE queue and the deferred late-latch fence are deleted.
+        # _scFence. The one deferred latch fence only gates this same queue;
+        # there is still no COMPUTE queue or second presentation path.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
@@ -314,30 +319,30 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("SubmitSCCommandList(outputIndex)", dispatch)
         self.assertIn("_scAllocatorFenceValues[outputIndex] = ++_scFenceValue;", dispatch)
         self.assertIn("packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];", dispatch)
-        self.assertIn("outputIndex, false, packet.hasUi ? packet.ui : nullptr,", dispatch)
+        self.assertIn("outputIndex, deferredLateLatch, packet.hasUi ? packet.ui : nullptr,", dispatch)
         self.assertIn("packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON", dispatch)
-        # No COMPUTE queue, no deferred latch, no RUI composite on the warp path.
+        # No COMPUTE queue or RUI composite on the warp path.
         self.assertNotIn("uiPacket", dispatch)
         self.assertNotIn("composeUi", dispatch)
         self.assertNotIn("_computeQueue", dispatch)
         self.assertNotIn("_computeFence", dispatch)
-        self.assertNotIn("_lateLatchFence", dispatch)
-        self.assertNotIn("deferredLateLatch", dispatch)
+        self.assertIn("_lateLatchFence", dispatch)
+        self.assertIn("deferredLateLatch", dispatch)
         self.assertNotIn("useCompute", dispatch)
         self.assertNotIn("WaitForComputeAllocator", dispatch)
         self.assertNotIn("SubmitComputeCommandList", dispatch)
-        self.assertNotIn("WriteConstants", dispatch)
+        self.assertIn("WriteConstants", dispatch)
         self.assertNotIn("_renderUI->Dispatch", dispatch)
-        # Constants are baked at dispatch time (no deferred rewrite).
-        self.assertIn("if (!ApplyLateInput(constants, packet))", dispatch)
+        # Constants are written once as a baseline, then replaced while the
+        # queue is parked behind the latch fence.
         self.assertIn("PrepareRotationConstants(constants, false);", dispatch)
-        self.assertNotIn("PrepareRotationConstants(constants);", dispatch)
-        self.assertNotIn("PrepareRotationConstants(lateConstants);", dispatch)
+        self.assertIn("_warp->WriteConstants(outputIndex, constants)", dispatch)
+        self.assertIn("PrepareRotationConstants(lateConstants, false);", dispatch)
         # The machinery is deleted from the class definition as well.
         header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
         self.assertNotIn("_computeQueue", header)
         self.assertNotIn("_computeFence", header)
-        self.assertNotIn("_lateLatchFence", header)
+        self.assertIn("_lateLatchFence", header)
         self.assertNotIn("GetComputeCommandList", header)
         self.assertNotIn("SubmitComputeCommandList", header)
         self.assertNotIn("WaitForComputeAllocator", header)
@@ -412,12 +417,11 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("nextDeadlineMs = presentedAt + refreshPeriodMs", presenter)
         self.assertNotIn("SampleDisplayClock(", presenter)
         self.assertIn("maxUsableLeadMs", presenter)
-        # Adaptive dispatch lead (SAMPLE_LEAD band, ReprojLateSampleLead
-        # override), clamped into the slot window; the effective lead is what
-        # the 1 Hz log reports.
-        self.assertIn("std::min(adaptiveLeadMs, maxUsableLeadMs)", presenter)
-        self.assertIn("std::clamp(_lateSampleLeadMs, SAMPLE_LEAD_MIN_MS, SAMPLE_LEAD_MAX_MS)", presenter)
-        self.assertIn("_lastLateSampleLeadMs.store(dispatchLeadMs", presenter)
+        # Fixed P7 latch lead (ReprojLateSampleLead override), with the
+        # submission wake held at least one millisecond earlier.
+        self.assertIn("std::min(std::max(latchLeadMs + 1.0, 4.0), maxUsableLeadMs)", presenter)
+        self.assertIn("LATE_LATCH_DEFAULT_MS", presenter)
+        self.assertIn("_lastLateSampleLeadMs.store(latchLeadMs", presenter)
 
     def test_experimental_control_surface_is_removed(self):
         root = Path(__file__).resolve().parents[2]
