@@ -1817,6 +1817,21 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
 
             const auto overlayType = config->FpsOverlayType.value_or_default();
             const bool hasFeature = currentFeature && !currentFeature->IsFrozen();
+            const bool reprojActive = IsReprojectionOutput(state.activeFgOutput) && fg != nullptr && fg->IsActive() &&
+                                      !fg->IsPaused();
+            float reprojSourceFps = frameRate;
+            float reprojDisplayFps = 0.0f;
+            if (reprojActive)
+            {
+                if (auto reproj = dynamic_cast<AReproj_Dx12*>(fg); reproj != nullptr)
+                {
+                    const auto metrics = reproj->GetRuntimeMetrics();
+                    if (metrics.realFps > 0.0f)
+                        reprojSourceFps = metrics.realFps;
+                    if (metrics.displayFps > 0.0f)
+                        reprojDisplayFps = metrics.displayFps;
+                }
+            }
 
             // Prepare Line 1
             std::string featurePart;
@@ -1836,19 +1851,50 @@ void MenuCommon::RenderPerformanceOverlay(RenderMenuContext& ctx)
             {
                 const double baseFps = frameRate / (double) (fg->GetInterpolatedFrameCount() + 1);
 
-                switch (overlayType)
+                if (reprojActive)
                 {
-                case FpsOverlay_JustFPS:
-                    fpsPart = StrFmt("%6.1f/%5.1f ", frameRate, baseFps);
-                    break;
+                    if (reprojDisplayFps > 0.0f)
+                    {
+                        switch (overlayType)
+                        {
+                        case FpsOverlay_JustFPS:
+                            fpsPart = StrFmt("Source: %6.1f | Display: %6.1f ", reprojSourceFps, reprojDisplayFps);
+                            break;
 
-                case FpsOverlay_Simple:
-                    fpsPart = StrFmt("FPS: %6.1f/%5.1f, %7.2f ms", frameRate, baseFps, frameTime);
-                    break;
+                        case FpsOverlay_Simple:
+                            fpsPart = StrFmt("Source: %6.1f | Display: %6.1f FPS, %7.2f ms", reprojSourceFps,
+                                             reprojDisplayFps,
+                                             reprojSourceFps > 0.0f ? 1000.0f / reprojSourceFps : 0.0f);
+                            break;
 
-                default:
-                    fpsPart = StrFmt("FPS: %6.1f/%5.1f, Avg: %6.1f", frameRate, baseFps, 1000.0f / averageFrameTime);
-                    break;
+                        default:
+                            fpsPart = StrFmt("Source: %6.1f | Display: %6.1f FPS", reprojSourceFps,
+                                             reprojDisplayFps);
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        fpsPart = StrFmt("Source: %6.1f | Display: warming up ", reprojSourceFps);
+                    }
+                }
+                else
+                {
+                    switch (overlayType)
+                    {
+                    case FpsOverlay_JustFPS:
+                        fpsPart = StrFmt("%6.1f/%5.1f ", frameRate, baseFps);
+                        break;
+
+                    case FpsOverlay_Simple:
+                        fpsPart = StrFmt("FPS: %6.1f/%5.1f, %7.2f ms", frameRate, baseFps, frameTime);
+                        break;
+
+                    default:
+                        fpsPart =
+                            StrFmt("FPS: %6.1f/%5.1f, Avg: %6.1f", frameRate, baseFps, 1000.0f / averageFrameTime);
+                        break;
+                    }
                 }
             }
             else

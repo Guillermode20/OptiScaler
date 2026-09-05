@@ -278,6 +278,13 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("IsReprojectionOutput(State::Instance().activeFgOutput)", sleep)
         self.assertIn("return;", sleep)
 
+    def test_reproj_overlay_labels_source_and_display_fps(self):
+        root = Path(__file__).resolve().parents[2]
+        menu = (root / "OptiScaler/menu/menu_common.cpp").read_text(encoding="utf-8")
+        self.assertIn("metrics.realFps", menu)
+        self.assertIn("metrics.displayFps", menu)
+        self.assertIn("Source: %6.1f | Display: %6.1f", menu)
+
     def test_every_source_frame_is_captured_without_pacing(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
