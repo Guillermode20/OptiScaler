@@ -298,6 +298,21 @@ struct ReprojVec3
     float z;
 };
 
+ReprojVec3 operator+(ReprojVec3 a, ReprojVec3 b)
+{
+    return { a.x + b.x, a.y + b.y, a.z + b.z };
+}
+
+ReprojVec3 operator-(ReprojVec3 a, ReprojVec3 b)
+{
+    return { a.x - b.x, a.y - b.y, a.z - b.z };
+}
+
+ReprojVec3 operator*(ReprojVec3 v, float scale)
+{
+    return { v.x * scale, v.y * scale, v.z * scale };
+}
+
 ReprojVec3 LoadReprojVec3(const float* value) { return { value[0], value[1], value[2] }; }
 
 ReprojVec3 NormalizeReprojVec3(ReprojVec3 value)
