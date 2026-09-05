@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.46 (2026-09-05)
+* Fix source-pacer sleep holding the metrics mutex (3 paced publication sites now close the block= scope before paceReprojectionSource), and add four opt-in off-by-default A/B keys: motion-coherent edge extension (EdgeExtensionPx), fixed guard crop (GuardCropPercent), the KCD2 confidence-gated depth translation residual v1 (DepthEnabled/DepthInverted/DepthMaxResidualPx/DepthVerticalScale), and the anchor-switch continuity latch (ContinuityLatch)
+
 ## v10.0.1.45 (2026-09-05)
 * Add opt-in async-timewarp source FPS cap (60->120 A/B) with in-game menu control; re-enable live ATW menu tuning (late sample lead, mouse sens, KCD2 HUD isolation)
 
