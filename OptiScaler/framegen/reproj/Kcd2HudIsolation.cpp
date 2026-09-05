@@ -292,9 +292,27 @@ bool TryRedirect(ID3D12GraphicsCommandList* commandList, ID3D12Resource* source,
 
 void OnEndDisplay()
 {
+    // Deliberately no-op: KCD2 runs multiple Scaleform scopes per frame (begin/end
+    // pairs for HUD layers). Resetting snapshotTakenThisScope here caused later scopes
+    // in the same frame to re-snapshot and clear uiTexture with (0,0,0,0), wiping
+    // earlier layers. Frame-level reset happens in OnFrameCaptured when Present consumes
+    // the frame.
+}
+
+void OnFrameCaptured(ID3D12Resource* backBuffer)
+{
+    if (backBuffer == nullptr)
+        return;
+
     std::scoped_lock lock(g_mutex);
     for (auto& slot : g_slots)
-        slot.snapshotTakenThisScope = false;
+    {
+        if (slot.backBuffer == backBuffer)
+        {
+            slot.snapshotTakenThisScope = false;
+            slot.hasValidData = false;
+        }
+    }
 }
 
 ID3D12Resource* GetHudlessColor(ID3D12Resource* backBuffer, D3D12_RESOURCE_STATES* state)

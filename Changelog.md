@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.43 (2026-09-05)
+* Fix KCD2 UI rendering in async timewarp: composite UI in DisplayPacket and stop multi-pass Scaleform wiping
+
 ## v10.0.1.42 (2026-09-04)
 * Fix 57-58 FPS source dips from pacer overshoot and present logging
 

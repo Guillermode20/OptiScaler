@@ -798,6 +798,8 @@ bool AReproj_Dx12::CaptureAllocatorReady(int packetIndex)
 void AReproj_Dx12::SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                          WrappedIDXGISwapChain4* wrapped, double presentStartMs)
 {
+    Kcd2HudIsolation::OnFrameCaptured(gameBackBuffer);
+
     // Drop publication but still retire and advance the logical game buffer.
     // The fence signal is enqueued on the game queue behind all prior work,
     // so it correctly orders after even the in-flight submission that forced
@@ -887,6 +889,8 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     if (!ok)
         return false;
 
+    Kcd2HudIsolation::OnFrameCaptured(gameBackBuffer);
+
     const auto now = Util::MillisecondsNow();
     const auto rawFrameDelta =
         _lastRealFrameTimestamp > 0.0 ? now - _lastRealFrameTimestamp : State::Instance().lastFGFrameTime;
@@ -905,9 +909,10 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     // 0 = no isolated UI, 1 = premultiplied alpha, 2 = straight alpha (parent
     // branch semantics). The warp shader composites the UI unwarped after the
     // rotation warp. Derive the fallback aspect from the pinned source
-    // (identical resource and resolution to the copy target).
+    // (identical resource and resolution to the copy target). Scaleform in KCD2
+    // outputs straight alpha (un-multiplied RGB, live-validated in pre25).
     packet.constants.hudlessSource =
-        packet.hasUi ? (Config::Instance()->FGUIPremultipliedAlpha.value_or_default() ? 1u : 2u) : 0u;
+        packet.hasUi ? (Config::Instance()->FGUIPremultipliedAlpha.value_or_default() ? 2u : 1u) : 0u;
     const auto colorDesc = color->GetDesc();
     const float fallbackAspect = colorDesc.Height > 0 ? static_cast<float>(colorDesc.Width) / colorDesc.Height : 0.0f;
     double kcd2PoseIntervalMs = 0.0;
@@ -984,25 +989,80 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex)
     auto realSwapChain = static_cast<IDXGISwapChain3*>(_swapChain);
     const auto outputIndex = (int) realSwapChain->GetCurrentBackBufferIndex();
 
-    // Unwarped blits are pure copies on the presenter's DIRECT SC queue — no
-    // UI composite on the minimal path (the frame is captured composed).
-    if (!WaitForSCAllocator(outputIndex))
+    ID3D12Resource* backBuffer = nullptr;
+    if (FAILED(realSwapChain->GetBuffer(outputIndex, IID_PPV_ARGS(&backBuffer))))
         return false;
+
+    const bool compositeUi = packet.hasUi && packet.ui != nullptr && _warp != nullptr && _warp->IsInit();
+    if (compositeUi)
+    {
+        if (!CreateWarpOutput(outputIndex, backBuffer) || !WaitForSCAllocator(outputIndex))
+        {
+            backBuffer->Release();
+            return false;
+        }
+
+        auto cmdList = GetSCCommandList(outputIndex);
+        if (cmdList == nullptr)
+        {
+            backBuffer->Release();
+            return false;
+        }
+
+        _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
+
+        auto constants = packet.constants;
+        constants.timeStep = 0.0f;
+        constants.mode = 0;
+        std::memset(&constants.prevCameraRight, 0, sizeof(constants.prevCameraRight));
+        std::memset(&constants.prevCameraUp, 0, sizeof(constants.prevCameraUp));
+        std::memset(&constants.prevCameraForward, 0, sizeof(constants.prevCameraForward));
+
+        const bool ok = _warp->Dispatch(cmdList, packet.color, packet.colorState, _warpOutput[outputIndex], constants,
+                                        outputIndex, false /* deferConstants */, packet.ui, packet.uiState);
+        if (!ok)
+        {
+            backBuffer->Release();
+            SubmitSCCommandList(outputIndex);
+            packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
+            return false;
+        }
+
+        packet.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        ResourceBarrier(cmdList, _warpOutput[outputIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE);
+        ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmdList->CopyResource(backBuffer, _warpOutput[outputIndex]);
+        ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
+        backBuffer->Release();
+
+        if (!SubmitSCCommandList(outputIndex))
+            return false;
+
+        packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
+        const bool directGateQueued = _gameCommandQueue != nullptr && _scFence != nullptr &&
+                                      SUCCEEDED(_gameCommandQueue->Wait(_scFence, packet.retirementFenceValue));
+        if (!directGateQueued)
+            return false;
+        return true;
+    }
+
+    // Unwarped blits without isolated UI are pure copies on the presenter's DIRECT SC queue
+    if (!WaitForSCAllocator(outputIndex))
+    {
+        backBuffer->Release();
+        return false;
+    }
 
     auto cmdList = GetSCCommandList(outputIndex);
     if (cmdList == nullptr)
+    {
+        backBuffer->Release();
         return false;
+    }
 
     // Reserve the SC retirement fence value for this slot.
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
-
-    ID3D12Resource* backBuffer = nullptr;
-    if (FAILED(realSwapChain->GetBuffer(outputIndex, IID_PPV_ARGS(&backBuffer))))
-    {
-        SubmitSCCommandList(outputIndex);
-        packet.retirementFenceValue = _scAllocatorFenceValues[outputIndex];
-        return false;
-    }
 
     ResourceBarrier(cmdList, packet.color, packet.colorState, D3D12_RESOURCE_STATE_COPY_SOURCE);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1545,6 +1605,7 @@ bool AReproj_Dx12::Present()
                 std::scoped_lock metricsLock(_metricsMutex);
                 ++_metricsSkippedAnchorSamples;
             }
+            Kcd2HudIsolation::OnFrameCaptured(gameBackBuffer);
             SAFE_RELEASE(gameBackBuffer);
             std::scoped_lock metricsLock(_metricsMutex);
             // async-simple: no source pacing; block= covers the whole present.
