@@ -94,6 +94,13 @@ inline int FrameLimit::combined_sleep(int64_t ns, int64_t busywaitThresholdNs)
 
 void FrameLimit::sleep(bool fgActive)
 {
+    // Async reprojection owns the display cadence and deliberately leaves the
+    // source/game cadence unconstrained. This guard also covers the Vulkan/
+    // VKD3D present path, which can reach this shared limiter without going
+    // through FGHooks' reprojection-specific bypass.
+    if (IsReprojectionOutput(State::Instance().activeFgOutput))
+        return;
+
     if (auto fpsCap = Config::Instance()->FramerateLimit.value_or_default(); fpsCap != 0.0f)
     {
         uint64_t min_interval_us = std::clamp((uint64_t) (1'000'000 / fpsCap), 0ULL, 100'000'000ULL);

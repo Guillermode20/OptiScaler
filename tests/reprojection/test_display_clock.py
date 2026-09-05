@@ -269,6 +269,15 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("_presentCv.notify_one()", publish)
         self.assertIn("return true", publish)
 
+    def test_shared_frame_limiter_bypasses_reprojection(self):
+        root = Path(__file__).resolve().parents[2]
+        frame_limit = (root / "OptiScaler/misc/FrameLimit.cpp").read_text(encoding="utf-8")
+        sleep = frame_limit.split("void FrameLimit::sleep(bool fgActive)", 1)[1].split(
+            "void FrameLimit::sleepForMs", 1
+        )[0]
+        self.assertIn("IsReprojectionOutput(State::Instance().activeFgOutput)", sleep)
+        self.assertIn("return;", sleep)
+
     def test_every_source_frame_is_captured_without_pacing(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
