@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.49 (2026-09-06)
+* Render a real KCD2 peripheral reserve and correct hybrid FSR motion inputs
+
 ## v10.0.1.48 (2026-09-06)
 * Edge-trigger hybrid resets and reserve a fixed warp guard crop
 

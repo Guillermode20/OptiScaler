@@ -64,11 +64,14 @@ bool HybridFsrGenerator::EnsureContext(ID3D12Device* device, const ContentFrame&
     create.displaySize = { static_cast<std::uint32_t>(desc.Width), desc.Height };
     create.maxRenderSize = create.displaySize;
     create.backBufferFormat = ffxApiGetSurfaceFormatDX12(desc.Format);
-    create.flags = FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+    create.flags = 0;
+    if (realFrame.hdr)
+        create.flags |= FFX_FRAMEGENERATION_ENABLE_HIGH_DYNAMIC_RANGE;
     if (realFrame.invertedDepth)
         create.flags |= FFX_FRAMEGENERATION_ENABLE_DEPTH_INVERTED;
-    if (realFrame.constants.mvWidth == realFrame.constants.displayWidth &&
-        realFrame.constants.mvHeight == realFrame.constants.displayHeight)
+    if (realFrame.jitteredMotionVectors)
+        create.flags |= FFX_FRAMEGENERATION_ENABLE_MOTION_VECTORS_JITTER_CANCELLATION;
+    if (realFrame.displayResolutionMotionVectors)
         create.flags |= FFX_FRAMEGENERATION_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS;
 
     const auto result = FfxApiProxy::D3D12_CreateContext(&_context, &create.header, nullptr);
@@ -174,7 +177,7 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
     prepare.renderSize = { realFrame.constants.mvWidth, realFrame.constants.mvHeight };
     prepare.jitterOffset = { realFrame.constants.jitterX, realFrame.constants.jitterY };
     prepare.motionVectorScale = { realFrame.constants.mvScaleX, realFrame.constants.mvScaleY };
-    prepare.frameTimeDelta = static_cast<float>(std::clamp(realFrame.sourcePoseInterval, 1.0, 500.0));
+    prepare.frameTimeDelta = static_cast<float>(std::clamp(realFrame.sourceFrameInterval, 1.0, 500.0));
     prepare.cameraNear = realFrame.cameraNear;
     prepare.cameraFar = realFrame.cameraFar;
     prepare.cameraFovAngleVertical = realFrame.constants.cameraVFov;
@@ -195,7 +198,8 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
     dispatch.commandList = commandList;
     dispatch.frameID = frameId;
     dispatch.generationRect = { 0, 0, static_cast<int>(_displayWidth), static_cast<int>(_displayHeight) };
-    dispatch.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+    dispatch.backbufferTransferFunction =
+        realFrame.hdr ? FFX_API_BACKBUFFER_TRANSFER_FUNCTION_PQ : FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
     dispatch.minMaxLuminance[0] = 0.0001f;
     dispatch.minMaxLuminance[1] = 1000.0f;
     dispatch.numGeneratedFrames = 1;

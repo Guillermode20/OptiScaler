@@ -30,8 +30,9 @@ struct Snapshot
     std::uint64_t cutGeneration = 0;
 };
 
-// Installs a read-only KCD2 CCamera::UpdateFrustumPlanes hook when WHGame.dll is present.
-// Safe no-op in every other game and on an unknown KCD2 build.
+// Installs the validated KCD2 CCamera::UpdateFrustumPlanes hook when WHGame.dll is present.
+// It may temporarily widen the gameplay CView while CryEngine builds its projection,
+// then restores the original FOV. Safe no-op for every other camera/game/build.
 bool Initialize();
 
 // Replaces missing API camera constants with the latest gameplay CView pose.
@@ -44,6 +45,10 @@ bool IsAvailable();
 // Reads a coherent current/previous pair from the hook's seqlock. The
 // snapshots remain valid after the call and never alias mutable hook storage.
 bool ReadSnapshots(Snapshot& current, Snapshot& previous);
+
+// Fraction of each source-image side containing genuinely rendered peripheral
+// reserve. Zero unless the validated gameplay CView was widened successfully.
+float RenderReserveFraction();
 
 // Human-readable dump of the raw CCamera projection block (0x30..0x64) from the latest pose.
 // Used for live validation of the CryEngine CCamera layout in this retail build. Returns false

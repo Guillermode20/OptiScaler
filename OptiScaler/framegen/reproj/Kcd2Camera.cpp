@@ -11,6 +11,7 @@
 #include <detours/detours.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -27,6 +28,8 @@ std::atomic<int> g_initState { 0 };
 std::atomic<uint64_t> g_sequence { 0 };
 std::atomic<uint64_t> g_poseSequence { 0 };
 std::atomic<uint64_t> g_cutGeneration { 1 };
+std::atomic<float> g_renderReserveFraction { 0.0f };
+std::atomic<bool> g_renderReserveLogged { false };
 
 struct Pose
 {
@@ -143,12 +146,25 @@ bool IsCViewVtable(uintptr_t vtable)
     }
 }
 
+bool IsGameplayCamera(uintptr_t camera)
+{
+    __try
+    {
+        return camera > CViewCameraOffset &&
+               IsCViewVtable(*reinterpret_cast<const uintptr_t*>(camera - CViewCameraOffset));
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 void PublishPose(uintptr_t camera)
 {
     __try
     {
         const auto cview = camera - CViewCameraOffset;
-        if (!IsCViewVtable(*reinterpret_cast<const uintptr_t*>(cview)))
+        if (!IsGameplayCamera(camera))
             return;
 
         const auto matrix = reinterpret_cast<const float (*)[4]>(camera);
@@ -202,7 +218,37 @@ void PublishPose(uintptr_t camera)
 uintptr_t __fastcall Hook(uintptr_t camera)
 {
     PublishPose(camera);
-    return g_original(camera);
+    if (!IsGameplayCamera(camera))
+        return g_original(camera);
+
+    auto* fov = reinterpret_cast<float*>(camera + 0x30);
+    const float originalFov = *fov;
+    const float reserve =
+        std::clamp(Config::Instance()->ReprojKcd2RenderReservePercent.value_or_default(), 0.0f, 15.0f) * 0.01f;
+    if (!std::isfinite(originalFov) || originalFov <= 0.05f || originalFov >= 3.0f || reserve <= 0.0f)
+    {
+        g_renderReserveFraction.store(0.0f, std::memory_order_release);
+        return g_original(camera);
+    }
+
+    // Ask CryEngine to build a wider world frustum. The presenter maps the
+    // player's original FOV into its center, so the perimeter is genuine
+    // rendered geometry available to late rotation instead of a crop/stretch.
+    const float widenedFov = 2.0f * std::atan(std::tan(originalFov * 0.5f) / (1.0f - 2.0f * reserve));
+    if (!std::isfinite(widenedFov) || widenedFov >= 3.0f)
+    {
+        g_renderReserveFraction.store(0.0f, std::memory_order_release);
+        return g_original(camera);
+    }
+
+    *fov = widenedFov;
+    const auto result = g_original(camera);
+    *fov = originalFov;
+    g_renderReserveFraction.store(reserve, std::memory_order_release);
+    if (!g_renderReserveLogged.exchange(true, std::memory_order_relaxed))
+        LOG_INFO("KCD2 camera: rendered reserve active ({:.1f}% per side, vFov {:.2f} -> {:.2f} deg)", reserve * 100.0f,
+                 originalFov * 57.2957795f, widenedFov * 57.2957795f);
+    return result;
 }
 
 bool ReadPoses(Pose& current, Pose& previous)
@@ -299,6 +345,13 @@ bool ReadSnapshots(Snapshot& current, Snapshot& previous)
     copy(currentPose, current);
     copy(previousPose, previous);
     return true;
+}
+
+float RenderReserveFraction()
+{
+    if (!IsAvailable())
+        return 0.0f;
+    return g_renderReserveFraction.load(std::memory_order_acquire);
 }
 
 double ApplyToConstants(RP_Constants& constants, float fallbackAspect, double* poseIntervalMs)

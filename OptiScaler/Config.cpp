@@ -190,7 +190,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojSmoothing.set_from_config(readFloat("AsyncTimewarp", "Smoothing"));
             ReprojHudIsolation.set_from_config(readBool("AsyncTimewarp", "HudIsolation"));
             ReprojContentInterpolation.set_from_config(readBool("AsyncTimewarp", "ContentInterpolation"));
-            ReprojGuardCropPercent.set_from_config(readFloat("AsyncTimewarp", "GuardCropPercent"));
+            ReprojKcd2RenderReservePercent.set_from_config(readFloat("AsyncTimewarp", "Kcd2RenderReservePercent"));
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
         }
 
@@ -1026,8 +1026,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojHudIsolation.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "ContentInterpolation",
                      GetBoolValue(Instance()->ReprojContentInterpolation.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "GuardCropPercent",
-                     GetFloatValue(Instance()->ReprojGuardCropPercent.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "Kcd2RenderReservePercent",
+                     GetFloatValue(Instance()->ReprojKcd2RenderReservePercent.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "LateSampleLead",
                      GetFloatValue(Instance()->ReprojLateSampleLead.value_for_config()).c_str());
     }

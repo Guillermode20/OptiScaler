@@ -494,11 +494,10 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
         uvNumeratorY = CombineReprojVec3(denominator, 0.5f, sy, -0.5f / focalY);
     }
 
-    // Keep a small ring of the captured world outside the visible output. A
-    // rotation warp can then reveal real pixels at the screen edge instead of
-    // falling back to a stationary strip. This is a fixed, predictable FOV
-    // tradeoff; the isolated HUD is composited afterward and is not cropped.
-    const float guard = std::clamp(Config::Instance()->ReprojGuardCropPercent.value_or_default(), 0.0f, 3.0f) * 0.01f;
+    // The validated KCD2 gameplay-camera hook widened the engine frustum before
+    // rendering. Map the player's original FOV into the center of that wider
+    // source. If this exact view was not widened, the mapping stays identity.
+    const float guard = Kcd2Camera::RenderReserveFraction();
     const float guardScale = 1.0f - 2.0f * guard;
     uvNumeratorX = CombineReprojVec3(uvNumeratorX, guardScale, denominator, guard);
     uvNumeratorY = CombineReprojVec3(uvNumeratorY, guardScale, denominator, guard);
@@ -981,6 +980,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         packet.constants.mode = 2;
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
+    packet.sourceFrameInterval = saneFrameDelta;
     Kcd2Camera::Snapshot currentCamera {};
     Kcd2Camera::Snapshot previousCamera {};
     const bool haveKcd2Snapshots =
@@ -989,6 +989,9 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.cameraNear = haveKcd2Snapshots ? currentCamera.nearPlane : 0.0f;
     packet.cameraFar = haveKcd2Snapshots ? currentCamera.farPlane : 0.0f;
     packet.invertedDepth = !!(_constants.flags & FG_Flags::InvertedDepth);
+    packet.hdr = !!(_constants.flags & FG_Flags::Hdr);
+    packet.jitteredMotionVectors = !!(_constants.flags & FG_Flags::JitteredMVs);
+    packet.displayResolutionMotionVectors = !!(_constants.flags & FG_Flags::DisplayResolutionMVs);
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.
@@ -1032,6 +1035,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         generated.constants = packet.constants;
         const auto contentInterval = packet.sourcePoseInterval > 1.0 ? packet.sourcePoseInterval : packet.frameDelta;
         generated.sourcePoseInterval = contentInterval;
+        generated.sourceFrameInterval = packet.sourceFrameInterval;
         generated.sourcePoseTimestamp = sourceTimestamp - contentInterval * 0.5;
         generated.renderTimestamp = now - contentInterval * 0.5;
         generated.virtualContentTimestamp = generated.sourcePoseTimestamp;

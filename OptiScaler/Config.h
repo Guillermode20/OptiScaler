@@ -625,7 +625,9 @@ class Config
         true
     }; // separate Scaleform HUD from 3D world (KCD2), composited unwarped
     CustomOptional<bool> ReprojContentInterpolation { false }; // one FSR midpoint between source anchors; fail closed
-    CustomOptional<float> ReprojGuardCropPercent { 1.5f };     // small source overscan reserve for rotation warp edges
+    CustomOptional<float> ReprojKcd2RenderReservePercent {
+        8.0f
+    }; // widen the validated KCD2 gameplay frustum; presenter restores the original center FOV
     CustomOptional<float> ReprojLateSampleLead {
         0.0f
     }; // 0/auto = fixed 3 ms deferred latch; fixed float >0.5 overrides (bounded by the slot)

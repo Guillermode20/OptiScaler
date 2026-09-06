@@ -23,11 +23,15 @@ struct ContentFrame
     double renderTimestamp = 0.0;
     double sourcePoseTimestamp = 0.0;
     double sourcePoseInterval = 0.0;
+    double sourceFrameInterval = 0.0;
     double virtualContentTimestamp = 0.0;
     std::uint64_t sourceCutGeneration = 0;
     float cameraNear = 0.0f;
     float cameraFar = 0.0f;
     bool invertedDepth = false;
+    bool hdr = false;
+    bool jitteredMotionVectors = false;
+    bool displayResolutionMotionVectors = false;
     bool generated = false;
     ID3D12Fence* completionFence = nullptr; // non-owning
     std::uint64_t completionFenceValue = 0;

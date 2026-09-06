@@ -326,7 +326,9 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("ReprojContentInterpolation", capture)
         self.assertIn("const bool resetEdge = reset && !_resetActive", generator)
         self.assertIn("dispatch.reset = resetEdge || cut", generator)
-        self.assertIn("ReprojGuardCropPercent", source)
+        self.assertIn("Kcd2Camera::RenderReserveFraction()", source)
+        self.assertIn("realFrame.sourceFrameInterval", generator)
+        self.assertIn("if (realFrame.jitteredMotionVectors)", generator)
         self.assertIn("CopyPacketResource(cmdList, velocity", capture)
         self.assertIn("_contentGenerator->Generate", capture)
         self.assertLess(capture.index("_contentGenerator->Generate"), capture.index("SubmitUICommandList"))
@@ -335,6 +337,19 @@ class ReprojectionTests(unittest.TestCase):
         # default) exactly like the parent branch.
         self.assertIn("FGUIPremultipliedAlpha", capture)
         self.assertIn("hudlessSource", capture)
+
+    def test_kcd2_render_reserve_is_real_frustum_expansion_and_fail_closed(self):
+        root = Path(__file__).resolve().parents[2]
+        camera = (root / "OptiScaler/framegen/reproj/Kcd2Camera.cpp").read_text(encoding="utf-8")
+        hook = camera.split("uintptr_t __fastcall Hook", 1)[1].split("bool ReadPoses", 1)[0]
+        self.assertIn("IsGameplayCamera(camera)", hook)
+        self.assertIn("*fov = widenedFov", hook)
+        write = hook.index("*fov = widenedFov")
+        call = hook.index("g_original(camera)", write)
+        restore = hook.index("*fov = originalFov", call)
+        self.assertLess(write, call)
+        self.assertLess(call, restore)
+        self.assertIn("g_renderReserveFraction.store(reserve", hook)
 
     def test_async_warp_dispatches_on_the_presenter_direct_queue(self):
         # async-simple P7: DispatchPacketWarp records the warp + copy-to-
