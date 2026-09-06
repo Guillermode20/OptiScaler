@@ -414,9 +414,11 @@ void DecomposeCameraPairRotation(const float* forward, const float* prevForward,
     *pitchRadians = std::atan2(dot(forward, prevUp), dot(forward, prevForward));
 }
 
-void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false, float lateYaw = 0.0f,
-                              float latePitch = 0.0f, const ReprojVec3* targetBaseRight = nullptr,
-                              const ReprojVec3* targetBaseUp = nullptr, const ReprojVec3* targetBaseForward = nullptr)
+void PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool inputLatched /*= false*/,
+                              float lateYaw /*= 0.0f*/, float latePitch /*= 0.0f*/,
+                              const ReprojVec3* targetBaseRight /*= nullptr*/,
+                              const ReprojVec3* targetBaseUp /*= nullptr*/,
+                              const ReprojVec3* targetBaseForward /*= nullptr*/)
 {
     // Mode 2 rotates the predicted basis here for the rotation homography.
     // Translation (walking/hills) is intentionally not represented: the warp
@@ -496,8 +498,10 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
 
     // The validated KCD2 gameplay-camera hook widened the engine frustum before
     // rendering. Map the player's original FOV into the center of that wider
-    // source. If this exact view was not widened, the mapping stays identity.
-    const float guard = Kcd2Camera::RenderReserveFraction();
+    // source. The guard travels per-packet (ContentFrame::renderReserveFraction,
+    // captured at publication): the hook's global may already describe a later
+    // frustum build by display time. Zero stays identity.
+    const float guard = std::clamp(guardFraction, 0.0f, 0.15f);
     const float guardScale = 1.0f - 2.0f * guard;
     uvNumeratorX = CombineReprojVec3(uvNumeratorX, guardScale, denominator, guard);
     uvNumeratorY = CombineReprojVec3(uvNumeratorY, guardScale, denominator, guard);
@@ -598,8 +602,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         pitch *= maxRotation / rotation;
     }
 
-    PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch), pBaseRight, pBaseUp,
-                             pBaseForward);
+    PrepareRotationConstants(constants, packet.renderReserveFraction, true, static_cast<float>(yaw),
+                             static_cast<float>(pitch), pBaseRight, pBaseUp, pBaseForward);
     ++_metricsLateInputApplied;
     _metricsLateInputMaxDegrees = std::max(
         _metricsLateInputMaxDegrees, static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
@@ -981,6 +985,12 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     packet.sourceFrameInterval = saneFrameDelta;
+    // Per-packet reserve: read the hook state now, at publication, while it
+    // still describes the frustum this anchor rendered with. The warp path
+    // must never re-read the global at display time.
+    packet.renderReserveFraction = Kcd2Camera::RenderReserveFraction();
+    packet.renderedVFov =
+        Kcd2Camera::WidenedFov(packet.constants.cameraVFov, packet.renderReserveFraction);
     Kcd2Camera::Snapshot currentCamera {};
     Kcd2Camera::Snapshot previousCamera {};
     const bool haveKcd2Snapshots =
@@ -1026,16 +1036,83 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourcePoseTimestamp = sourceTimestamp;
     packet.virtualContentTimestamp = sourceTimestamp;
 
-    if (interpolate && packet.depth != nullptr && packet.velocity != nullptr && packet.hasCamera && packet.hasUi &&
-        packet.cameraNear > 0.0f && packet.cameraFar > packet.cameraNear)
+    // Fail closed to ordinary timewarp: every FSR input is sanity-checked
+    // here (dims, scales, interval, depth range) and again inside Generate.
+    // A bad motion-vector scale or a mismatched depth is the classic
+    // whole-frame smear, so a suspect anchor never dispatches.
+    const bool contentInputsSane =
+        interpolate && packet.depth != nullptr && packet.velocity != nullptr && packet.hasCamera && packet.hasUi &&
+        packet.cameraNear > 0.0f && packet.cameraFar > packet.cameraNear &&
+        packet.constants.mvWidth > 0 && packet.constants.mvHeight > 0 &&
+        packet.constants.mvWidth <= packet.constants.displayWidth &&
+        packet.constants.mvHeight <= packet.constants.displayHeight &&
+        std::isfinite(packet.constants.mvScaleX) && std::isfinite(packet.constants.mvScaleY) &&
+        packet.constants.mvScaleX != 0.0f && packet.constants.mvScaleY != 0.0f &&
+        std::isfinite(packet.constants.jitterX) && std::isfinite(packet.constants.jitterY);
+    if (contentInputsSane)
     {
+        const auto depthDesc = packet.depth->GetDesc();
+        const auto velocityDesc = packet.velocity->GetDesc();
+        const auto colorDescForContent = color->GetDesc();
+        const bool contentDescsSane =
+            depthDesc.Width == velocityDesc.Width && depthDesc.Height == velocityDesc.Height && depthDesc.Width > 0 &&
+            depthDesc.Height > 0 && depthDesc.Width <= colorDescForContent.Width &&
+            depthDesc.Height <= colorDescForContent.Height &&
+            packet.constants.mvWidth == depthDesc.Width && packet.constants.mvHeight == depthDesc.Height;
+        if (!contentDescsSane)
+        {
+            const auto warnNow = Util::MillisecondsNow();
+            static double lastContentDescWarnMs = 0.0;
+            if (warnNow - lastContentDescWarnMs > 5000.0)
+            {
+                lastContentDescWarnMs = warnNow;
+                LOG_WARN("HybridTimewarp: skipping midpoint, depth/velocity/color dims disagree "
+                         "(depth {}x{}, velocity {}x{}, mv {}x{}, color {}x{})",
+                         depthDesc.Width, depthDesc.Height, velocityDesc.Width, velocityDesc.Height,
+                         packet.constants.mvWidth, packet.constants.mvHeight, colorDescForContent.Width,
+                         colorDescForContent.Height);
+            }
+        }
+        else
+        {
+            // One-line input summary when the shape changes, so MV/scale/flip
+            // mistakes are visible in the log without guessing.
+            static uint32_t lastContentSummaryMvW = 0, lastContentSummaryMvH = 0;
+            static float lastContentSummaryScaleX = 0.0f, lastContentSummaryScaleY = 0.0f;
+            if (packet.constants.mvWidth != lastContentSummaryMvW ||
+                packet.constants.mvHeight != lastContentSummaryMvH ||
+                packet.constants.mvScaleX != lastContentSummaryScaleX ||
+                packet.constants.mvScaleY != lastContentSummaryScaleY)
+            {
+                lastContentSummaryMvW = packet.constants.mvWidth;
+                lastContentSummaryMvH = packet.constants.mvHeight;
+                lastContentSummaryScaleX = packet.constants.mvScaleX;
+                lastContentSummaryScaleY = packet.constants.mvScaleY;
+                LOG_INFO(
+                    "HybridTimewarp: midpoint inputs (mv {}x{} scale {:.4f},{:.4f} jitter {:.4f},{:.4f} "
+                    "depth {} far {:.1f} near {:.3f} hdr={} jitteredMVs={} displayResMVs={} reserve={:.1f}%)",
+                    packet.constants.mvWidth, packet.constants.mvHeight, packet.constants.mvScaleX,
+                    packet.constants.mvScaleY, packet.constants.jitterX, packet.constants.jitterY,
+                    static_cast<int>(depthDesc.Format), packet.cameraFar, packet.cameraNear, packet.hdr,
+                    packet.jitteredMotionVectors, packet.displayResolutionMotionVectors,
+                    packet.renderReserveFraction * 100.0f);
+            }
+        }
+        if (contentDescsSane)
+        {
         if (_contentGenerator == nullptr)
             _contentGenerator = std::make_unique<HybridFsrGenerator>();
         auto& generated = packet.generatedFrame;
         generated.constants = packet.constants;
+        // One denominator for the midpoint pose, its timestamp, and FSR's
+        // frameTimeDelta: the camera pair interval when KCD2 poses exist,
+        // else the smoothed present period. Mixing present cadence into the
+        // pose and camera cadence into FSR smears the midpoint.
         const auto contentInterval = packet.sourcePoseInterval > 1.0 ? packet.sourcePoseInterval : packet.frameDelta;
         generated.sourcePoseInterval = contentInterval;
-        generated.sourceFrameInterval = packet.sourceFrameInterval;
+        generated.sourceFrameInterval = contentInterval;
+        generated.renderReserveFraction = packet.renderReserveFraction;
+        generated.renderedVFov = packet.renderedVFov;
         generated.sourcePoseTimestamp = sourceTimestamp - contentInterval * 0.5;
         generated.renderTimestamp = now - contentInterval * 0.5;
         generated.virtualContentTimestamp = generated.sourcePoseTimestamp;
@@ -1076,6 +1153,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                     sizeof(generated.constants.cameraUp));
         packet.hasGeneratedFrame =
             _contentGenerator->Generate(_device, cmdList, packet, generated, packet.frameId, _reset[sourceIndex] != 0);
+        }
     }
 
     // Submit the inline capture on the game DIRECT queue and record the fence
@@ -1250,20 +1328,22 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
     auto constants = content.constants;
     constants.timeStep = timeStep;
+    const float contentGuard = content.renderReserveFraction;
+    _lastContentGuard.store(contentGuard, std::memory_order_relaxed);
     const bool deferredLateLatch = _lateLatchFence != nullptr && _presentQueue != nullptr;
     if (!deferredLateLatch)
     {
         // Safe fallback for partial initialization: constants are written before
         // execution when no latch fence is available.
         if (!ApplyLateInput(constants, packet))
-            PrepareRotationConstants(constants, false);
+            PrepareRotationConstants(constants, contentGuard, false);
     }
     else
     {
         // Populate a valid baseline before queuing the command list. The GPU is
         // parked before it can read this upload buffer; the final pose replaces
         // it after submission and before the latch fence is released.
-        PrepareRotationConstants(constants, false);
+        PrepareRotationConstants(constants, contentGuard, false);
         if (!_warp->WriteConstants(outputIndex, constants))
         {
             backBuffer->Release();
@@ -1339,7 +1419,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, packet))
-            PrepareRotationConstants(lateConstants, false);
+            PrepareRotationConstants(lateConstants, content.renderReserveFraction, false);
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         // Publish the persistent upload-buffer write before releasing the GPU
@@ -1525,12 +1605,13 @@ void AReproj_Dx12::LogMetricsIfDue()
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms latchLead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} "
+             "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} guard={:.1f}% "
              "({}, block={:.2f}ms) generated={}",
              realFrames * scale, warpFrames * scale, newAnchorDisplays, repeatedAnchorDisplays, missedDisplaySlots,
              meanPresentIntervalMs, p95PresentIntervalMs, _lastLateSampleLeadMs.load(std::memory_order_relaxed),
              poseAge, queueDepth, lateInputApplied, lateInputSamples, lateInputMaxDegrees, skippedAnchorSamples,
-             directCaptures, captureNotReady, presenter, gamePresentBlockMaxMs, generatedDisplays);
+             directCaptures, captureNotReady, _lastContentGuard.load(std::memory_order_relaxed) * 100.0f, presenter,
+             gamePresentBlockMaxMs, generatedDisplays);
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const

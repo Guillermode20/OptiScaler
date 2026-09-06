@@ -8,6 +8,7 @@
 #include <dx12/ffx_api_dx12.h>
 
 #include <algorithm>
+#include <cmath>
 
 FfxApiResourceState HybridFsrGenerator::FfxState(D3D12_RESOURCE_STATES state)
 {
@@ -159,6 +160,27 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
     configure.generationRect = { 0, 0, static_cast<int>(_displayWidth), static_cast<int>(_displayHeight) };
     FfxApiProxy::D3D12_Configure(&_context, &configure.header);
 
+    // Fail closed: never feed FSR a degenerate render size, a non-finite
+    // motion scale, or depth/MV dims that disagree with the declared render
+    // size. Any of those smears the whole midpoint.
+    const auto renderW = realFrame.constants.mvWidth;
+    const auto renderH = realFrame.constants.mvHeight;
+    const auto depthDesc = realFrame.depth->GetDesc();
+    const auto velocityDesc = realFrame.velocity->GetDesc();
+    if (renderW == 0 || renderH == 0 || renderW > _displayWidth || renderH > _displayHeight ||
+        !std::isfinite(realFrame.constants.mvScaleX) || !std::isfinite(realFrame.constants.mvScaleY) ||
+        realFrame.constants.mvScaleX == 0.0f || realFrame.constants.mvScaleY == 0.0f ||
+        !std::isfinite(realFrame.constants.jitterX) || !std::isfinite(realFrame.constants.jitterY) ||
+        depthDesc.Width != renderW || depthDesc.Height != renderH || velocityDesc.Width != renderW ||
+        velocityDesc.Height != renderH)
+    {
+        LOG_WARN("HybridTimewarp: skipping midpoint, FSR inputs disagree "
+                 "(render {}x{} display {}x{} depth {}x{} velocity {}x{} mvScale {:.4f},{:.4f})",
+                 renderW, renderH, _displayWidth, _displayHeight, depthDesc.Width, depthDesc.Height,
+                 velocityDesc.Width, velocityDesc.Height, realFrame.constants.mvScaleX, realFrame.constants.mvScaleY);
+        return false;
+    }
+
     ffxDispatchDescFrameGenerationPrepare prepare {};
     prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE;
     ffxCreateBackendDX12Desc backend {};
@@ -174,13 +196,20 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
     prepare.header.pNext = &camera.header;
     prepare.commandList = commandList;
     prepare.frameID = frameId;
-    prepare.renderSize = { realFrame.constants.mvWidth, realFrame.constants.mvHeight };
+    prepare.renderSize = { renderW, renderH };
     prepare.jitterOffset = { realFrame.constants.jitterX, realFrame.constants.jitterY };
     prepare.motionVectorScale = { realFrame.constants.mvScaleX, realFrame.constants.mvScaleY };
-    prepare.frameTimeDelta = static_cast<float>(std::clamp(realFrame.sourceFrameInterval, 1.0, 500.0));
+    // Same denominator as the midpoint pose/timestamp in CaptureFramePacket:
+    // the camera pair interval when KCD2 poses exist, else the present period.
+    const double contentInterval =
+        realFrame.sourcePoseInterval > 1.0 ? realFrame.sourcePoseInterval : realFrame.sourceFrameInterval;
+    prepare.frameTimeDelta = static_cast<float>(std::clamp(contentInterval, 1.0, 500.0));
     prepare.cameraNear = realFrame.cameraNear;
     prepare.cameraFar = realFrame.cameraFar;
-    prepare.cameraFovAngleVertical = realFrame.constants.cameraVFov;
+    // The pixels were rendered with the widened frustum when a reserve is
+    // active; the player-center FOV would mislead disocclusion logic.
+    prepare.cameraFovAngleVertical =
+        realFrame.renderedVFov > 0.05f ? realFrame.renderedVFov : realFrame.constants.cameraVFov;
     prepare.viewSpaceToMetersFactor = 1.0f;
     prepare.depth = ffxApiGetResourceDX12(realFrame.depth, FfxState(realFrame.depthState));
     prepare.motionVectors = ffxApiGetResourceDX12(realFrame.velocity, FfxState(realFrame.velocityState));

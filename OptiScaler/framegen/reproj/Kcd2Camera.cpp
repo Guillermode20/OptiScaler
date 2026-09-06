@@ -29,7 +29,11 @@ std::atomic<uint64_t> g_sequence { 0 };
 std::atomic<uint64_t> g_poseSequence { 0 };
 std::atomic<uint64_t> g_cutGeneration { 1 };
 std::atomic<float> g_renderReserveFraction { 0.0f };
-std::atomic<bool> g_renderReserveLogged { false };
+std::atomic<double> g_renderReserveTimestampMs { 0.0 };
+std::atomic<float> g_renderReserveLogged { -1.0f };
+std::atomic<uint64_t> g_hookCalls { 0 };
+std::atomic<uint64_t> g_hookWidened { 0 };
+std::atomic<uint64_t> g_hookSkippedNonGameplay { 0 };
 
 struct Pose
 {
@@ -215,11 +219,33 @@ void PublishPose(uintptr_t camera)
     }
 }
 
+void NoteReserve(float reserve, float originalFov, float widenedFov)
+{
+    g_renderReserveFraction.store(reserve, std::memory_order_release);
+    g_renderReserveTimestampMs.store(Util::MillisecondsNow(), std::memory_order_release);
+    // Log once per value so a dead hook (reserve stuck at 0) and a live one
+    // are distinguishable without spamming the 60 Hz path.
+    const float last = g_renderReserveLogged.load(std::memory_order_relaxed);
+    if (reserve != last)
+    {
+        g_renderReserveLogged.store(reserve, std::memory_order_relaxed);
+        if (reserve > 0.0f)
+            LOG_INFO("KCD2 camera: rendered reserve active ({:.1f}% per side, vFov {:.2f} -> {:.2f} deg)", reserve * 100.0f,
+                     originalFov * 57.2957795f, widenedFov * 57.2957795f);
+        else
+            LOG_INFO("KCD2 camera: rendered reserve inactive (widen skipped or disabled)");
+    }
+}
+
 uintptr_t __fastcall Hook(uintptr_t camera)
 {
     PublishPose(camera);
+    g_hookCalls.fetch_add(1, std::memory_order_relaxed);
     if (!IsGameplayCamera(camera))
+    {
+        g_hookSkippedNonGameplay.fetch_add(1, std::memory_order_relaxed);
         return g_original(camera);
+    }
 
     auto* fov = reinterpret_cast<float*>(camera + 0x30);
     const float originalFov = *fov;
@@ -227,27 +253,25 @@ uintptr_t __fastcall Hook(uintptr_t camera)
         std::clamp(Config::Instance()->ReprojKcd2RenderReservePercent.value_or_default(), 0.0f, 15.0f) * 0.01f;
     if (!std::isfinite(originalFov) || originalFov <= 0.05f || originalFov >= 3.0f || reserve <= 0.0f)
     {
-        g_renderReserveFraction.store(0.0f, std::memory_order_release);
+        NoteReserve(0.0f, originalFov, originalFov);
         return g_original(camera);
     }
 
     // Ask CryEngine to build a wider world frustum. The presenter maps the
     // player's original FOV into its center, so the perimeter is genuine
     // rendered geometry available to late rotation instead of a crop/stretch.
-    const float widenedFov = 2.0f * std::atan(std::tan(originalFov * 0.5f) / (1.0f - 2.0f * reserve));
-    if (!std::isfinite(widenedFov) || widenedFov >= 3.0f)
+    const float widenedFov = WidenedFov(originalFov, reserve);
+    if (widenedFov <= originalFov)
     {
-        g_renderReserveFraction.store(0.0f, std::memory_order_release);
+        NoteReserve(0.0f, originalFov, originalFov);
         return g_original(camera);
     }
 
     *fov = widenedFov;
     const auto result = g_original(camera);
     *fov = originalFov;
-    g_renderReserveFraction.store(reserve, std::memory_order_release);
-    if (!g_renderReserveLogged.exchange(true, std::memory_order_relaxed))
-        LOG_INFO("KCD2 camera: rendered reserve active ({:.1f}% per side, vFov {:.2f} -> {:.2f} deg)", reserve * 100.0f,
-                 originalFov * 57.2957795f, widenedFov * 57.2957795f);
+    g_hookWidened.fetch_add(1, std::memory_order_relaxed);
+    NoteReserve(reserve, originalFov, widenedFov);
     return result;
 }
 
@@ -347,9 +371,25 @@ bool ReadSnapshots(Snapshot& current, Snapshot& previous)
     return true;
 }
 
+float WidenedFov(float originalFov, float reserveFraction)
+{
+    if (!std::isfinite(originalFov) || originalFov <= 0.05f || originalFov >= 3.0f || !(reserveFraction > 0.0f))
+        return originalFov;
+    const float denom = 1.0f - 2.0f * reserveFraction;
+    if (!(denom > 0.0f))
+        return originalFov;
+    const float widened = 2.0f * std::atan(std::tan(originalFov * 0.5f) / denom);
+    return std::isfinite(widened) && widened < 3.0f ? widened : originalFov;
+}
+
 float RenderReserveFraction()
 {
     if (!IsAvailable())
+        return 0.0f;
+    // A stale widen from an old view (menu, loading, cut) must not shrink the
+    // warp mapping: the reserve describes the last gameplay frustum build.
+    const auto writtenMs = g_renderReserveTimestampMs.load(std::memory_order_acquire);
+    if (writtenMs <= 0.0 || Util::MillisecondsNow() - writtenMs > 250.0)
         return 0.0f;
     return g_renderReserveFraction.load(std::memory_order_acquire);
 }

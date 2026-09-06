@@ -48,7 +48,14 @@ bool ReadSnapshots(Snapshot& current, Snapshot& previous);
 
 // Fraction of each source-image side containing genuinely rendered peripheral
 // reserve. Zero unless the validated gameplay CView was widened successfully.
+// Prefer per-packet plumbing (ContentFrame::renderReserveFraction, captured at
+// publication) over this global in the warp path: the hook may serve several
+// frustum builds per frame and the global can move on before display.
 float RenderReserveFraction();
+
+// Pure helper for the reserve mapping: widened vertical FOV (radians) rendered
+// by the engine for a player FOV widened by reserveFraction per side.
+float WidenedFov(float originalFov, float reserveFraction);
 
 // Human-readable dump of the raw CCamera projection block (0x30..0x64) from the latest pose.
 // Used for live validation of the CryEngine CCamera layout in this retail build. Returns false

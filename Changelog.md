@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.50 (2026-09-06)
+* Per-packet KCD2 render reserve (warp reads the anchor's guard, not the hook global; guard=% in the 1 Hz log) and fail-closed FSR midpoint gates (dim/scale sanity, unified camera-interval time base, widened FOV)
+
 ## v10.0.1.49 (2026-09-06)
 * Render a real KCD2 peripheral reserve and correct hybrid FSR motion inputs
 
