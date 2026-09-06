@@ -979,7 +979,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourceCutGeneration = haveKcd2Snapshots ? currentCamera.cutGeneration : 0;
     packet.cameraNear = haveKcd2Snapshots ? currentCamera.nearPlane : 0.0f;
     packet.cameraFar = haveKcd2Snapshots ? currentCamera.farPlane : 0.0f;
-    packet.invertedDepth = _constants.flags & FG_Flags::InvertedDepth;
+        packet.invertedDepth = !!(_constants.flags & FG_Flags::InvertedDepth);
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.
