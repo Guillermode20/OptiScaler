@@ -494,6 +494,15 @@ void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false
         uvNumeratorY = CombineReprojVec3(denominator, 0.5f, sy, -0.5f / focalY);
     }
 
+    // Keep a small ring of the captured world outside the visible output. A
+    // rotation warp can then reveal real pixels at the screen edge instead of
+    // falling back to a stationary strip. This is a fixed, predictable FOV
+    // tradeoff; the isolated HUD is composited afterward and is not cropped.
+    const float guard = std::clamp(Config::Instance()->ReprojGuardCropPercent.value_or_default(), 0.0f, 3.0f) * 0.01f;
+    const float guardScale = 1.0f - 2.0f * guard;
+    uvNumeratorX = CombineReprojVec3(uvNumeratorX, guardScale, denominator, guard);
+    uvNumeratorY = CombineReprojVec3(uvNumeratorY, guardScale, denominator, guard);
+
     // Fold pixel-center -> NDC into the same matrix. The compute shader can now
     // transform its integer dispatch coordinate directly, with no per-pixel
     // division by DisplaySize or UV/NDC reconstruction.
@@ -979,7 +988,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourceCutGeneration = haveKcd2Snapshots ? currentCamera.cutGeneration : 0;
     packet.cameraNear = haveKcd2Snapshots ? currentCamera.nearPlane : 0.0f;
     packet.cameraFar = haveKcd2Snapshots ? currentCamera.farPlane : 0.0f;
-        packet.invertedDepth = !!(_constants.flags & FG_Flags::InvertedDepth);
+    packet.invertedDepth = !!(_constants.flags & FG_Flags::InvertedDepth);
     const auto cameraTimestamp = kcd2CameraTimestamp > 0.0 ? kcd2CameraTimestamp : _cameraTimestamp[sourceIndex];
     // Anchor pose age is measured from the camera timestamp; without one, fall
     // back to the frame delta so MaxPoseAgeMs still rejects stale anchors.

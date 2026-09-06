@@ -144,6 +144,8 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
 
     const bool cut = _cutGeneration != 0 && realFrame.sourceCutGeneration != _cutGeneration;
     _cutGeneration = realFrame.sourceCutGeneration;
+    const bool resetEdge = reset && !_resetActive;
+    _resetActive = reset;
 
     ffxConfigureDescFrameGeneration configure {};
     configure.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
@@ -199,7 +201,7 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
     dispatch.numGeneratedFrames = 1;
     dispatch.outputs[0] = ffxApiGetResourceDX12(generatedFrame.color, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     dispatch.presentColor = ffxApiGetResourceDX12(realFrame.color, FfxState(realFrame.colorState));
-    dispatch.reset = reset || cut;
+    dispatch.reset = resetEdge || cut;
     result = FfxApiProxy::D3D12_Dispatch(&_context, &dispatch.header);
     if (result != FFX_API_RETURN_OK)
     {
@@ -215,6 +217,7 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
 void HybridFsrGenerator::Reset()
 {
     _cutGeneration = 0;
+    _resetActive = false;
     _failed = false;
 }
 
@@ -228,6 +231,7 @@ void HybridFsrGenerator::Shutdown()
     _displayHeight = 0;
     _format = DXGI_FORMAT_UNKNOWN;
     _cutGeneration = 0;
+    _resetActive = false;
     _failed = false;
 }
 

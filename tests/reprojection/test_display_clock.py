@@ -313,6 +313,7 @@ class ReprojectionTests(unittest.TestCase):
         # AllowComposedWarp gate on this branch.
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        generator = (root / "OptiScaler/framegen/reproj/HybridFsrGenerator.cpp").read_text(encoding="utf-8")
         capture = source.split("bool AReproj_Dx12::CaptureFramePacket", 1)[1].split(
             "bool AReproj_Dx12::DisplayPacket", 1)[0]
         self.assertNotIn("allowComposed", capture)
@@ -323,6 +324,9 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("GetResource(FG_ResourceType::HudlessColor", capture)
         self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera;", capture)
         self.assertIn("ReprojContentInterpolation", capture)
+        self.assertIn("const bool resetEdge = reset && !_resetActive", generator)
+        self.assertIn("dispatch.reset = resetEdge || cut", generator)
+        self.assertIn("ReprojGuardCropPercent", source)
         self.assertIn("CopyPacketResource(cmdList, velocity", capture)
         self.assertIn("_contentGenerator->Generate", capture)
         self.assertLess(capture.index("_contentGenerator->Generate"), capture.index("SubmitUICommandList"))

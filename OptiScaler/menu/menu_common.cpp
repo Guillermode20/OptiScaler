@@ -4243,6 +4243,11 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Experimental 2x content path. Uses captured depth and motion vectors for one FSR midpoint, "
                        "then applies the normal late camera warp and unwarped HUD. Missing inputs fall back to "
                        "ordinary timewarp.");
+        float guardCrop = config->ReprojGuardCropPercent.value_or_default();
+        if (ImGui::SliderFloat("Warp guard crop##reproj-live", &guardCrop, 0.0f, 3.0f, "%.2f%%"))
+            config->ReprojGuardCropPercent = std::clamp(guardCrop, 0.0f, 3.0f);
+        ShowHelpMarker("Reserves a thin ring of real source pixels for camera rotation. Removes exposed edge strips "
+                       "at the cost of a small permanent FOV crop. The isolated HUD is unaffected.");
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {

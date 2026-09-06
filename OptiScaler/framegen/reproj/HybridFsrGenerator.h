@@ -29,5 +29,6 @@ class HybridFsrGenerator
     std::uint32_t _displayHeight = 0;
     DXGI_FORMAT _format = DXGI_FORMAT_UNKNOWN;
     std::uint64_t _cutGeneration = 0;
+    bool _resetActive = false;
     bool _failed = false;
 };

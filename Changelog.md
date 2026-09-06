@@ -1,5 +1,8 @@
 ## Release and Build Change Log (Newest to Oldest)
 
+## v10.0.1.48 (2026-09-06)
+* Edge-trigger hybrid resets and reserve a fixed warp guard crop
+
 ## v10.0.1.47 (2026-09-06)
 * Remove speculative warp experiments and add opt-in FSR midpoint generation with final late timewarp
 

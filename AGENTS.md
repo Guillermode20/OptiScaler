@@ -117,7 +117,7 @@ Docs: `plans/async_simple.md` (roadmap: architecture freeze, hard invariants, P7
 
 ### Tuning — config keys that exist on this branch
 
-`[AsyncTimewarp] Enabled`, `TargetRefresh`, `SourceFramerateLimit`, `MouseSensitivityX/Y`, `Smoothing`, `LateSampleLead`, `HudIsolation`, and `ContentInterpolation` are the live keys. All are exposed in the in-game menu's **Output (Async Timewarp)** section. `ContentInterpolation` is the only experimental path: it asks FSR frame generation for one midpoint, sends generated and real world content through the same final late rotation, and composites the isolated HUD unwarped. It is off by default and fails closed to ordinary timewarp.
+`[AsyncTimewarp] Enabled`, `TargetRefresh`, `SourceFramerateLimit`, `MouseSensitivityX/Y`, `Smoothing`, `LateSampleLead`, `HudIsolation`, `ContentInterpolation`, and `GuardCropPercent` are the live keys. All are exposed in the in-game menu's **Output (Async Timewarp)** section. `ContentInterpolation` asks FSR frame generation for one midpoint, sends generated and real world content through the same final late rotation, and composites the isolated HUD unwarped. It is off by default and fails closed to ordinary timewarp. `GuardCropPercent` is a fixed source overscan (1.5% default) that gives rotation real edge pixels instead of a stationary fallback strip; it does not affect the isolated HUD.
 
 | INI key | Default | Meaning |
 |---|---|---|
@@ -129,6 +129,7 @@ Docs: `plans/async_simple.md` (roadmap: architecture freeze, hard invariants, P7
 | `[AsyncTimewarp] LateSampleLead` | 0 (= fixed 3 ms) | ms before the deadline to release the deferred latch. `≤0.5` = auto (fixed 3 ms default); a value `>0.5` overrides, clamped `[1, 20]` ms |
 | `[AsyncTimewarp] HudIsolation` | true | KCD2: separate Scaleform HUD, composited unwarped. `false` = warp the composed frame (HUD included) |
 | `[AsyncTimewarp] ContentInterpolation` | false | Generate one FSR midpoint from the isolated world, depth, and motion vectors. Generated and real content both receive final late rotation; missing inputs or FFX failure fall back to ordinary timewarp |
+| `[AsyncTimewarp] GuardCropPercent` | 1.5 | Fixed world-image overscan per side (`0..3%`) that hides rotation-warp edge exposure. Costs a small FOV crop; isolated HUD is unaffected |
 
 Hardcoded constants agents must know: warp timestep clamp `2.5` (`maxTimeStep`, `AReprojPresenter.cpp`); per-slot late-rotation ceiling `0.11 rad`; deferred-latch fixed lead `LATE_LATCH_DEFAULT_MS = 3.0`, bounds `LATE_LATCH_MIN_MS/MAX_MS = 1.0/20.0` (`AReproj_Dx12.h`); presenter grid sleep keeps a 1.0 ms spin window on Proton (`FrameLimit::sleepForPrecisePacingMs`); presenter thread `THREAD_PRIORITY_TIME_CRITICAL`, present queue NORMAL priority on Linux. `kAsyncSimpleStage = 1` (`AReproj_Dx12.h`): ≥1 means every slot warps; bump it to 0 only for a one-off identity-presenter A/B.
 

@@ -617,7 +617,7 @@ class Config
     CustomOptional<float> ReprojTargetRefresh { 0.0f }; // 0 = active display refresh
     CustomOptional<float> ReprojSourceFramerateLimit {
         0.0f
-    };                                                      // OPT-IN 60->120 A/B source cap; 0 = never pace (default)
+    }; // OPT-IN 60->120 A/B source cap; 0 = never pace (default)
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojSmoothing { 0.25f };        // EMA filter on camera angular velocity (0=off)
@@ -625,6 +625,7 @@ class Config
         true
     }; // separate Scaleform HUD from 3D world (KCD2), composited unwarped
     CustomOptional<bool> ReprojContentInterpolation { false }; // one FSR midpoint between source anchors; fail closed
+    CustomOptional<float> ReprojGuardCropPercent { 1.5f };     // small source overscan reserve for rotation warp edges
     CustomOptional<float> ReprojLateSampleLead {
         0.0f
     }; // 0/auto = fixed 3 ms deferred latch; fixed float >0.5 overrides (bounded by the slot)
