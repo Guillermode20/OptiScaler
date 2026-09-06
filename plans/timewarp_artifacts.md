@@ -5,17 +5,6 @@
 > artifact classes the current pipeline can still show, and concrete,
 > independently testable mitigations. Validate each against the 60→120 cap A/B
 > before merging — shader feel changes cannot be judged from logs.
->
-> **Implementation status (2026-09-05):** artifact 1 (edge lag band) now has
-> the two opt-in candidates from the table below as code, default off:
-> `[AsyncTimewarp] EdgeExtensionPx > 0` implements a motion-coherent edge
-> extension (the listed alternative to 1a/1b — clamp the warp UV onto the
-> source edge and stretch boundary color outward with a small inward blur,
-> fading back to the static anchor near the limit), and `[AsyncTimewarp]
-> GuardCropPercent` adds a fixed guard-crop reserve window. Artifact 4
-> (anchor-refresh discontinuity) is addressed by `[AsyncTimewarp]
-> ContinuityLatch` (see `plans/walking_judder_options.md`). None is enabled by
-> default and none has been A/B-validated yet.
 
 ## Artifact inventory on this branch
 

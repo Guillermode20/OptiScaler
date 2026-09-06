@@ -2,20 +2,6 @@
 
 > Branch: `async-simple`. This doc proposes options only — no code is committed
 > from it yet. Decide, then file the chosen option as its own plan.
->
-> **Implementation status (2026-09-05):** Option B (anchor-switch continuity
-> latch → `[AsyncTimewarp] ContinuityLatch`, default off) and Option C v1
-> (conservative depth *residual* → `[AsyncTimewarp] DepthEnabled` +
-> `DepthInverted`/`DepthMaxResidualPx`/`DepthVerticalScale`, default off) are
-> now implemented as opt-in A/B keys, exactly because none has won a KCD2 A/B
-> yet. Option B: at a real switch the presenter compares where the previous
-> anchor extrapolates to at the display deadline vs the new anchor's prediction
-> and eases the clamped yaw/pitch difference across the first two outputs.
-> Option C v1 is deliberately NOT the old positional reprojection: rotation
-> stays canonical and depth only adds a small, silhouette-gated,
-> magnitude-clamped `f·τ/z` residual, fed by the tracked R24G8 reversed-Z
-> resource copied on the same inline submit, requiring a fresh CView pose per
-> slot (stalls/cuts/tiny motion disable it).
 
 ## Why walking judders today
 

@@ -189,14 +189,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojMouseSensitivityY.set_from_config(readFloat("AsyncTimewarp", "MouseSensitivityY"));
             ReprojSmoothing.set_from_config(readFloat("AsyncTimewarp", "Smoothing"));
             ReprojHudIsolation.set_from_config(readBool("AsyncTimewarp", "HudIsolation"));
+            ReprojContentInterpolation.set_from_config(readBool("AsyncTimewarp", "ContentInterpolation"));
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
-            ReprojEdgeExtensionPx.set_from_config(readFloat("AsyncTimewarp", "EdgeExtensionPx"));
-            ReprojGuardCropPercent.set_from_config(readFloat("AsyncTimewarp", "GuardCropPercent"));
-            ReprojDepthEnabled.set_from_config(readBool("AsyncTimewarp", "DepthEnabled"));
-            ReprojDepthInverted.set_from_config(readBool("AsyncTimewarp", "DepthInverted"));
-            ReprojDepthMaxResidualPx.set_from_config(readFloat("AsyncTimewarp", "DepthMaxResidualPx"));
-            ReprojDepthVerticalScale.set_from_config(readFloat("AsyncTimewarp", "DepthVerticalScale"));
-            ReprojContinuityLatch.set_from_config(readBool("AsyncTimewarp", "ContinuityLatch"));
         }
 
         // OptiFG
@@ -1029,22 +1023,10 @@ bool Config::SaveIni()
                      GetFloatValue(Instance()->ReprojSmoothing.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "HudIsolation",
                      GetBoolValue(Instance()->ReprojHudIsolation.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "ContentInterpolation",
+                     GetBoolValue(Instance()->ReprojContentInterpolation.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "LateSampleLead",
                      GetFloatValue(Instance()->ReprojLateSampleLead.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "EdgeExtensionPx",
-                     GetFloatValue(Instance()->ReprojEdgeExtensionPx.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "GuardCropPercent",
-                     GetFloatValue(Instance()->ReprojGuardCropPercent.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "DepthEnabled",
-                     GetBoolValue(Instance()->ReprojDepthEnabled.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "DepthInverted",
-                     GetBoolValue(Instance()->ReprojDepthInverted.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "DepthMaxResidualPx",
-                     GetFloatValue(Instance()->ReprojDepthMaxResidualPx.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "DepthVerticalScale",
-                     GetFloatValue(Instance()->ReprojDepthVerticalScale.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "ContinuityLatch",
-                     GetBoolValue(Instance()->ReprojContinuityLatch.value_for_config()).c_str());
     }
 
     // XeFG output

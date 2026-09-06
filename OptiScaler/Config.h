@@ -100,13 +100,12 @@ template <class T, HasDefaultValue defaultState = WithDefault> class CustomOptio
     }
 
     constexpr T value_or_default() &&
-        requires(defaultState != NoDefault)
-    {
-        return this->has_value() ? std::move(this->value()) : std::move(_defaultValue);
-    }
+        requires(defaultState != NoDefault) {
+            return this->has_value() ? std::move(this->value()) : std::move(_defaultValue);
+        }
 
-    constexpr std::optional<T> value_for_config()
-        requires(defaultState == WithDefault)
+        constexpr std::optional<T> value_for_config()
+            requires(defaultState == WithDefault)
     {
         if (_volatile)
         {
@@ -615,33 +614,20 @@ class Config
     // deliberately small; removed experimental machinery (COMPUTE warp queue,
     // capture worker, adaptive late latch) is not coming back.
     CustomOptional<bool> ReprojEnabled { true };
-    CustomOptional<float> ReprojTargetRefresh { 0.0f };         // 0 = active display refresh
-    CustomOptional<float> ReprojSourceFramerateLimit { 0.0f }; // OPT-IN 60->120 A/B source cap; 0 = never pace (default)
-    CustomOptional<float> ReprojMouseSensitivityX { 0.0f };     // 0 = auto-tracked from rendered frames
-    CustomOptional<float> ReprojMouseSensitivityY { 0.0f };     // 0 = auto-tracked from rendered frames
-    CustomOptional<float> ReprojSmoothing { 0.25f };            // EMA filter on camera angular velocity (0=off)
-    CustomOptional<bool> ReprojHudIsolation { true }; // separate Scaleform HUD from 3D world (KCD2), composited unwarped
+    CustomOptional<float> ReprojTargetRefresh { 0.0f }; // 0 = active display refresh
+    CustomOptional<float> ReprojSourceFramerateLimit {
+        0.0f
+    };                                                      // OPT-IN 60->120 A/B source cap; 0 = never pace (default)
+    CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
+    CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
+    CustomOptional<float> ReprojSmoothing { 0.25f };        // EMA filter on camera angular velocity (0=off)
+    CustomOptional<bool> ReprojHudIsolation {
+        true
+    }; // separate Scaleform HUD from 3D world (KCD2), composited unwarped
+    CustomOptional<bool> ReprojContentInterpolation { false }; // one FSR midpoint between source anchors; fail closed
     CustomOptional<float> ReprojLateSampleLead {
         0.0f
     }; // 0/auto = fixed 3 ms deferred latch; fixed float >0.5 overrides (bounded by the slot)
-    // Edge-fill / guard-band / depth-residual / anchor-continuity experiments
-    // (all opt-in A/B keys; see plans/timewarp_artifacts.md and
-    // plans/walking_judder_options.md). Defaults keep today's live-validated
-    // rotation-only behavior until each change wins a KCD2 A/B.
-    CustomOptional<float> ReprojEdgeExtensionPx {
-        0.0f
-    }; // <=0 = legacy static unwarped edge fallback; >0 = motion-coherent extension limit in px
-    CustomOptional<float> ReprojGuardCropPercent {
-        0.0f
-    }; // fixed guard margin, % of the image per side (0..3); zoom-in reserve before the captured edge
-    CustomOptional<bool> ReprojDepthEnabled { false };  // KCD2 confidence-gated depth translation residual v1
-    CustomOptional<bool> ReprojDepthInverted { true };   // reversed-Z depth (KCD2 probe: R24G8 reversed); false = standard
-    CustomOptional<float> ReprojDepthMaxResidualPx { 10.0f }; // per-pixel residual clamp (px)
-    CustomOptional<float> ReprojDepthVerticalScale {
-        0.25f
-    }; // share of vertical/world-Z translation applied to the residual (bob damp)
-    CustomOptional<bool> ReprojContinuityLatch { false }; // ease anchor switches onto the previous extrapolation
-
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

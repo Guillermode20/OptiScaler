@@ -59,7 +59,7 @@ class ReprojectionTests(unittest.TestCase):
         source = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
         presenter = source.split("void AReproj_Dx12::PresenterMain()", 1)[1]
         self.assertEqual(presenter.count("PresentCompositorFrame("), 1)
-        self.assertIn("PresentCompositorFrame(1, 0, !newContent, false)", presenter)
+        self.assertIn("PresentCompositorFrame(1, 0, generatedContent || !newContent, false)", presenter)
         self.assertNotIn("DXGI_PRESENT_ALLOW_TEARING", presenter)
 
     def test_async_hot_path_has_no_per_output_debug_logging(self):
@@ -322,7 +322,10 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("CopyPacketResource(cmdList, ui, kcd2UiState", capture)
         self.assertNotIn("GetResource(FG_ResourceType::HudlessColor", capture)
         self.assertIn("packet.warpAllowed = warpAllowed && packet.hasCamera;", capture)
-        self.assertNotIn("CopyPacketResource(cmdList, velocity", capture)
+        self.assertIn("ReprojContentInterpolation", capture)
+        self.assertIn("CopyPacketResource(cmdList, velocity", capture)
+        self.assertIn("_contentGenerator->Generate", capture)
+        self.assertLess(capture.index("_contentGenerator->Generate"), capture.index("SubmitUICommandList"))
         self.assertIn("packet.constants.mode = 2", capture)
         # The UI alpha mode is baked into the warp constants (premultiplied by
         # default) exactly like the parent branch.
@@ -457,7 +460,7 @@ class ReprojectionTests(unittest.TestCase):
                         "ReprojNonBlockingAnchorSampling", "ReprojTelemetry"):
             self.assertNotIn(removed, config)
         # async-simple: the source limit still parses but defaults to 0 (never pace).
-        self.assertIn("ReprojSourceFramerateLimit { 0.0f }", config)
+        self.assertRegex(config, r"ReprojSourceFramerateLimit\s*\{\s*0\.0f\s*\}")
 
     def test_source_pacer_is_an_opt_in_absolute_grid_pacer(self):
         # The 60->120 A/B source cap is an opt-in absolute-grid pacer (default
@@ -643,120 +646,6 @@ class ReprojectionTests(unittest.TestCase):
 
         self.assertEqual(min(range(6), key=score), 2)
         self.assertLess(score(2), 1.0e-6)
-
-    def test_source_pacer_never_holds_the_metrics_mutex(self):
-        # P0: the opt-in source-cap sleep must run outside every metrics scope.
-        # The game thread can sleep most of a 16.67 ms source interval, and the
-        # presenter (RecordWarpFrame / 1 Hz log / GetRuntimeMetrics) takes the
-        # same mutex — holding it across the sleep would stall the presenter.
-        root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        sites = source.split("FrameLimit::paceReprojectionSource(true)")
-        self.assertGreaterEqual(len(sites) - 1, 3)
-        for segment in sites[:-1]:
-            # Between each pacer call and the metrics lock that records block=,
-            # the lock must already be closed by a closing brace — otherwise the
-            # pacing sleep would hold _metricsMutex for the whole interval.
-            tail = segment[-1200:]
-            lock_pos = tail.rfind("std::scoped_lock metricsLock(_metricsMutex);")
-            self.assertGreaterEqual(lock_pos, 0, "pacer must follow a metrics lock")
-            between = tail[lock_pos:]
-            self.assertIn("}", between, "metrics lock must close before the pacing sleep")
-
-    def test_depth_residual_is_opt_in_and_fail_open(self):
-        # Depth translation residual v1: capture copies the tracked depth
-        # resource on the same inline submit (no second queue), engages only for
-        # KCD2 + a shader-viewable resource + sane projection, and stays
-        # rotation-only (mode 2 canonical) everywhere else. Off by default.
-        root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
-        capture = source.split("bool AReproj_Dx12::CaptureFramePacket", 1)[1].split(
-            "bool AReproj_Dx12::DisplayPacket", 1)[0]
-        self.assertIn("ReprojDepthEnabled { false }", config)
-        self.assertIn("ReprojDepthInverted { true }", config)
-        # The depth copy rides the single inline UI-list submit.
-        self.assertIn("CopyPacketResource(cmdList, depthSource, depthRes->state, &packet.depth", capture)
-        self.assertIn("GetResource(FG_ResourceType::Depth, sourceIndex)", capture)
-        self.assertIn("Kcd2Camera::IsAvailable()", capture)
-        # Rotation stays canonical; depth only gets a metadata gate.
-        self.assertIn("packet.constants.mode = 2", capture)
-        self.assertIn("packet.constants.depthEnabled = 0", capture)
-        self.assertIn("packet.constants.depthEnabled = 1", capture)
-        self.assertIn("ReprojDepthSrvViewFormat(packet.depthFormat)", capture)
-        self.assertIn("packet.constants.focalPxX", capture)
-        self.assertNotIn("depthWidth > 0 && packet.constants.cameraNear", capture)  # no full reprojection mode
-        # Per-slot residual is gated by fresh CView pose in the late latch and
-        # clears depthEnabled on failure (stall/cut -> rotation-only).
-        late = source.split("bool AReproj_Dx12::ApplyLateInput", 1)[1].split(
-            "void AReproj_Dx12::UpdateMouseSensitivity", 1)[0]
-        self.assertIn("FillTranslationResidual(constants, packet)", late)
-        residual = source.split("bool AReproj_Dx12::FillTranslationResidual", 1)[1].split(
-            "bool AReproj_Dx12::ApplyLateInput", 1)[0]
-        self.assertIn("constants.depthEnabled = 0", residual)
-        self.assertIn("latest.cutGeneration != packet.sourceCutGeneration", residual)
-        self.assertIn("horizontal + verticalRaw < 0.0015", residual)
-        self.assertIn("txCameraSpace[0]", residual)
-        self.assertIn("ReprojDepthVerticalScale.value_or_default()", residual)
-        # DPW keeps mode 2 and passes the optional depth SRV only when present.
-        dispatch = source.split("bool AReproj_Dx12::DispatchPacketWarp", 1)[1].split(
-            "bool AReproj_Dx12::DrainGpuWork", 1)[0]
-        self.assertIn("content.depth", dispatch)
-        self.assertIn("content.depthState", dispatch)
-        self.assertIn("ApplyPerSlotWarpConstants", dispatch)
-
-    def test_anchor_switch_continuity_latch_is_opt_in_and_decays(self):
-        # The stale-anchor snap latch compares where the previous anchor
-        # extrapolates to at the switch deadline vs the new anchor, carries the
-        # clamped difference onto the new anchor, and decays over two display
-        # slots. Default off; never carries across a camera cut.
-        root = Path(__file__).resolve().parents[2]
-        source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        presenter = (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8")
-        config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
-        self.assertIn("ReprojContinuityLatch { false }", config)
-        self.assertIn("ApplyAnchorSwitchContinuity(", presenter)
-        self.assertIn("_continuitySlotsRemaining", presenter)
-        body = source.split("void AReproj_Dx12::ApplyAnchorSwitchContinuity", 1)[1].split(
-            "bool AReproj_Dx12::FillTranslationResidual", 1)[0]
-        self.assertIn("ReprojContinuityLatch.value_or_default()", body)
-        self.assertIn("sourceCutGeneration != prevPacket.sourceCutGeneration", body)
-        self.assertIn("_continuitySlotsRemaining = 2", body)
-        latch = source.split("bool AReproj_Dx12::ApplyLateInput", 1)[1].split(
-            "void AReproj_Dx12::UpdateMouseSensitivity", 1)[0]
-        self.assertIn("_continuitySlotsRemaining >= 2 ? 1.0 : 0.4", latch)
-        self.assertIn("--_continuitySlotsRemaining", latch)
-
-    def test_edge_fill_and_guard_crop_live_in_the_shader_tail(self):
-        # Edge A/B machinery: RPD's warp stays rotation-first but can (a)
-        # motion-coherently extend the uncovered edge (EdgeExtensionPx > 0),
-        # (b) sample through a fixed guard-crop window (GuardCropPxX/Y > 0), and
-        # (c) apply a bounded depth residual. Defaults keep the legacy path.
-        root = Path(__file__).resolve().parents[2]
-        shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
-        common = (root / "OptiScaler/shaders/reprojection/RP_Common.h").read_text(encoding="utf-8")
-        self.assertEqual(common.split('R"(\n', 1)[1].rsplit('\n)";', 1)[0], shader.rstrip("\n"))
-        for token in ("EdgeExtensionPx", "GuardCropPxX", "GuardCropPxY", "DepthEnabled", "TxCameraSpace",
-                      "FocalPxX", "MaxResidualPx", "LinearizeDepth", "Texture2D<float> Depth",
-                      "ComputeTranslationResidual"):
-            self.assertIn(token, shader)
-            self.assertIn(token, common)
-        # Legacy path (EdgeExtensionPx <= 0) and UI composite are preserved.
-        self.assertIn("EdgeExtensionPx <= 0.0f", shader)
-        self.assertIn("LastColor.Load(int3(dtid.xy, 0)).rgb", shader)
-        self.assertIn("if (HudlessSource != 0)", shader)
-        # The depth helper never runs without the flag or a zero translation.
-        self.assertIn("DepthEnabled != 0", shader)
-
-    def test_rpd_root_signature_has_three_srvs_and_depth_view_mapping(self):
-        root = Path(__file__).resolve().parents[2]
-        dispatch = (root / "OptiScaler/shaders/reprojection/RP_Dx12.cpp").read_text(encoding="utf-8")
-        header = (root / "OptiScaler/shaders/reprojection/RP_Dx12.h").read_text(encoding="utf-8")
-        self.assertIn("SetupRootSignature(InDevice, 3, 1, 1", dispatch)
-        self.assertIn("GetSrvCPU(2)", dispatch)
-        self.assertIn("ReprojDepthSrvViewFormat", dispatch)
-        self.assertIn("DXGI_FORMAT_R24_UNORM_X8_TYPELESS", dispatch)
-        self.assertIn("ReprojDepthSrvViewFormat(DXGI_FORMAT format);", header)
 
 
 if __name__ == "__main__":

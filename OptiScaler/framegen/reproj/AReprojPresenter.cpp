@@ -222,6 +222,9 @@ void AReproj_Dx12::PresenterMain()
     uint32_t consecutiveJammedPresents = 0;
     bool presenterOccluded = false;
     uint32_t occlusionProbeCount = 0;
+    // 0 = repeat/select, 1 = generated midpoint pending, 2 = real anchor pending.
+    // A two-slot sequence is never interrupted by a newer capture.
+    int contentPhase = 0;
 
     const auto resetPresentationClock = [&]
     {
@@ -269,7 +272,6 @@ void AReproj_Dx12::PresenterMain()
                 presenterOccluded = true;
                 occlusionProbeCount = 0;
                 consecutiveJammedPresents = 0;
-                _continuitySlotsRemaining = 0;
                 resetPresentationClock();
                 LOG_INFO("Reproj: window minimized, pausing presenter GPU work");
             }
@@ -328,7 +330,7 @@ void AReproj_Dx12::PresenterMain()
         // the active anchor but no newer completed packet was claimed below,
         // this slot deliberately reuses the active anchor (counted as capWait).
         UINT64 newestReadyFrame = activeFrame;
-        for (int i = 0; i < kReprojFrameSlots; ++i)
+        for (int i = 0; contentPhase == 0 && i < kReprojFrameSlots; ++i)
         {
             const auto packetState = _packets[i].state.load();
             if (packetState == PacketState::Ready)
@@ -366,20 +368,12 @@ void AReproj_Dx12::PresenterMain()
                 // immutable until retirement, so the warp queue needs no
                 // additional ordering against the game DIRECT queue.
                 auto& newest = _packets[newestPacketIndex];
-                // Anchor-switch continuity latch (opt-in): compare where the
-                // previous anchor extrapolates to at this deadline vs where the
-                // newly-arrived anchor predicts, and ease the difference onto
-                // the new anchor's first warp(s) instead of snapping.
                 if (activePacketIndex >= 0)
-                {
-                    const double selectionDeadlineMs =
-                        nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
-                    ApplyAnchorSwitchContinuity(activePacketIndex, newestPacketIndex, selectionDeadlineMs);
                     _packets[activePacketIndex].state.store(PacketState::Retired);
-                }
                 activePacketIndex = newestPacketIndex;
                 activeFrame = newest.frameId;
                 newAnchor = true;
+                contentPhase = newest.hasGeneratedFrame ? 1 : 2;
                 for (int i = 0; i < kReprojFrameSlots; ++i)
                     if (i != activePacketIndex && _packets[i].state.load() == PacketState::Ready &&
                         _packets[i].frameId < activeFrame)
@@ -399,7 +393,6 @@ void AReproj_Dx12::PresenterMain()
         if (activePacketIndex < 0)
         {
             nextDeadlineMs = 0.0;
-            _continuitySlotsRemaining = 0; // no anchor in flight: nothing to ease
             std::unique_lock lock(_presentMutex);
             _presentCv.wait_for(lock, std::chrono::duration<double, std::milli>(refreshPeriodMs),
                                 [&] { return _stopPresenter.load() || _readyFrameId.load() > activeFrame; });
@@ -407,8 +400,9 @@ void AReproj_Dx12::PresenterMain()
         }
 
         auto& packet = _packets[activePacketIndex];
-        ContentFrame* selectedContent = &packet;
-        const bool newContent = newAnchor;
+        ContentFrame* selectedContent = contentPhase == 1 ? &packet.generatedFrame : &packet;
+        const bool generatedContent = contentPhase == 1;
+        const bool newContent = contentPhase != 0;
         const bool focusLost = !OptiInput::IsFocused() && !State::Instance().isRunningOnLinux;
         const auto targetDisplayMs = nextDeadlineMs > 0.0 ? nextDeadlineMs : Util::MillisecondsNow();
         const auto rawPeriod = packet.rawFrameDelta > 1.0 ? packet.rawFrameDelta : packet.frameDelta;
@@ -440,7 +434,7 @@ void AReproj_Dx12::PresenterMain()
         // controller exists to take the blit path).
         const bool shouldWarp = kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost;
         const bool dispatched = shouldWarp
-                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs)
+                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, selectedContent)
                                     : DisplayPacket(activePacketIndex);
 
         if (!dispatched)
@@ -451,7 +445,7 @@ void AReproj_Dx12::PresenterMain()
         }
 
         const auto presentCallStartMs = Util::MillisecondsNow();
-        const auto result = PresentCompositorFrame(1, 0, !newContent, false);
+        const auto result = PresentCompositorFrame(1, 0, generatedContent || !newContent, false);
         const auto presentedAt = Util::MillisecondsNow();
         const auto presentDurationMs = presentedAt - presentCallStartMs;
         const auto poseAge = static_cast<float>(std::max(0.0, targetDisplayMs - selectedContent->sourcePoseTimestamp));
@@ -478,6 +472,17 @@ void AReproj_Dx12::PresenterMain()
             break;
         }
         RecordWarpFrame(true, false, poseAge);
+
+        if (generatedContent)
+        {
+            std::scoped_lock metricsLock(_metricsMutex);
+            ++_metricsGeneratedDisplays;
+        }
+
+        if (contentPhase == 1)
+            contentPhase = 2;
+        else if (contentPhase == 2)
+            contentPhase = 0;
 
         constexpr uint32_t WATCHDOG_CONSECUTIVE_JAMS = 10;
         constexpr double WATCHDOG_WEDGE_MS = 2000.0;
