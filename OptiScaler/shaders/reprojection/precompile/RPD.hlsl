@@ -40,8 +40,13 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
                             dot(PrevCameraForward.xyz, position));
     bool inFront = sourceH.z > 1.0e-6f;
     float2 sourceUv = inFront ? sourceH.xy * rcp(sourceH.z) : float2(-1.0f, -1.0f);
-    bool covered = inFront && all(sourceUv >= 0.0f) && all(sourceUv <= 1.0f);
-    float2 edgePixels = min(sourceUv, 1.0f - sourceUv) * float2(DisplaySize);
+    // E2 filter-safe validity: bilinear taps 0.5 texel around the sample point,
+    // so the valid rect is inset half a texel. Sampling stays CLAMP for safety,
+    // but a clamped tap is never treated as valid coverage.
+    float2 validMin = 0.5f / float2(DisplaySize);
+    float2 validMax = 1.0f - validMin;
+    bool covered = inFront && all(sourceUv >= validMin) && all(sourceUv <= validMax);
+    float2 edgePixels = min(sourceUv - validMin, validMax - sourceUv) * float2(DisplaySize);
     float coverage = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
 
     float3 world;
@@ -60,6 +65,12 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     {
         world = LastColor.Load(int3(dtid.xy, 0)).rgb;
     }
+
+    // E2 diagnostic: DebugView == 1 paints invalid coverage magenta ahead of
+    // the UI composite. CPU keeps debugView == 0 for normal builds (uniform
+    // branch, no hot-path cost).
+    if (DebugView == 1 && coverage <= 0.0f)
+        world = float3(1.0f, 0.0f, 1.0f);
 
     if (HudlessSource != 0)
     {

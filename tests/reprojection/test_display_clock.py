@@ -666,6 +666,25 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("SetWorldSignalContext",
                          (root / "OptiScaler/framegen/reproj/AReprojPresenter.cpp").read_text(encoding="utf-8"))
 
+    def test_rpd_edge_validity_is_filter_safe_with_debug_view(self):
+        # PLAN.md E2: validity comes from the raw UV before any clamp, the
+        # valid rect is inset half a texel for bilinear, offscreen pixels
+        # fall back to Load (never a clamp-smeared Sample), and DebugView
+        # paints invalid coverage distinctly.
+        root = Path(__file__).resolve().parents[2]
+        shader = (root / "OptiScaler/shaders/reprojection/precompile/RPD.hlsl").read_text(encoding="utf-8")
+        self.assertIn("0.5f / float2(DisplaySize)", shader)
+        self.assertIn("validMin", shader)
+        self.assertIn("validMax", shader)
+        self.assertIn("all(sourceUv >= validMin) && all(sourceUv <= validMax)", shader)
+        self.assertIn("min(sourceUv - validMin, validMax - sourceUv)", shader)
+        self.assertIn("DebugView == 1", shader)
+        self.assertIn("float3(1.0f, 0.0f, 1.0f)", shader)
+        # Invalid coverage never samples: the else branch falls back to Load.
+        invalid = shader.split("if (coverage > 0.0f)", 1)[1].split("if (HudlessSource != 0)", 1)[0]
+        self.assertIn("SampleLevel(Bilinear, sourceUv, 0)", invalid)
+        self.assertIn("LastColor.Load(int3(dtid.xy, 0)).rgb", invalid)
+
     def test_phase_fit_selects_input_window_that_explains_camera_motion(self):
         # Model the C++ through-origin least-squares score. Camera response is
         # delayed by two 4 ms candidates; the aligned candidate must have the

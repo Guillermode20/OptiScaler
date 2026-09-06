@@ -84,6 +84,8 @@ Keep a diagnostic mode that can display invalid coverage distinctly. Remove or d
 
 Acceptance: no offscreen coordinate can turn into a stretched last-row/last-column smear through clamp sampling.
 
+Status (2026-09-06): code done, live validation pending. `RPD.hlsl` / `RP_Common.h` / `RPD_Shader.h`(+`.cso`) now use a half-texel-inset valid rect with the feather measured from the inset edge, and `DebugView == 1` paints invalid coverage magenta ahead of the UI composite (`debugView == 0` in normal builds). Pinned by `test_rpd_edge_validity_is_filter_safe_with_debug_view`. Still needs the E0 reserve sweep + `DebugView=1` footage check in KCD2.
+
 ### E3. Add maximum-safe-warp limiting
 
 Prevent the final rotation from exposing more source area than the current packet actually contains.
