@@ -414,11 +414,11 @@ void DecomposeCameraPairRotation(const float* forward, const float* prevForward,
     *pitchRadians = std::atan2(dot(forward, prevUp), dot(forward, prevForward));
 }
 
-void PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool inputLatched /*= false*/,
-                              float lateYaw /*= 0.0f*/, float latePitch /*= 0.0f*/,
-                              const ReprojVec3* targetBaseRight /*= nullptr*/,
-                              const ReprojVec3* targetBaseUp /*= nullptr*/,
-                              const ReprojVec3* targetBaseForward /*= nullptr*/)
+void PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool inputLatched = false,
+                              float lateYaw = 0.0f, float latePitch = 0.0f,
+                              const ReprojVec3* targetBaseRight = nullptr,
+                              const ReprojVec3* targetBaseUp = nullptr,
+                              const ReprojVec3* targetBaseForward = nullptr)
 {
     // Mode 2 rotates the predicted basis here for the rotation homography.
     // Translation (walking/hills) is intentionally not represented: the warp
