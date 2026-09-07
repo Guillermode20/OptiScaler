@@ -28,14 +28,6 @@ struct ContentFrame
     std::uint64_t sourceCutGeneration = 0;
     float cameraNear = 0.0f;
     float cameraFar = 0.0f;
-    // Per-anchor KCD2 render reserve, captured at publication time (not read
-    // from the hook's global at warp time, which may have moved on to a later
-    // frustum build). Zero when this anchor was not widened.
-    float renderReserveFraction = 0.0f;
-    // Vertical FOV the engine actually rendered with (widened when reserve is
-    // active, otherwise equal to constants.cameraVFov). FSR content generation
-    // must agree with the pixels, not with the player's center FOV.
-    float renderedVFov = 0.0f;
     bool invertedDepth = false;
     bool hdr = false;
     bool jitteredMotionVectors = false;

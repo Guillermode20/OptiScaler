@@ -224,8 +224,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     // Effective fixed latch lead reported by the 1 Hz summary. A configured
     // LateSampleLead > 0.5 overrides the conservative auto/default lead.
     std::atomic<double> _lastLateSampleLeadMs { LATE_LATCH_DEFAULT_MS };
-    // Reserve fraction of the last warped content (per-packet plumbing proof).
-    std::atomic<float> _lastContentGuard { 0.0f };
     double _presentIntervals[240] = {};
     uint32_t _presentIntervalCount = 0;
     uint32_t _presentIntervalCursor = 0;

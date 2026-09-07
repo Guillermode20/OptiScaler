@@ -236,10 +236,7 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
     prepare.frameTimeDelta = static_cast<float>(std::clamp(contentInterval, 1.0, 500.0));
     prepare.cameraNear = realFrame.cameraNear;
     prepare.cameraFar = realFrame.cameraFar;
-    // The pixels were rendered with the widened frustum when a reserve is
-    // active; the player-center FOV would mislead disocclusion logic.
-    prepare.cameraFovAngleVertical =
-        realFrame.renderedVFov > 0.05f ? realFrame.renderedVFov : realFrame.constants.cameraVFov;
+    prepare.cameraFovAngleVertical = realFrame.constants.cameraVFov;
     prepare.viewSpaceToMetersFactor = 1.0f;
     prepare.depth = ffxApiGetResourceDX12(realFrame.depth, FfxState(realFrame.depthState));
     prepare.motionVectors = ffxApiGetResourceDX12(realFrame.velocity, FfxState(realFrame.velocityState));

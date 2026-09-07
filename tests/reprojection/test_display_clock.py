@@ -326,14 +326,11 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("ReprojContentInterpolation", capture)
         self.assertIn("const bool resetEdge = reset && !_resetActive", generator)
         self.assertIn("dispatch.reset = resetEdge || cut", generator)
-        self.assertIn("packet.renderReserveFraction = Kcd2Camera::RenderReserveFraction()", capture)
-        self.assertIn("generated.renderReserveFraction = packet.renderReserveFraction", capture)
         self.assertIn("generated.sourceFrameInterval = contentInterval", capture)
         self.assertIn("contentDescsSane", capture)
-        self.assertIn("renderedVFov", capture)
         self.assertIn("realFrame.sourceFrameInterval", generator)
         self.assertIn("realFrame.sourcePoseInterval > 1.0 ? realFrame.sourcePoseInterval", generator)
-        self.assertIn("realFrame.renderedVFov", generator)
+        self.assertIn("realFrame.constants.cameraVFov", generator)
         self.assertIn("depthDesc.Width != renderW", generator)
         self.assertIn("if (realFrame.jitteredMotionVectors)", generator)
         self.assertIn("CopyPacketResource(cmdList, velocity", capture)
@@ -349,31 +346,23 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("FGUIPremultipliedAlpha", capture)
         self.assertIn("hudlessSource", capture)
 
-    def test_kcd2_render_reserve_is_real_frustum_expansion_and_fail_closed(self):
+    def test_kcd2_camera_hook_is_observational_only(self):
         root = Path(__file__).resolve().parents[2]
         camera = (root / "OptiScaler/framegen/reproj/Kcd2Camera.cpp").read_text(encoding="utf-8")
         hook = camera.split("uintptr_t __fastcall Hook", 1)[1].split("bool ReadPoses", 1)[0]
-        self.assertIn("IsGameplayCamera(camera)", hook)
-        self.assertIn("*fov = widenedFov", hook)
-        write = hook.index("*fov = widenedFov")
-        call = hook.index("g_original(camera)", write)
-        restore = hook.index("*fov = originalFov", call)
-        self.assertLess(write, call)
-        self.assertLess(call, restore)
-        self.assertIn("NoteReserve(reserve, originalFov, widenedFov)", hook)
-        self.assertIn("WidenedFov(originalFov, reserve)", hook)
-        # Widen math lives in one shared helper (hook + capture + FSR agree).
-        self.assertIn("float WidenedFov(float originalFov, float reserveFraction)", camera)
-        self.assertIn("g_renderReserveTimestampMs", camera)
-        # The warp mapping consumes the per-packet guard, never the hook
-        # global: the global may describe a later frustum build by display.
+        self.assertIn("PublishPose(camera)", hook)
+        self.assertIn("return g_original(camera)", hook)
+        self.assertNotIn("*fov", hook)
+        self.assertNotIn("WidenedFov", camera)
+        self.assertNotIn("RenderReserve", camera)
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        prepare = reproj.split("WarpCoverage PrepareRotationConstants(", 1)[1].split("} // namespace", 1)[0]
-        self.assertIn("guardFraction", prepare)
-        self.assertNotIn("RenderReserveFraction()", prepare)
-        self.assertIn("packet.renderReserveFraction", reproj.split(
-            "bool AReproj_Dx12::ApplyLateInput", 1)[1].split(
-            "void AReproj_Dx12::UpdateMouseSensitivity", 1)[0])
+        config = (root / "OptiScaler/Config.h").read_text(encoding="utf-8")
+        menu = (root / "OptiScaler/menu/menu_common.cpp").read_text(encoding="utf-8")
+        ini = (root / "OptiScaler.ini").read_text(encoding="utf-8")
+        self.assertNotIn("renderReserve", reproj)
+        self.assertNotIn("Kcd2RenderReservePercent", config)
+        self.assertNotIn("KCD2 render reserve", menu)
+        self.assertNotIn("Kcd2RenderReservePercent", ini)
 
     def test_edge_limiter_uses_raw_perimeter_coverage_without_queue_changes(self):
         root = Path(__file__).resolve().parents[2]
@@ -428,10 +417,9 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("_renderUI->Dispatch", dispatch)
         # Constants are written once as a baseline, then replaced while the
         # queue is parked behind the latch fence.
-        self.assertIn("PrepareRotationConstants(constants, contentGuard, false);", dispatch)
+        self.assertIn("PrepareRotationConstants(constants, false);", dispatch)
         self.assertIn("_warp->WriteConstants(outputIndex, constants)", dispatch)
-        self.assertIn("PrepareRotationConstants(lateConstants, content.renderReserveFraction, false);", dispatch)
-        self.assertIn("_lastContentGuard.store(contentGuard", dispatch)
+        self.assertIn("PrepareRotationConstants(lateConstants, false);", dispatch)
         # The machinery is deleted from the class definition as well.
         header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
         self.assertNotIn("_computeQueue", header)
@@ -480,7 +468,7 @@ class ReprojectionTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         source = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
         self.assertIn("late={}/{} maxDeg={:.2f}", source)
-        self.assertIn("guard={:.1f}%", source)
+        self.assertNotIn("guard={:.1f}%", source)
         self.assertNotIn("hud=", source)
         self.assertNotIn("sampLead=", source)
         self.assertNotIn("ReprojPipe", source)

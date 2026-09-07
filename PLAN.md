@@ -28,7 +28,6 @@ The simplified architecture is already established and should not be rewritten w
 - KCD2 Scaleform HUD isolation is live-validated. World content is warped and the isolated HUD is composited unwarped.
 - `[AsyncTimewarp] SourceFramerateLimit` is opt-in. The 60 -> 120 A/B has been live-validated and is the preferred controlled test mode.
 - `[AsyncTimewarp] ContentInterpolation` is an opt-in one-midpoint FSR content-generation experiment. Generated and real world content receive the same final late rotation and unwarped HUD composite.
-- `[AsyncTimewarp] Kcd2RenderReservePercent` is implemented. It temporarily widens the validated gameplay CView while KCD2 constructs its frustum, preserves the player's original presented center FOV, leaves the HUD unchanged, captures the applied reserve per packet, and reports `guard=%` in the 1 Hz log. The current default is 8% per side.
 
 ## 3. Hard invariants
 
@@ -49,15 +48,13 @@ These rules take priority over feature work.
 
 This is the current quality blocker.
 
-The branch already has a genuine KCD2 render reserve, so the next work should use that real offscreen content rather than adding another cosmetic crop as the primary solution. The remaining failure is expected to occur when the requested rotation exceeds the usable reserve, the shader treats invalid UVs badly, or the transition from valid warp coverage to fallback content is visually obvious.
+Live KCD2 testing established that the attempted render-reserve hook did not widen the rasterized world image. The presenter mapping only cropped the existing image and reduced the displayed FOV, so the feature and all associated guard plumbing were removed on 2026-09-07. Edge work must not assume offscreen source coverage that has not been proven in the captured color.
 
 ### E0. Establish a repeatable baseline
 
 Use the same KCD2 scene and camera motion for every A/B. Start with `SourceFramerateLimit=60` on a 120 Hz display so cadence is controlled.
 
-Capture short tests with render reserve at 0%, 4%, 8%, and 12%. Include slow pans, ordinary mouse turns, fast flicks, vertical turns, diagonal turns, first-person geometry near the edge, foliage, and a static skyline/building edge. Record the normal 1 Hz reprojection log with each run.
-
-The first question is simple: does a deliberately generous reserve remove the visible edge failure during normal turns? If yes, the diagnosis is missing source coverage and the remaining work is sizing/limiting/fallback. If not, inspect the UV/fill path before adding more reserve.
+Capture short tests with slow pans, ordinary mouse turns, fast flicks, vertical turns, diagonal turns, first-person geometry near the edge, foliage, and a static skyline/building edge. Record the normal 1 Hz reprojection log with each run. Compare `ContentInterpolation=false` and `true` separately so final-warp behavior is not confused with midpoint generation.
 
 ### E1. Measure required source coverage
 
@@ -68,19 +65,19 @@ For each requested rotation, use the same CPU-baked homography as the warp and e
 - maximum source-UV overrun per edge;
 - percentage or count of boundary samples outside valid source coverage;
 - requested angular delta;
-- per-packet guard fraction;
 - anchor pose age;
 - eventual safe-warp scale once E3 exists.
 
-Aggregate into the existing 1 Hz health line or similarly cheap counters. The goal is to learn the 95th and 99th percentile reserve actually required in KCD2 rather than tuning by feel alone.
+Aggregate into the existing 1 Hz health line or similarly cheap counters. The goal is to quantify the 95th and 99th percentile source-coverage deficit in KCD2 rather than tuning by feel alone.
 
 Status (2026-09-07): code done, live validation pending. The presenter now
 samples a fixed 16-point output perimeter from the CPU-baked homography and
 reports the requested raw-UV coverage demand once per second: invalid sample
 count, per-edge maximum overrun, requested rotation, safe scale, and limiter
 activations. It does not add GPU readback, per-slot logging, a game-thread
-wait, or a queue/fence dependency. Collect the E0 0/4/8/12% footage/log sweep
-before selecting a production guard band.
+wait, or a queue/fence dependency. The subsequent live sweep showed that the
+camera hook changed a field but did not widen captured world coverage; the
+reserve control and guard mapping were therefore removed.
 
 Correction (2026-09-07): the first live build evaluated the NDC homography
 with pixel coordinates, falsely reporting coverage loss and clamping every
@@ -98,13 +95,13 @@ Keep a diagnostic mode that can display invalid coverage distinctly. Remove or d
 
 Acceptance: no offscreen coordinate can turn into a stretched last-row/last-column smear through clamp sampling.
 
-Status (2026-09-06): code done, live validation pending. `RPD.hlsl` / `RP_Common.h` / `RPD_Shader.h`(+`.cso`) now use a half-texel-inset valid rect with the feather measured from the inset edge, and `DebugView == 1` paints invalid coverage magenta ahead of the UI composite (`debugView == 0` in normal builds). Pinned by `test_rpd_edge_validity_is_filter_safe_with_debug_view`. Still needs the E0 reserve sweep + `DebugView=1` footage check in KCD2.
+Status (2026-09-06): code done, live validation pending. `RPD.hlsl` / `RP_Common.h` / `RPD_Shader.h`(+`.cso`) now use a half-texel-inset valid rect with the feather measured from the inset edge, and `DebugView == 1` paints invalid coverage magenta ahead of the UI composite (`debugView == 0` in normal builds). Pinned by `test_rpd_edge_validity_is_filter_safe_with_debug_view`. Still needs the E0 `DebugView=1` footage check in KCD2.
 
 ### E3. Add maximum-safe-warp limiting
 
 Prevent the final rotation from exposing more source area than the current packet actually contains.
 
-For the requested source-to-target rotation, find the largest scale `s` in `[0, 1]` for which the sampled output boundary remains inside the filter-safe source region, including the packet's real KCD2 render reserve. Apply:
+For the requested source-to-target rotation, find the largest scale `s` in `[0, 1]` for which the sampled output boundary remains inside the filter-safe source region. Apply:
 
 ```text
 safeRotation = slerp(identity, requestedRotation, s)
@@ -124,20 +121,16 @@ Status (2026-09-07): code done, live validation pending. The same fixed
 perimeter test drives an eight-iteration presenter-side binary search over the
 relative camera rotation's axis-angle scale. The displayed warp uses the
 largest filter-safe scale; near-180-degree discontinuities fail closed to the
-source pose. The telemetry retains the *requested* coverage demand so reserve
-tuning is not hidden by the limiter.
+source pose. The telemetry retains the *requested* coverage demand so the
+limiter cannot hide the underlying deficit.
 
-### E4. Tune the real KCD2 guard band
+### E4. Remove the ineffective KCD2 reserve
 
-Once E1 and E3 are available, tune `Kcd2RenderReservePercent` from measured KCD2 motion.
-
-Prefer the smallest reserve that covers almost all ordinary motion at `safeScale = 1`. The current 8% default is a test point, not a sacred value. A likely production range is around 3-8% per side, but measured coverage and visible KCD2 rendering/culling behaviour decide it.
-
-Verify that FOV, culling, jitter, upscaler inputs, motion-vector scale, FSR midpoint generation, and the final center mapping all agree with the widened rendered frustum. Watch for LOD pop-in or screen-space effects at the reserve edge.
+Completed (2026-09-07). Live testing showed that the temporary `CCamera` FOV mutation did not widen the captured world image. Its presenter-side guard mapping only cropped the image and reduced displayed FOV. The config key, menu control, camera mutation, packet metadata, FSR FOV override, warp crop, and `guard=%` telemetry were removed. Do not restore this mechanism without direct captured-image proof that an earlier projection hook produces genuine additional world coverage.
 
 ### E5. Temporal border recovery from older anchors
 
-Only after guard band + safe limiting are solid, retain up to two older compatible world anchors as a fallback for pixels that are invalid in the newest anchor.
+Only after safe limiting is solid, retain up to two older compatible world anchors as a fallback for pixels that are invalid in the newest anchor.
 
 Conceptually:
 
@@ -150,7 +143,7 @@ otherwise -> spatial fallback
 
 This must use explicit resource/fence ownership. Do not sample a packet after it has been recycled.
 
-Reject history across camera cuts, FOV/aspect changes, incompatible guard fractions, stale resources, or excessive age. Start with a conservative maximum age around 50-100 ms and tighten from footage. History is for invalid border pixels only. Do not blend previous-anchor imagery across already-valid current content, because that previously produced visible ghost/double images during rotation.
+Reject history across camera cuts, FOV/aspect changes, stale resources, or excessive age. Start with a conservative maximum age around 50-100 ms and tighten from footage. History is for invalid border pixels only. Do not blend previous-anchor imagery across already-valid current content, because that previously produced visible ghost/double images during rotation.
 
 Moving NPCs, weapons, foliage, particles, lighting, and exposure changes can make historical pixels wrong, so history fill must remain a fallback rather than the baseline warp.
 
@@ -164,18 +157,11 @@ If a few invalid pixels remain after current/history sampling, use a deliberatel
 
 Do not allow a spatial fill to cover a large fraction of the screen. If the hole is large, E3 should reduce the warp instead.
 
-### E7. Optional adaptive/asymmetric reserve
-
-After the symmetric reserve is stable, test whether recent angular velocity can bias the available reserve toward the likely next turn direction. Any bias must move slowly enough that the player does not see the underlying crop/frustum centre swim.
-
-This is optional polish. Do not implement it before E0-E6 are measured.
-
 ### Edge-artifact definition of done
 
 - Normal KCD2 camera movement does not show obvious clamped smear, black wedges, or a persistent lag band at screen edges.
 - Fast flicks remain visually bounded by safe-warp limiting.
 - Historical fill does not create obvious edge ghosts on moving objects.
-- The chosen render reserve does not introduce unacceptable FOV, culling, LOD, upscaler, or screen-space regressions.
 - 60 -> 120 cadence and source performance remain within the established healthy range.
 - No edge-quality change adds a game-thread GPU wait or changes the simplified queue topology.
 
@@ -293,7 +279,7 @@ These remain outside the current implementation unless a future measured problem
 - heavy per-slot logging, GPU readback, or allocation in the display hot path;
 - parent-branch COPY/COMPUTE/capture-worker architecture.
 
-Depth can help internal disocclusions if positional reprojection returns in the future, but it cannot reconstruct world content that was never rendered outside the source frustum. For the current outer-edge problem, render reserve, safe limiting, compatible history, and tiny fallback are the intended ladder.
+Depth can help internal disocclusions if positional reprojection returns in the future, but it cannot reconstruct world content that was never rendered outside the source frustum. For the current outer-edge problem, safe limiting, compatible history, and tiny fallback are the intended ladder.
 
 ## 10. Validation workflow
 
@@ -325,7 +311,6 @@ Completed:
 - fixed deferred late latch;
 - opt-in stable source-FPS cap for controlled 60 -> 120 tests;
 - opt-in one-midpoint FSR content interpolation path;
-- real KCD2 rendered reserve captured per packet.
 
 Rejected or removed unless new evidence changes the decision:
 
@@ -339,5 +324,6 @@ Rejected or removed unless new evidence changes the decision:
 - UI borrowing and hitch-hold machinery;
 - old KCD2 input-prediction/target-pose stack;
 - heavy per-slot telemetry.
+- attempted KCD2 render reserve and presenter guard crop; live testing showed only reduced displayed FOV, not wider captured coverage.
 
 When one of these decisions changes, record the measured reason here and update the relevant active section above.

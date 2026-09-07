@@ -383,7 +383,7 @@ bool RotationAxisAngle(ReprojVec3 sourceRight, ReprojVec3 sourceUp, ReprojVec3 s
     return DotReprojVec3(*axis, *axis) > 0.5f;
 }
 
-void BuildRotationRows(const RP_Constants& constants, float guardFraction, ReprojVec3 sourceRight, ReprojVec3 sourceUp,
+void BuildRotationRows(const RP_Constants& constants, ReprojVec3 sourceRight, ReprojVec3 sourceUp,
                        ReprojVec3 sourceForward, ReprojVec3 predictedRight, ReprojVec3 predictedUp,
                        ReprojVec3 predictedForward, ReprojVec3* outX, ReprojVec3* outY, ReprojVec3* outZ)
 {
@@ -404,10 +404,8 @@ void BuildRotationRows(const RP_Constants& constants, float guardFraction, Repro
         uvNumeratorX = CombineReprojVec3(denominator, 0.5f, sx, 0.5f / focalX);
         uvNumeratorY = CombineReprojVec3(denominator, 0.5f, sy, -0.5f / focalY);
     }
-    const float guard = std::clamp(guardFraction, 0.0f, 0.15f);
-    const float guardScale = 1.0f - 2.0f * guard;
-    *outX = CombineReprojVec3(uvNumeratorX, guardScale, denominator, guard);
-    *outY = CombineReprojVec3(uvNumeratorY, guardScale, denominator, guard);
+    *outX = uvNumeratorX;
+    *outY = uvNumeratorY;
     *outZ = denominator;
 }
 
@@ -546,7 +544,7 @@ void DecomposeCameraPairRotation(const float* forward, const float* prevForward,
     *pitchRadians = std::atan2(dot(forward, prevUp), dot(forward, prevForward));
 }
 
-WarpCoverage PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool inputLatched = false,
+WarpCoverage PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false,
                                       float lateYaw = 0.0f, float latePitch = 0.0f,
                                       const ReprojVec3* targetBaseRight = nullptr,
                                       const ReprojVec3* targetBaseUp = nullptr,
@@ -606,8 +604,8 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, float guardFracti
         return {};
 
     ReprojVec3 xRow {}, yRow {}, zRow {};
-    BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
-                      predictedForward, &xRow, &yRow, &zRow);
+    BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp, predictedForward,
+                      &xRow, &yRow, &zRow);
     auto coverage = EvaluateWarpCoverage(constants, xRow, yRow, zRow);
 
     ReprojVec3 axis {};
@@ -632,8 +630,8 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, float guardFracti
                 const auto candidateForward =
                     NormalizeReprojVec3(RotateReprojVec3(sourceForward, axis, angle * middle));
                 ReprojVec3 candidateX {}, candidateY {}, candidateZ {};
-                BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, candidateRight,
-                                  candidateUp, candidateForward, &candidateX, &candidateY, &candidateZ);
+                BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, candidateRight, candidateUp,
+                                  candidateForward, &candidateX, &candidateY, &candidateZ);
                 if (EvaluateWarpCoverage(constants, candidateX, candidateY, candidateZ).invalidSamples == 0)
                     low = middle;
                 else
@@ -643,8 +641,8 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, float guardFracti
             predictedRight = NormalizeReprojVec3(RotateReprojVec3(sourceRight, axis, angle * low));
             predictedUp = NormalizeReprojVec3(RotateReprojVec3(sourceUp, axis, angle * low));
             predictedForward = NormalizeReprojVec3(RotateReprojVec3(sourceForward, axis, angle * low));
-            BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, predictedRight,
-                              predictedUp, predictedForward, &xRow, &yRow, &zRow);
+            BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
+                              predictedForward, &xRow, &yRow, &zRow);
         }
         else
         {
@@ -655,8 +653,8 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, float guardFracti
             predictedRight = sourceRight;
             predictedUp = sourceUp;
             predictedForward = sourceForward;
-            BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, predictedRight,
-                              predictedUp, predictedForward, &xRow, &yRow, &zRow);
+            BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
+                              predictedForward, &xRow, &yRow, &zRow);
         }
     }
 
@@ -757,8 +755,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         pitch *= maxRotation / rotation;
     }
 
-    const auto coverage = PrepareRotationConstants(constants, packet.renderReserveFraction, true, static_cast<float>(yaw),
-                                                   static_cast<float>(pitch), pBaseRight, pBaseUp, pBaseForward);
+    const auto coverage = PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch),
+                                                   pBaseRight, pBaseUp, pBaseForward);
     RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
                        WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
                        coverage.overrunTop, coverage.overrunBottom);
@@ -1143,12 +1141,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     }
     packet.sourcePoseInterval = kcd2PoseIntervalMs;
     packet.sourceFrameInterval = saneFrameDelta;
-    // Per-packet reserve: read the hook state now, at publication, while it
-    // still describes the frustum this anchor rendered with. The warp path
-    // must never re-read the global at display time.
-    packet.renderReserveFraction = Kcd2Camera::RenderReserveFraction();
-    packet.renderedVFov =
-        Kcd2Camera::WidenedFov(packet.constants.cameraVFov, packet.renderReserveFraction);
     Kcd2Camera::Snapshot currentCamera {};
     Kcd2Camera::Snapshot previousCamera {};
     const bool haveKcd2Snapshots =
@@ -1248,12 +1240,11 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
                 lastContentSummaryScaleY = packet.constants.mvScaleY;
                 LOG_INFO(
                     "HybridTimewarp: midpoint inputs (mv {}x{} scale {:.4f},{:.4f} jitter {:.4f},{:.4f} "
-                    "depth {} far {:.1f} near {:.3f} hdr={} jitteredMVs={} displayResMVs={} reserve={:.1f}%)",
+                    "depth {} far {:.1f} near {:.3f} hdr={} jitteredMVs={} displayResMVs={})",
                     packet.constants.mvWidth, packet.constants.mvHeight, packet.constants.mvScaleX,
                     packet.constants.mvScaleY, packet.constants.jitterX, packet.constants.jitterY,
                     static_cast<int>(depthDesc.Format), packet.cameraFar, packet.cameraNear, packet.hdr,
-                    packet.jitteredMotionVectors, packet.displayResolutionMotionVectors,
-                    packet.renderReserveFraction * 100.0f);
+                    packet.jitteredMotionVectors, packet.displayResolutionMotionVectors);
             }
         }
         if (contentDescsSane)
@@ -1269,8 +1260,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         const auto contentInterval = packet.sourcePoseInterval > 1.0 ? packet.sourcePoseInterval : packet.frameDelta;
         generated.sourcePoseInterval = contentInterval;
         generated.sourceFrameInterval = contentInterval;
-        generated.renderReserveFraction = packet.renderReserveFraction;
-        generated.renderedVFov = packet.renderedVFov;
         generated.sourcePoseTimestamp = sourceTimestamp - contentInterval * 0.5;
         generated.renderTimestamp = now - contentInterval * 0.5;
         generated.virtualContentTimestamp = generated.sourcePoseTimestamp;
@@ -1486,8 +1475,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
     auto constants = content.constants;
     constants.timeStep = timeStep;
-    const float contentGuard = content.renderReserveFraction;
-    _lastContentGuard.store(contentGuard, std::memory_order_relaxed);
     const bool deferredLateLatch = _lateLatchFence != nullptr && _presentQueue != nullptr;
     if (!deferredLateLatch)
     {
@@ -1495,7 +1482,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // execution when no latch fence is available.
         if (!ApplyLateInput(constants, packet))
         {
-            const auto coverage = PrepareRotationConstants(constants, contentGuard, false);
+            const auto coverage = PrepareRotationConstants(constants, false);
             RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
                                WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
                                coverage.overrunTop, coverage.overrunBottom);
@@ -1506,7 +1493,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // Populate a valid baseline before queuing the command list. The GPU is
         // parked before it can read this upload buffer; the final pose replaces
         // it after submission and before the latch fence is released.
-        PrepareRotationConstants(constants, contentGuard, false);
+        PrepareRotationConstants(constants, false);
         if (!_warp->WriteConstants(outputIndex, constants))
         {
             backBuffer->Release();
@@ -1583,7 +1570,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, packet))
         {
-            const auto coverage = PrepareRotationConstants(lateConstants, content.renderReserveFraction, false);
+            const auto coverage = PrepareRotationConstants(lateConstants, false);
             RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
                                WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
                                coverage.overrunTop, coverage.overrunBottom);
@@ -1816,14 +1803,14 @@ void AReproj_Dx12::LogMetricsIfDue()
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms latchLead={:.2f}ms poseAge={:.1f}ms queue={} "
-             "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} guard={:.1f}% "
+             "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} "
              "({}, block={:.2f}ms) generated={} edge={}/{} scale={:.3f} limited={} rot={:.1f}deg "
              "overrun={:.3f}/{:.3f}/{:.3f}/{:.3f}",
              realFrames * scale, warpFrames * scale, newAnchorDisplays, repeatedAnchorDisplays, missedDisplaySlots,
              meanPresentIntervalMs, p95PresentIntervalMs, _lastLateSampleLeadMs.load(std::memory_order_relaxed),
              poseAge, queueDepth, lateInputApplied, lateInputSamples, lateInputMaxDegrees, skippedAnchorSamples,
-             directCaptures, captureNotReady, _lastContentGuard.load(std::memory_order_relaxed) * 100.0f, presenter,
-             gamePresentBlockMaxMs, generatedDisplays, warpCoverageInvalid, warpCoverageSamples, safeWarpMinScale,
+             directCaptures, captureNotReady, presenter, gamePresentBlockMaxMs, generatedDisplays, warpCoverageInvalid,
+             warpCoverageSamples, safeWarpMinScale,
              safeWarpLimited, requestedWarpMaxDegrees, coverageOverrunLeft, coverageOverrunRight, coverageOverrunTop,
              coverageOverrunBottom);
 }

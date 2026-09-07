@@ -93,7 +93,7 @@ Raw mouse input is observed passively. Do not add a second `RegisterRawInputDevi
 
 KCD2 HUD isolation uses the Scaleform hooks and HUD-isolation resource path under `framegen/reproj/`. The clean world is timewarped and the isolated UI is composited afterward. Keep the UI/world capture in the same inline game-DIRECT submit and readiness gate. Do not restore UI borrowing.
 
-`Kcd2RenderReservePercent` is a genuine rendered reserve, not a cosmetic zoom. The validated gameplay camera is temporarily widened while KCD2 builds its frustum, then restored. The player's original center FOV is what the presenter maps to the monitor. The applied reserve is captured per packet and must be used from packet state at display time rather than re-read from a mutable hook global.
+The attempted KCD2 render-reserve hook was removed after live testing showed that it only reduced the displayed FOV; it did not widen the captured world image. Do not restore a guard crop or claim offscreen coverage without direct captured-image proof from an earlier projection hook.
 
 `ContentInterpolation` is opt-in. It asks the maintained FSR frame-generation path for one midpoint using the isolated world plus validated depth/MV inputs. Generated and real content both receive the same final late rotation and isolated HUD composite. Missing or suspect inputs fail closed to ordinary timewarp.
 
@@ -111,7 +111,6 @@ The active `[AsyncTimewarp]` controls include:
 - `LateSampleLead`, default fixed 3 ms when automatic/default value is selected
 - `HudIsolation`
 - `ContentInterpolation`, default off
-- `Kcd2RenderReservePercent`, currently 8% per side by default
 
 Do not invent a new control before checking `Config.h`, `Config.cpp`, `OptiScaler.ini`, and the in-game menu wiring.
 
@@ -156,7 +155,7 @@ Do not copy mechanisms back from `async-timewarp` simply because they exist ther
 - full positional depth/MV final warp;
 - heavy per-slot telemetry.
 
-The opt-in source cap, one-midpoint FSR generator, KCD2 rendered reserve, and future edge-history fallback described in `PLAN.md` are self-contained exceptions only when they preserve the simplified ownership/queue model.
+The opt-in source cap, one-midpoint FSR generator, and future edge-history fallback described in `PLAN.md` are self-contained exceptions only when they preserve the simplified ownership/queue model.
 
 ## Working rule
 

@@ -4243,12 +4243,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Experimental 2x content path. Uses captured depth and motion vectors for one FSR midpoint, "
                        "then applies the normal late camera warp and unwarped HUD. Missing inputs fall back to "
                        "ordinary timewarp.");
-        float renderReserve = config->ReprojKcd2RenderReservePercent.value_or_default();
-        if (ImGui::SliderFloat("KCD2 render reserve##reproj-live", &renderReserve, 0.0f, 15.0f, "%.1f%%"))
-            config->ReprojKcd2RenderReservePercent = std::clamp(renderReserve, 0.0f, 15.0f);
-        ShowHelpMarker("Widens KCD2's validated gameplay camera before CryEngine builds the world frustum, then maps "
-                       "the original center FOV for presentation. The perimeter is real rendered geometry, not a "
-                       "crop or stretch. Scaleform HUD is unaffected.");
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {
