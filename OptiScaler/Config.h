@@ -628,6 +628,13 @@ class Config
     CustomOptional<float> ReprojLateSampleLead {
         0.0f
     }; // 0/auto = fixed 3 ms deferred latch; fixed float >0.5 overrides (bounded by the slot)
+    CustomOptional<float> ReprojSafeWarpBudget {
+        12.0f
+    }; // edge-width budget in px for maximum-safe-warp limiting; 0 = off (full warp)
+    CustomOptional<float> ReprojMaxTimeStep {
+        2.5f
+    }; // absolute clamp on rotation extrapolation step in frames; bounds hitch recovery
+    CustomOptional<bool> ReprojDebugView { false }; // E2 diagnostic: magenta invalid warp coverage
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

@@ -417,13 +417,13 @@ void AReproj_Dx12::PresenterMain()
         // render latency and would artificially bias timeStep by 1.5 - 2.0 frames.
         const auto warpOriginMs = selectedContent->renderTimestamp;
         const auto anchorAgeMs = std::max(0.0, targetDisplayMs - warpOriginMs);
-        constexpr float maxTimeStep = 2.5f;
         // Bare-bones warp step: anchor age / represented period, clamped only by
         // the absolute extrapolation cap. No velocity limiting.
         const auto unclampedStep = static_cast<float>(anchorAgeMs / realPeriodMs);
         // Rotation-only extrapolation step, clamped only by the absolute cap.
-        // No hitch hold on the minimal path: a stall simply clamps timeStep
-        // (extrapolation is bounded by the 2.5 cap either way).
+        // No hitch hold on the minimal path: a stall simply clamps timeStep.
+        const float maxTimeStep =
+            std::clamp(Config::Instance()->ReprojMaxTimeStep.value_or_default(), 1.0f, 4.0f);
         const auto timeStep = std::clamp(unclampedStep, 0.0f, maxTimeStep);
 
         // A0 (kAsyncSimpleStage == 0): never dispatch the warp shader. Every

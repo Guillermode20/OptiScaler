@@ -4203,11 +4203,13 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         float targetRefresh = config->ReprojTargetRefresh.value_or_default();
         if (ImGui::InputFloat("Target refresh##reproj-live", &targetRefresh, 1.0f, 10.0f, "%.0f Hz"))
             config->ReprojTargetRefresh = std::max(0.0f, targetRefresh);
-        ShowHelpMarker("0 = display. Presenter slot cadence.");
+        ShowHelpMarker("Display slot cadence. 0 = active display refresh (recommended). "
+                       "Set 120 for controlled 60->120 A/B tests.");
         float smooth = config->ReprojSmoothing.value_or_default();
         if (ImGui::SliderFloat("Smoothing##reproj-live", &smooth, 0.0f, 0.95f, "%.2f"))
             config->ReprojSmoothing = std::clamp(smooth, 0.0f, 0.95f);
-        ShowHelpMarker("EMA on KCD2 camera angular velocity. 0=off. 0.25 default.");
+        ShowHelpMarker("EMA on KCD2 camera angular velocity. 0 = off (recommended default; "
+                       "smoothing delays onset and creeps after stop). Opt-in only.");
         float sourceCap = config->ReprojSourceFramerateLimit.value_or_default();
         if (ImGui::InputFloat("Source FPS cap##reproj-live", &sourceCap, 1.0f, 10.0f, "%.1f Hz"))
             config->ReprojSourceFramerateLimit = std::clamp(sourceCap, 0.0f, 1000.0f);
@@ -4219,8 +4221,25 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::InputFloat("Late sample lead##reproj-live", &latchLead, 0.5f, 1.0f, "%.1f ms"))
             config->ReprojLateSampleLead = std::clamp(latchLead, 0.0f, 20.0f);
         ShowHelpMarker("ms before the present deadline to release the deferred latch and sample "
-                       "input. Values <= 0.5 are treated as auto (fixed 3 ms default). Smaller = "
-                       "fresher input; too small misses display slots.");
+                       "input. auto/0 = fixed 3 ms (recommended). Smaller = fresher input; "
+                       "too small misses display slots.");
+        float safeBudget = config->ReprojSafeWarpBudget.value_or_default();
+        if (ImGui::InputFloat("Safe warp budget##reproj-live", &safeBudget, 1.0f, 4.0f, "%.1f px"))
+            config->ReprojSafeWarpBudget = std::clamp(safeBudget, 0.0f, 32.0f);
+        ShowHelpMarker("E3 maximum-safe-warp edge budget. 0 = off (full warp, edges may smear). "
+                       "12 px = default (recommended). 16-20 = looser fast flicks. "
+                       "Watch scale/limited/rot on the Reproj: health line.");
+        float maxStep = config->ReprojMaxTimeStep.value_or_default();
+        if (ImGui::InputFloat("Max warp step##reproj-live", &maxStep, 0.5f, 0.5f, "%.2f frames"))
+            config->ReprojMaxTimeStep = std::clamp(maxStep, 1.0f, 4.0f);
+        ShowHelpMarker("Absolute clamp on rotation extrapolation in frames. Bounds recovery after "
+                       "hitches without hitch-hold. 2.5 = default (recommended). "
+                       "Lower to 1.5 if anchor-switch snaps appear.");
+        bool edgeDebug = config->ReprojDebugView.value_or_default();
+        if (ImGui::Checkbox("Edge debug view##reproj-live", &edgeDebug))
+            config->ReprojDebugView = edgeDebug;
+        ShowHelpMarker("E2 diagnostic: paints filter-unsafe warp pixels magenta before HUD composite. "
+                       "Visualization only. Off for normal play (recommended).");
         float sensX = config->ReprojMouseSensitivityX.value_or_default();
         if (ImGui::InputFloat("Mouse sens X##reproj-live", &sensX, 0.0001f, 0.001f, "%.5f"))
             config->ReprojMouseSensitivityX = std::clamp(sensX, 0.0f, 0.00065f);

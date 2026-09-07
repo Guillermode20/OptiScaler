@@ -20,14 +20,20 @@ class EdgeLimiterTests(unittest.TestCase):
         return source.split("WarpCoverage EvaluateWarpCoverage", 1)[1].split(
             "ReprojVec3 RotateReprojVec3", 1)[0]
 
-    def test_validity_uses_an_edge_width_budget(self):
+    def test_validity_uses_a_configurable_edge_width_budget(self):
         evaluator = self._evaluator()
-        self.assertIn("kEdgeOverrunBudgetPx", evaluator)
+        self.assertIn("ReprojSafeWarpBudget", evaluator)
+        self.assertIn("edgeBudgetPx", evaluator)
         self.assertIn("budgetU", evaluator)
         self.assertIn("budgetV", evaluator)
         # Invalid means beyond budget, not merely outside the inset rect.
         self.assertIn("left > budgetU || right > budgetU || top > budgetV || bottom > budgetV", evaluator)
         self.assertNotIn("left > 0.0f || right > 0.0f || top > 0.0f || bottom > 0.0f", evaluator)
+
+    def test_zero_budget_disables_limiting_but_keeps_telemetry(self):
+        evaluator = self._evaluator()
+        self.assertIn("coverage.invalidSamples = 0", evaluator)
+        self.assertIn("edgeBudgetPx <= 0.0f", evaluator)
 
     def test_raw_overruns_still_reported_for_telemetry(self):
         # The 1 Hz line must keep showing the true coverage demand so the

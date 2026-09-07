@@ -1,6 +1,6 @@
 # async-simple ongoing plan
 
-Updated: 2026-09-06
+Updated: 2026-09-07
 Branch: `async-simple`
 Primary live target: Kingdom Come: Deliverance II (KCD2)
 Regression target: Deep Rock Galactic (DRG)
@@ -97,6 +97,8 @@ Acceptance: no offscreen coordinate can turn into a stretched last-row/last-colu
 
 Status (2026-09-06): code done, live validation pending. `RPD.hlsl` / `RP_Common.h` / `RPD_Shader.h`(+`.cso`) now use a half-texel-inset valid rect with the feather measured from the inset edge, and `DebugView == 1` paints invalid coverage magenta ahead of the UI composite (`debugView == 0` in normal builds). Pinned by `test_rpd_edge_validity_is_filter_safe_with_debug_view`. Still needs the E0 `DebugView=1` footage check in KCD2.
 
+Controls (2026-09-07): `[AsyncTimewarp] DebugView` (default off) plus menu `Edge debug view` now drive `RP_Constants::debugView` instead of the hardcoded 0. Visualization only; recommended off for play, on for short edge footage.
+
 ### E3. Add maximum-safe-warp limiting
 
 Prevent the final rotation from exposing more source area than the current packet actually contains.
@@ -130,6 +132,8 @@ at `s=1`, large flicks clamp to partial, raw overruns still report the true
 demand, and identity verdicts are float-stable. Pinned by
 `tests/reprojection/test_edge_limiter.py`. Re-run the E0 motion sweep and
 expect `scale=1.000 limited=0` on gentle pans with bounded strips on flicks.
+
+Controls (2026-09-07): `[AsyncTimewarp] SafeWarpBudget` (default 12 px, 0 = off/full warp, clamp 0..32) plus menu `Safe warp budget` replace the hardcoded 12 px constant. `0` forces `invalidSamples = 0` so the binary search is skipped. Recommended 12; 0 only to diagnose floatiness vs edge smear; 16-20 for looser flicks. `[AsyncTimewarp] MaxTimeStep` (default 2.5 frames, clamp 1.0..4.0) plus menu `Max warp step` replace the hardcoded 2.5 cap. Recommended 2.5; 1.5 if anchor-switch snaps appear.
 
 ### E4. Remove the ineffective KCD2 reserve
 

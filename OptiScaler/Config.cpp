@@ -180,7 +180,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FSRFGEnableWatermark.set_from_config(readBool("FSRFG", "EnableWatermark"));
         }
 
-        // Async Timewarp intentionally exposes only its essential controls.
+        // Async Timewarp: fixed pipeline plus measured edge/extrapolation diagnostics.
         {
             ReprojEnabled.set_from_config(readBool("AsyncTimewarp", "Enabled"));
             ReprojTargetRefresh.set_from_config(readFloat("AsyncTimewarp", "TargetRefresh"));
@@ -191,6 +191,11 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojHudIsolation.set_from_config(readBool("AsyncTimewarp", "HudIsolation"));
             ReprojContentInterpolation.set_from_config(readBool("AsyncTimewarp", "ContentInterpolation"));
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
+            if (auto setting = readFloat("AsyncTimewarp", "SafeWarpBudget"); setting.has_value())
+                ReprojSafeWarpBudget.set_from_config(std::clamp(setting.value(), 0.0f, 32.0f));
+            if (auto setting = readFloat("AsyncTimewarp", "MaxTimeStep"); setting.has_value())
+                ReprojMaxTimeStep.set_from_config(std::clamp(setting.value(), 1.0f, 4.0f));
+            ReprojDebugView.set_from_config(readBool("AsyncTimewarp", "DebugView"));
         }
 
         // OptiFG
@@ -1027,6 +1032,12 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojContentInterpolation.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "LateSampleLead",
                      GetFloatValue(Instance()->ReprojLateSampleLead.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "SafeWarpBudget",
+                     GetFloatValue(Instance()->ReprojSafeWarpBudget.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "MaxTimeStep",
+                     GetFloatValue(Instance()->ReprojMaxTimeStep.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "DebugView",
+                     GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
     }
 
     // XeFG output

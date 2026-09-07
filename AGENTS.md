@@ -111,6 +111,9 @@ The active `[AsyncTimewarp]` controls include:
 - `LateSampleLead`, default fixed 3 ms when automatic/default value is selected
 - `HudIsolation`
 - `ContentInterpolation`, default off
+- `SafeWarpBudget`, default 12 px, 0 = off (full warp)
+- `MaxTimeStep`, default 2.5 frames, clamp 1.0-4.0
+- `DebugView`, default off (magenta invalid coverage)
 
 Do not invent a new control before checking `Config.h`, `Config.cpp`, `OptiScaler.ini`, and the in-game menu wiring.
 

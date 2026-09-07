@@ -49,21 +49,27 @@ FGOutput=asynctimewarp
 
 [AsyncTimewarp]
 Enabled=true
-MaxPoseAgeMs=50
-
-[Reproj]
-; Experimental worker-owned presentation on the real main swapchain; false keeps the synchronous fallback
-Async=false
-; 1 = depth-aware, 2 = rotation-only camera timewarp (0 is legacy MV diagnostics)
-Mode=1
-; 0 uses FramerateLimit, then the active monitor refresh
-TargetRefresh=0
-; Safe default: one extra warp per real frame
-MaxWarpFrames=1
-UseDepth=true
-RotationOnly=false
-; Diagnostic: black out the outer 25% per side and suppress separately composited UI
-CenterCropDebug=false
+# 0 = active display refresh (recommended); 120 for controlled 60->120 A/B.
+TargetRefresh=auto
+# 0 = uncapped (recommended); 60 only for the 60->120 A/B test.
+SourceFramerateLimit=0
+# Radians per raw-mouse count; 0 = auto-tracked (recommended).
+MouseSensitivityX=auto
+MouseSensitivityY=auto
+# EMA on camera angular velocity; 0 = off (recommended).
+Smoothing=auto
+# KCD2 Scaleform HUD stays unwarped (recommended true).
+HudIsolation=auto
+# One FSR midpoint; experimental, default off.
+ContentInterpolation=false
+# ms before present to release the latch; auto = fixed 3 ms (recommended).
+LateSampleLead=auto
+# E3 edge budget in px; 0 = off/full warp, 12 = default (recommended).
+SafeWarpBudget=auto
+# Absolute extrapolation clamp in frames; 2.5 = default (recommended).
+MaxTimeStep=auto
+# E2 magenta invalid-coverage view; visualization only, default off.
+DebugView=auto
 ```
 
 `Async=true` uses a worker-owned presenter on the real main swapchain, keeping warp writes

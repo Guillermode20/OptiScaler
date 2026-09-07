@@ -426,10 +426,11 @@ WarpCoverage EvaluateWarpCoverage(const RP_Constants& constants, ReprojVec3 xRow
     // binary search toward a smaller rotation. Raw overrun magnitudes are
     // still recorded so telemetry keeps reporting the true coverage demand.
     // The budget also dwarfs float noise, which previously flipped identity
-    // warps between valid/invalid across seconds.
-    constexpr float kEdgeOverrunBudgetPx = 12.0f;
-    const float budgetU = kEdgeOverrunBudgetPx / constants.displayWidth;
-    const float budgetV = kEdgeOverrunBudgetPx / constants.displayHeight;
+    // warps between valid/invalid across seconds. SafeWarpBudget <= 0 disables
+    // limiting (full warp); otherwise clamped 0..32 px in Config.
+    const float edgeBudgetPx = std::clamp(Config::Instance()->ReprojSafeWarpBudget.value_or_default(), 0.0f, 32.0f);
+    const float budgetU = edgeBudgetPx / constants.displayWidth;
+    const float budgetV = edgeBudgetPx / constants.displayHeight;
     const float validMinX = 0.5f / constants.displayWidth;
     const float validMinY = 0.5f / constants.displayHeight;
     const float validMaxX = 1.0f - validMinX;
@@ -478,6 +479,8 @@ WarpCoverage EvaluateWarpCoverage(const RP_Constants& constants, ReprojVec3 xRow
             sample(1.0f, fraction);
         }
     }
+    if (edgeBudgetPx <= 0.0f)
+        coverage.invalidSamples = 0;
     return coverage;
 }
 
@@ -866,7 +869,7 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.invertMV = 0;
     cb.jitterCancelled = 0;
     cb.mode = 2;
-    cb.debugView = 0;
+    cb.debugView = Config::Instance()->ReprojDebugView.value_or_default() ? 1u : 0u;
     cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
