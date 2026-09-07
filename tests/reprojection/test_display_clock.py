@@ -385,6 +385,8 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("kBoundarySamples = 16", reproj)
         self.assertIn("validMinX", coverage)
         self.assertIn("overrunLeft", coverage)
+        self.assertIn("outputNdc", coverage)
+        self.assertNotIn("DotReprojVec3(zRow, pixel)", coverage)
         self.assertIn("for (int i = 0; i < 8; ++i)", prepare)
         self.assertIn("RotationAxisAngle", prepare)
         self.assertIn("coverage.safeScale = low", prepare)

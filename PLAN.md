@@ -82,6 +82,12 @@ activations. It does not add GPU readback, per-slot logging, a game-thread
 wait, or a queue/fence dependency. Collect the E0 0/4/8/12% footage/log sweep
 before selecting a production guard band.
 
+Correction (2026-09-07): the first live build evaluated the NDC homography
+with pixel coordinates, falsely reporting coverage loss and clamping every
+late rotation to zero. The evaluator now converts the perimeter pixel centers
+to NDC before testing. The affected artifact is invalid for feel evaluation;
+rebuild before resuming E0/E3 testing.
+
 ### E2. Verify shader validity and filtering
 
 Audit `RPD` so validity is determined from the raw reprojected coordinate before any clamp/saturate operation. Sampling coordinates may be clamped for safety, but a clamped coordinate must never be treated as valid warp coverage.

@@ -422,16 +422,22 @@ WarpCoverage EvaluateWarpCoverage(const RP_Constants& constants, ReprojVec3 xRow
     const float validMaxY = 1.0f - validMinY;
     const auto sample = [&](float x, float y)
     {
-        const ReprojVec3 pixel { 0.5f + x * (constants.displayWidth - 1.0f),
-                                 0.5f + y * (constants.displayHeight - 1.0f), 1.0f };
-        const float denominator = DotReprojVec3(zRow, pixel);
+        const float pixelX = 0.5f + x * (constants.displayWidth - 1.0f);
+        const float pixelY = 0.5f + y * (constants.displayHeight - 1.0f);
+        // BuildRotationRows produces output-NDC -> source-UV rows. The shader
+        // later folds pixel centers into those rows, but the CPU coverage test
+        // must evaluate the original NDC representation rather than passing
+        // pixel coordinates directly to it.
+        const ReprojVec3 outputNdc { pixelX * (2.0f / constants.displayWidth) - 1.0f,
+                                    1.0f - pixelY * (2.0f / constants.displayHeight), 1.0f };
+        const float denominator = DotReprojVec3(zRow, outputNdc);
         if (denominator <= 1.0e-6f || !std::isfinite(denominator))
         {
             ++coverage.invalidSamples;
             return;
         }
-        const float u = DotReprojVec3(xRow, pixel) / denominator;
-        const float v = DotReprojVec3(yRow, pixel) / denominator;
+        const float u = DotReprojVec3(xRow, outputNdc) / denominator;
+        const float v = DotReprojVec3(yRow, outputNdc) / denominator;
         const float left = std::max(0.0f, validMinX - u);
         const float right = std::max(0.0f, u - validMaxX);
         const float top = std::max(0.0f, validMinY - v);
