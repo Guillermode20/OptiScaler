@@ -975,9 +975,14 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
         // CryEngine's culling pass has already computed an authoritative camera pose
         // for the next frame. Use it directly as the target orientation, and compute
         // only the residual mouse motion from that latest pose timestamp to now!
-        lateBaseRight = { latestCamera.right[0], latestCamera.right[1], latestCamera.right[2] };
-        lateBaseUp = { latestCamera.up[0], latestCamera.up[1], latestCamera.up[2] };
-        lateBaseForward = { latestCamera.forward[0], latestCamera.forward[1], latestCamera.forward[2] };
+        const auto* targetBasis = (latestCamera.biasYaw != 0.0f) ? latestCamera.unbiasedRight : latestCamera.right;
+        const auto* targetBasisUp = (latestCamera.biasYaw != 0.0f) ? latestCamera.unbiasedUp : latestCamera.up;
+        const auto* targetBasisForward =
+            (latestCamera.biasYaw != 0.0f) ? latestCamera.unbiasedForward : latestCamera.forward;
+
+        lateBaseRight = { targetBasis[0], targetBasis[1], targetBasis[2] };
+        lateBaseUp = { targetBasisUp[0], targetBasisUp[1], targetBasisUp[2] };
+        lateBaseForward = { targetBasisForward[0], targetBasisForward[1], targetBasisForward[2] };
         pBaseRight = &lateBaseRight;
         pBaseUp = &lateBaseUp;
         pBaseForward = &lateBaseForward;
@@ -990,6 +995,16 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
     }
     else
     {
+        if (content.biasYaw != 0.0f)
+        {
+            lateBaseRight = { content.unbiasedRight[0], content.unbiasedRight[1], content.unbiasedRight[2] };
+            lateBaseUp = { content.unbiasedUp[0], content.unbiasedUp[1], content.unbiasedUp[2] };
+            lateBaseForward = { content.unbiasedForward[0], content.unbiasedForward[1], content.unbiasedForward[2] };
+            pBaseRight = &lateBaseRight;
+            pBaseUp = &lateBaseUp;
+            pBaseForward = &lateBaseForward;
+        }
+
         // Fallback when no newer rendered pose exists: rotate from this
         // content's own pose by the mouse motion since this content's own
         // baseline. Generated midpoints are older than their real anchor, so
@@ -1000,7 +1015,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
         deltaY = static_cast<double>(current.TotalY - content.sourceMouseY);
     }
 
-    if (deltaX == 0.0 && deltaY == 0.0 && !haveLateCamera)
+    if (deltaX == 0.0 && deltaY == 0.0 && !haveLateCamera && content.biasYaw == 0.0f)
         return false;
 
     float sensX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
@@ -1425,6 +1440,20 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourceCutGeneration = haveKcd2Snapshots ? currentCamera.cutGeneration : 0;
     packet.cameraNear = haveKcd2Snapshots ? currentCamera.nearPlane : 0.0f;
     packet.cameraFar = haveKcd2Snapshots ? currentCamera.farPlane : 0.0f;
+    if (haveKcd2Snapshots && currentCamera.biasYaw != 0.0f)
+    {
+        std::memcpy(packet.unbiasedRight, currentCamera.unbiasedRight, sizeof(packet.unbiasedRight));
+        std::memcpy(packet.unbiasedUp, currentCamera.unbiasedUp, sizeof(packet.unbiasedUp));
+        std::memcpy(packet.unbiasedForward, currentCamera.unbiasedForward, sizeof(packet.unbiasedForward));
+        packet.biasYaw = currentCamera.biasYaw;
+    }
+    else
+    {
+        std::memcpy(packet.unbiasedRight, packet.constants.cameraRight, sizeof(packet.unbiasedRight));
+        std::memcpy(packet.unbiasedUp, packet.constants.cameraUp, sizeof(packet.unbiasedUp));
+        std::memcpy(packet.unbiasedForward, packet.constants.cameraForward, sizeof(packet.unbiasedForward));
+        packet.biasYaw = 0.0f;
+    }
     packet.invertedDepth = !!(_constants.flags & FG_Flags::InvertedDepth);
     packet.hdr = !!(_constants.flags & FG_Flags::Hdr);
     packet.jitteredMotionVectors = !!(_constants.flags & FG_Flags::JitteredMVs);
@@ -1800,6 +1829,16 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
     auto constants = content.constants;
     constants.timeStep = timeStep;
+    const ReprojVec3 contentUnbiasedRight { content.unbiasedRight[0], content.unbiasedRight[1],
+                                            content.unbiasedRight[2] };
+    const ReprojVec3 contentUnbiasedUp { content.unbiasedUp[0], content.unbiasedUp[1], content.unbiasedUp[2] };
+    const ReprojVec3 contentUnbiasedForward { content.unbiasedForward[0], content.unbiasedForward[1],
+                                              content.unbiasedForward[2] };
+    const bool hasUnbiased = content.biasYaw != 0.0f;
+    const ReprojVec3* pDefaultTargetRight = hasUnbiased ? &contentUnbiasedRight : nullptr;
+    const ReprojVec3* pDefaultTargetUp = hasUnbiased ? &contentUnbiasedUp : nullptr;
+    const ReprojVec3* pDefaultTargetForward = hasUnbiased ? &contentUnbiasedForward : nullptr;
+
     const bool deferredLateLatch = _lateLatchFence != nullptr && _presentQueue != nullptr;
     if (!deferredLateLatch)
     {

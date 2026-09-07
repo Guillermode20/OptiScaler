@@ -4246,6 +4246,13 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->ReprojDebugView = edgeDebug;
         ShowHelpMarker("E2 diagnostic: paints filter-unsafe warp pixels magenta before HUD composite. "
                        "Visualization only. Off for normal play (recommended).");
+        bool predictiveProbe = config->ReprojPredictiveProbe.value_or_default();
+        if (ImGui::Checkbox("Predictive render probe##reproj-live", &predictiveProbe))
+            config->ReprojPredictiveProbe = predictiveProbe;
+        ShowHelpMarker("Opt-in 1-degree yaw probe for predictive render-pose steering.\n"
+                       "Biases the KCD2 render camera by +1 deg yaw, then applies an inverse\n"
+                       "-1 deg residual warp so the presented center returns to original.\n"
+                       "Off by default.");
         float sensX = config->ReprojMouseSensitivityX.value_or_default();
         if (ImGui::InputFloat("Mouse sens X##reproj-live", &sensX, 0.0001f, 0.001f, "%.5f"))
             config->ReprojMouseSensitivityX = std::clamp(sensX, 0.0f, 0.00065f);

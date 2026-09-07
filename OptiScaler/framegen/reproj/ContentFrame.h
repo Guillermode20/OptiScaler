@@ -33,6 +33,10 @@ struct ContentFrame
     std::int64_t sourceMouseY = 0;
     double sourceMouseTimestamp = 0.0;
     std::uint64_t sourceCutGeneration = 0;
+    float unbiasedRight[3] {};
+    float unbiasedUp[3] {};
+    float unbiasedForward[3] {};
+    float biasYaw = 0.0f;
     float cameraNear = 0.0f;
     float cameraFar = 0.0f;
     bool invertedDepth = false;

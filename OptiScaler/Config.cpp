@@ -197,6 +197,7 @@ bool Config::Reload(std::filesystem::path iniPath)
                 ReprojMaxTimeStep.set_from_config(std::clamp(setting.value(), 1.0f, 4.0f));
             ReprojHistoryBorderFallback.set_from_config(readBool("AsyncTimewarp", "HistoryBorderFallback"));
             ReprojDebugView.set_from_config(readBool("AsyncTimewarp", "DebugView"));
+            ReprojPredictiveProbe.set_from_config(readBool("AsyncTimewarp", "PredictiveProbe"));
         }
 
         // OptiFG
@@ -1041,6 +1042,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojHistoryBorderFallback.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "DebugView",
                      GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "PredictiveProbe",
+                     GetBoolValue(Instance()->ReprojPredictiveProbe.value_for_config()).c_str());
     }
 
     // XeFG output

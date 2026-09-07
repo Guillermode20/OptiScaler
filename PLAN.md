@@ -201,6 +201,14 @@ fresh target. Keep HUD isolation last, keep the game thread GPU-wait-free,
 disable `ContentInterpolation` during initial validation, reject unknown game
 builds, and fail closed to the unmodified camera path on any ambiguity.
 
+Status (2026-09-08): implemented first diagnostic probe.
+- The gameplay frustum caller probe in commit `9dcd5034` reported caller RVA `0x7F12E6`. Reverse engineering `WHGame.dll` located `CView::Update` at `0x7F0EC0`. It performs two calls to `CCamera::UpdateFrustumPlanes`: the first via `CCamera::SetFrustum` (`0x7F12E6`) before camera matrix computation, and the second directly at `0x7F1A63` (caller RVA `0x7F1A68`) immediately after writing camera matrix rows `0x00..0x2F` into `CCamera` (`cview + 0xE8`).
+- Added opt-in knob `[AsyncTimewarp] PredictiveProbe=auto` (`ReprojPredictiveProbe`, exposed in in-game menu).
+- When active on gameplay cameras at caller RVA `0x7F1A68`, applies a fixed +1.0 degree yaw bias around CryEngine world Z (`[0, 0, 1]`) directly to the camera matrix before `UpdateFrustumPlanes` updates frustum culling. Because `CView::Update` reconstructs the camera matrix each frame from internal view parameters, game state is not permanently mutated.
+- Packet captures both the biased render basis and the unbiased target basis.
+- Presenter `ApplyLateInput` detects `biasYaw != 0` and warps from the biased render basis to the unbiased target pose, producing an exact -1.0 degree residual yaw warp that restores the presented center while shifting genuine rasterized coverage.
+- Next step: live validate in KCD2 with `PredictiveProbe=true` and `ContentInterpolation=false`. Confirm log message, stable center/crosshair, and edge shift.
+
 ### E6. Tiny spatial fallback for the final gap
 
 If a few invalid pixels remain after current/history sampling, use a deliberately small peripheral fallback. Candidate order:
