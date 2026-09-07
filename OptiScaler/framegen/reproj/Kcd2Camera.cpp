@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstring>
 
+#pragma intrinsic(_ReturnAddress)
+
 namespace Kcd2Camera
 {
 namespace
@@ -28,6 +30,7 @@ std::atomic<int> g_initState { 0 };
 std::atomic<uint64_t> g_sequence { 0 };
 std::atomic<uint64_t> g_poseSequence { 0 };
 std::atomic<uint64_t> g_cutGeneration { 1 };
+std::atomic<bool> g_gameplayCallerLogged { false };
 
 struct Pose
 {
@@ -215,6 +218,13 @@ void PublishPose(uintptr_t camera)
 
 uintptr_t __fastcall Hook(uintptr_t camera)
 {
+    if (IsGameplayCamera(camera) && !g_gameplayCallerLogged.exchange(true, std::memory_order_relaxed))
+    {
+        const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"WHGame.dll"));
+        const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
+        LOG_INFO("KCD2 camera: gameplay frustum caller RVA={:X} absolute={:X}", caller >= module ? caller - module : 0,
+                 caller);
+    }
     PublishPose(camera);
     return g_original(camera);
 }

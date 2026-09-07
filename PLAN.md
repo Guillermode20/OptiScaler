@@ -170,6 +170,37 @@ Reject history across camera cuts, FOV/aspect changes, stale resources, or exces
 
 Moving NPCs, weapons, foliage, particles, lighting, and exposure changes can make historical pixels wrong, so history fill must remain a fallback rather than the baseline warp.
 
+Live decision (2026-09-07): rejected. The KCD2 run never produced an
+eligible history sample (`hist=0/0/0/0`), and temporal color cannot solve the
+dominant sustained-turn case even if eligibility is repaired: the newly
+revealed leading edge lies outside every older view. Remove E5 after the
+replacement experiment proves viable rather than spending another iteration
+on history thresholds.
+
+### E5 replacement: predictive render-pose steering
+
+Move source coverage toward the expected scanout pose before KCD2 renders,
+then retain the existing late rotation only as a residual correction. This is
+the same broad ordering disclosed for NVIDIA Reflex Frame Warp: predict the
+render camera, render world/G-buffer content near that pose, then correct to
+the newest input at display time.
+
+Implementation is gated on direct captured-image proof. The first diagnostic
+records the live gameplay `CView` caller of the existing
+`CCamera::UpdateFrustumPlanes` observer. Locate an earlier render-view
+construction point from that call path and add a fixed, opt-in one-degree yaw
+probe. The probe passes only if it shifts genuine captured world coverage and
+culling while an inverse final warp restores the original presented center.
+It fails if it merely crops/shifts the completed image or mutates gameplay
+camera state.
+
+Only after that proof should the probe become bounded prediction from the
+existing passive raw-input totals and rendered-camera velocity. Store the
+exact steered render basis per packet and late-warp from that basis to the
+fresh target. Keep HUD isolation last, keep the game thread GPU-wait-free,
+disable `ContentInterpolation` during initial validation, reject unknown game
+builds, and fail closed to the unmodified camera path on any ambiguity.
+
 ### E6. Tiny spatial fallback for the final gap
 
 If a few invalid pixels remain after current/history sampling, use a deliberately small peripheral fallback. Candidate order:
