@@ -414,6 +414,22 @@ WarpCoverage EvaluateWarpCoverage(const RP_Constants& constants, ReprojVec3 xRow
     WarpCoverage coverage {};
     if (constants.displayWidth == 0 || constants.displayHeight == 0)
         return coverage;
+    // E3 edge-width budget: any real rotation moves uncovered content in at
+    // one screen edge (roughly 22 px per degree at 1280 px focal length), so a
+    // zero-overrun validity policy can only ever return safeScale 0 for real
+    // motion. Live 2026-09-07 confirmed it: scale=0.000 with limited~=all
+    // slots on every motion second, i.e. the warp was fully neutralized and
+    // frames displayed 25-45 ms stale with no correction (floaty, worse than
+    // native). Samples may therefore exceed the filter-safe rect by up to
+    // kEdgeOverrunBudgetPx: the shader feathers the first 2 px and the rest
+    // is a bounded lag band. Overruns beyond the budget still drive the
+    // binary search toward a smaller rotation. Raw overrun magnitudes are
+    // still recorded so telemetry keeps reporting the true coverage demand.
+    // The budget also dwarfs float noise, which previously flipped identity
+    // warps between valid/invalid across seconds.
+    constexpr float kEdgeOverrunBudgetPx = 12.0f;
+    const float budgetU = kEdgeOverrunBudgetPx / constants.displayWidth;
+    const float budgetV = kEdgeOverrunBudgetPx / constants.displayHeight;
     const float validMinX = 0.5f / constants.displayWidth;
     const float validMinY = 0.5f / constants.displayHeight;
     const float validMaxX = 1.0f - validMinX;
@@ -444,7 +460,9 @@ WarpCoverage EvaluateWarpCoverage(const RP_Constants& constants, ReprojVec3 xRow
         coverage.overrunRight = std::max(coverage.overrunRight, right);
         coverage.overrunTop = std::max(coverage.overrunTop, top);
         coverage.overrunBottom = std::max(coverage.overrunBottom, bottom);
-        coverage.invalidSamples += left > 0.0f || right > 0.0f || top > 0.0f || bottom > 0.0f;
+        // Validity is budget-relative (see above); the recorded overruns stay
+        // raw so the 1 Hz line keeps showing the true coverage demand.
+        coverage.invalidSamples += left > budgetU || right > budgetU || top > budgetV || bottom > budgetV;
     };
     constexpr float fractions[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
     for (float fraction : fractions)
@@ -619,7 +637,8 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, bool inputLatched
         if (haveAxis)
         {
             // E3: clamp the requested final rotation to the largest sampled
-            // filter-safe transform. This is presenter-side CPU work only.
+            // transform within the edge-width budget (see EvaluateWarpCoverage).
+            // This is presenter-side CPU work only.
             float low = 0.0f;
             float high = 1.0f;
             for (int i = 0; i < 8; ++i)

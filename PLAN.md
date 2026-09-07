@@ -117,12 +117,19 @@ Acceptance:
 - large flicks degrade by reducing warp magnitude, not by producing a large smeared/black/lagging strip;
 - the limiter never changes anchor ownership, queue topology, or game-thread behaviour.
 
-Status (2026-09-07): code done, live validation pending. The same fixed
-perimeter test drives an eight-iteration presenter-side binary search over the
-relative camera rotation's axis-angle scale. The displayed warp uses the
-largest filter-safe scale; near-180-degree discontinuities fail closed to the
-source pose. The telemetry retains the *requested* coverage demand so the
-limiter cannot hide the underlying deficit.
+Status (2026-09-07, revised same day): live telemetry proved the
+zero-overrun policy wrong. Every motion second showed `scale=0.000` with
+`limited`~=all slots (`late=120/120` but the applied warp clamped to
+identity), i.e. the warp was fully neutralized while frames displayed
+25-45 ms stale — floaty and worse than native. Root cause: any real rotation
+moves uncovered content in at one edge (~22 px/degree), so demanding zero
+invalid boundary samples can only ever return `s=0`; the policy assumed the
+removed render reserve would supply margin that does not exist. The validity
+criterion is now an edge-width budget (12 px, per-axis): ordinary turns pass
+at `s=1`, large flicks clamp to partial, raw overruns still report the true
+demand, and identity verdicts are float-stable. Pinned by
+`tests/reprojection/test_edge_limiter.py`. Re-run the E0 motion sweep and
+expect `scale=1.000 limited=0` on gentle pans with bounded strips on flicks.
 
 ### E4. Remove the ineffective KCD2 reserve
 
