@@ -368,12 +368,30 @@ class ReprojectionTests(unittest.TestCase):
         # The warp mapping consumes the per-packet guard, never the hook
         # global: the global may describe a later frustum build by display.
         reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        prepare = reproj.split("void PrepareRotationConstants(", 1)[1].split("} // namespace", 1)[0]
+        prepare = reproj.split("WarpCoverage PrepareRotationConstants(", 1)[1].split("} // namespace", 1)[0]
         self.assertIn("guardFraction", prepare)
         self.assertNotIn("RenderReserveFraction()", prepare)
         self.assertIn("packet.renderReserveFraction", reproj.split(
             "bool AReproj_Dx12::ApplyLateInput", 1)[1].split(
             "void AReproj_Dx12::UpdateMouseSensitivity", 1)[0])
+
+    def test_edge_limiter_uses_raw_perimeter_coverage_without_queue_changes(self):
+        root = Path(__file__).resolve().parents[2]
+        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
+        header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
+        coverage = reproj.split("WarpCoverage EvaluateWarpCoverage", 1)[1].split(
+            "ReprojVec3 RotateReprojVec3", 1)[0]
+        prepare = reproj.split("WarpCoverage PrepareRotationConstants(", 1)[1].split("} // namespace", 1)[0]
+        self.assertIn("kBoundarySamples = 16", reproj)
+        self.assertIn("validMinX", coverage)
+        self.assertIn("overrunLeft", coverage)
+        self.assertIn("for (int i = 0; i < 8; ++i)", prepare)
+        self.assertIn("RotationAxisAngle", prepare)
+        self.assertIn("coverage.safeScale = low", prepare)
+        self.assertIn("RecordWarpCoverage", reproj)
+        self.assertIn("edge={}/{} scale={:.3f}", reproj)
+        self.assertNotIn("_gameCommandQueue->Wait(_lateLatchFence", reproj)
+        self.assertNotIn("_computeQueue", header)
 
     def test_async_warp_dispatches_on_the_presenter_direct_queue(self):
         # async-simple P7: DispatchPacketWarp records the warp + copy-to-

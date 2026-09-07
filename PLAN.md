@@ -74,6 +74,14 @@ For each requested rotation, use the same CPU-baked homography as the warp and e
 
 Aggregate into the existing 1 Hz health line or similarly cheap counters. The goal is to learn the 95th and 99th percentile reserve actually required in KCD2 rather than tuning by feel alone.
 
+Status (2026-09-07): code done, live validation pending. The presenter now
+samples a fixed 16-point output perimeter from the CPU-baked homography and
+reports the requested raw-UV coverage demand once per second: invalid sample
+count, per-edge maximum overrun, requested rotation, safe scale, and limiter
+activations. It does not add GPU readback, per-slot logging, a game-thread
+wait, or a queue/fence dependency. Collect the E0 0/4/8/12% footage/log sweep
+before selecting a production guard band.
+
 ### E2. Verify shader validity and filtering
 
 Audit `RPD` so validity is determined from the raw reprojected coordinate before any clamp/saturate operation. Sampling coordinates may be clamped for safety, but a clamped coordinate must never be treated as valid warp coverage.
@@ -105,6 +113,13 @@ Acceptance:
 - ordinary mouse motion is normally full-warp;
 - large flicks degrade by reducing warp magnitude, not by producing a large smeared/black/lagging strip;
 - the limiter never changes anchor ownership, queue topology, or game-thread behaviour.
+
+Status (2026-09-07): code done, live validation pending. The same fixed
+perimeter test drives an eight-iteration presenter-side binary search over the
+relative camera rotation's axis-angle scale. The displayed warp uses the
+largest filter-safe scale; near-180-degree discontinuities fail closed to the
+source pose. The telemetry retains the *requested* coverage demand so reserve
+tuning is not hidden by the limiter.
 
 ### E4. Tune the real KCD2 guard band
 

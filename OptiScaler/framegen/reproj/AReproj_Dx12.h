@@ -190,6 +190,8 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool HasFreshCameraPose(int fIndex, float* ageMs = nullptr) const;
     void RecordRealFrame();
     void RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs);
+    void RecordWarpCoverage(float safeScale, float requestedDegrees, uint32_t invalidSamples, uint32_t sampleCount,
+                            float overrunLeft, float overrunRight, float overrunTop, float overrunBottom);
     void LogMetricsIfDue();
 
     double _metricsTimestamp = 0.0;
@@ -207,6 +209,15 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsDirectCaptures = 0;
     uint32_t _metricsCaptureNotReady = 0;
     uint32_t _metricsGeneratedDisplays = 0;
+    uint32_t _metricsWarpCoverageSamples = 0;
+    uint32_t _metricsWarpCoverageInvalid = 0;
+    uint32_t _metricsSafeWarpLimited = 0;
+    float _metricsWarpCoverageOverrunLeft = 0.0f;
+    float _metricsWarpCoverageOverrunRight = 0.0f;
+    float _metricsWarpCoverageOverrunTop = 0.0f;
+    float _metricsWarpCoverageOverrunBottom = 0.0f;
+    float _metricsRequestedWarpMaxDegrees = 0.0f;
+    float _metricsSafeWarpMinScale = 1.0f;
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
 

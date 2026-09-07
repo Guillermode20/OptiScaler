@@ -333,6 +333,132 @@ ReprojVec3 CrossReprojVec3(ReprojVec3 a, ReprojVec3 b)
     return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
 }
 
+struct WarpCoverage
+{
+    static constexpr uint32_t kBoundarySamples = 16;
+    float safeScale = 1.0f;
+    float requestedDegrees = 0.0f;
+    uint32_t invalidSamples = 0;
+    float overrunLeft = 0.0f;
+    float overrunRight = 0.0f;
+    float overrunTop = 0.0f;
+    float overrunBottom = 0.0f;
+};
+
+// The relative world-space rotation maps each source camera basis vector to
+// its target counterpart. Scaling this axis-angle is slerp(identity, R, s).
+bool RotationAxisAngle(ReprojVec3 sourceRight, ReprojVec3 sourceUp, ReprojVec3 sourceForward,
+                       ReprojVec3 targetRight, ReprojVec3 targetUp, ReprojVec3 targetForward, ReprojVec3* axis,
+                       float* angle)
+{
+    const ReprojVec3 source[3] = { sourceRight, sourceUp, sourceForward };
+    const ReprojVec3 target[3] = { targetRight, targetUp, targetForward };
+    const float sourceComponents[3][3] = { { source[0].x, source[0].y, source[0].z },
+                                           { source[1].x, source[1].y, source[1].z },
+                                           { source[2].x, source[2].y, source[2].z } };
+    const float targetComponents[3][3] = { { target[0].x, target[0].y, target[0].z },
+                                           { target[1].x, target[1].y, target[1].z },
+                                           { target[2].x, target[2].y, target[2].z } };
+    float rotation[3][3] {};
+    for (int row = 0; row < 3; ++row)
+        for (int column = 0; column < 3; ++column)
+            for (int basis = 0; basis < 3; ++basis)
+                rotation[row][column] += targetComponents[basis][row] * sourceComponents[basis][column];
+
+    const float cosine = std::clamp((rotation[0][0] + rotation[1][1] + rotation[2][2] - 1.0f) * 0.5f, -1.0f, 1.0f);
+    *angle = std::acos(cosine);
+    if (!std::isfinite(*angle))
+        return false;
+    if (*angle < 1.0e-5f)
+    {
+        *axis = { 0.0f, 0.0f, 1.0f };
+        return true;
+    }
+    const float denominator = 2.0f * std::sin(*angle);
+    if (std::abs(denominator) < 1.0e-5f)
+        return false;
+    *axis = NormalizeReprojVec3({ (rotation[2][1] - rotation[1][2]) / denominator,
+                                  (rotation[0][2] - rotation[2][0]) / denominator,
+                                  (rotation[1][0] - rotation[0][1]) / denominator });
+    return DotReprojVec3(*axis, *axis) > 0.5f;
+}
+
+void BuildRotationRows(const RP_Constants& constants, float guardFraction, ReprojVec3 sourceRight, ReprojVec3 sourceUp,
+                       ReprojVec3 sourceForward, ReprojVec3 predictedRight, ReprojVec3 predictedUp,
+                       ReprojVec3 predictedForward, ReprojVec3* outX, ReprojVec3* outY, ReprojVec3* outZ)
+{
+    const auto sourceX = ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward);
+    const auto sourceY = ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward);
+    const auto sourceZ = ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward);
+    const float tanHalfFov = std::tan(constants.cameraVFov * 0.5f);
+    const float focalX = constants.cameraAspect * tanHalfFov;
+    const float focalY = tanHalfFov;
+    ReprojVec3 uvNumeratorX { 0.5f, 0.0f, 0.5f };
+    ReprojVec3 uvNumeratorY { 0.0f, -0.5f, 0.5f };
+    ReprojVec3 denominator { 0.0f, 0.0f, 1.0f };
+    if (std::isfinite(focalX) && std::isfinite(focalY) && std::abs(focalX) > 1.0e-6f && std::abs(focalY) > 1.0e-6f)
+    {
+        const ReprojVec3 sx { sourceX.x * focalX, sourceX.y * focalY, sourceX.z };
+        const ReprojVec3 sy { sourceY.x * focalX, sourceY.y * focalY, sourceY.z };
+        denominator = { sourceZ.x * focalX, sourceZ.y * focalY, sourceZ.z };
+        uvNumeratorX = CombineReprojVec3(denominator, 0.5f, sx, 0.5f / focalX);
+        uvNumeratorY = CombineReprojVec3(denominator, 0.5f, sy, -0.5f / focalY);
+    }
+    const float guard = std::clamp(guardFraction, 0.0f, 0.15f);
+    const float guardScale = 1.0f - 2.0f * guard;
+    *outX = CombineReprojVec3(uvNumeratorX, guardScale, denominator, guard);
+    *outY = CombineReprojVec3(uvNumeratorY, guardScale, denominator, guard);
+    *outZ = denominator;
+}
+
+WarpCoverage EvaluateWarpCoverage(const RP_Constants& constants, ReprojVec3 xRow, ReprojVec3 yRow, ReprojVec3 zRow)
+{
+    WarpCoverage coverage {};
+    if (constants.displayWidth == 0 || constants.displayHeight == 0)
+        return coverage;
+    const float validMinX = 0.5f / constants.displayWidth;
+    const float validMinY = 0.5f / constants.displayHeight;
+    const float validMaxX = 1.0f - validMinX;
+    const float validMaxY = 1.0f - validMinY;
+    const auto sample = [&](float x, float y)
+    {
+        const ReprojVec3 pixel { 0.5f + x * (constants.displayWidth - 1.0f),
+                                 0.5f + y * (constants.displayHeight - 1.0f), 1.0f };
+        const float denominator = DotReprojVec3(zRow, pixel);
+        if (denominator <= 1.0e-6f || !std::isfinite(denominator))
+        {
+            ++coverage.invalidSamples;
+            return;
+        }
+        const float u = DotReprojVec3(xRow, pixel) / denominator;
+        const float v = DotReprojVec3(yRow, pixel) / denominator;
+        const float left = std::max(0.0f, validMinX - u);
+        const float right = std::max(0.0f, u - validMaxX);
+        const float top = std::max(0.0f, validMinY - v);
+        const float bottom = std::max(0.0f, v - validMaxY);
+        coverage.overrunLeft = std::max(coverage.overrunLeft, left);
+        coverage.overrunRight = std::max(coverage.overrunRight, right);
+        coverage.overrunTop = std::max(coverage.overrunTop, top);
+        coverage.overrunBottom = std::max(coverage.overrunBottom, bottom);
+        coverage.invalidSamples += left > 0.0f || right > 0.0f || top > 0.0f || bottom > 0.0f;
+    };
+    constexpr float fractions[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    for (float fraction : fractions)
+    {
+        sample(fraction, 0.0f);
+        sample(fraction, 1.0f);
+    }
+    for (float fraction : fractions)
+    {
+        if (fraction != 0.0f && fraction != 1.0f)
+        {
+            sample(0.0f, fraction);
+            sample(1.0f, fraction);
+        }
+    }
+    return coverage;
+}
+
 ReprojVec3 RotateReprojVec3(ReprojVec3 value, ReprojVec3 axis, float angle)
 {
     const float sine = std::sin(angle);
@@ -414,11 +540,11 @@ void DecomposeCameraPairRotation(const float* forward, const float* prevForward,
     *pitchRadians = std::atan2(dot(forward, prevUp), dot(forward, prevForward));
 }
 
-void PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool inputLatched = false,
-                              float lateYaw = 0.0f, float latePitch = 0.0f,
-                              const ReprojVec3* targetBaseRight = nullptr,
-                              const ReprojVec3* targetBaseUp = nullptr,
-                              const ReprojVec3* targetBaseForward = nullptr)
+WarpCoverage PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool inputLatched = false,
+                                      float lateYaw = 0.0f, float latePitch = 0.0f,
+                                      const ReprojVec3* targetBaseRight = nullptr,
+                                      const ReprojVec3* targetBaseUp = nullptr,
+                                      const ReprojVec3* targetBaseForward = nullptr)
 {
     // Mode 2 rotates the predicted basis here for the rotation homography.
     // Translation (walking/hills) is intentionally not represented: the warp
@@ -469,42 +595,64 @@ void PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool
         }
     }
 
-    const auto sourceX = ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward);
-    const auto sourceY = ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward);
-    const auto sourceZ = ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward);
     // Mode reaches here as 2 (rotation) or 1 (depth+translation) or 0 (no camera)
     if (constants.mode != 2 && constants.mode != 1)
-        return;
-    const float tanHalfFov = std::tan(constants.cameraVFov * 0.5f);
-    const float focalX = constants.cameraAspect * tanHalfFov;
-    const float focalY = tanHalfFov;
+        return {};
 
-    // Bake the complete output-pixel -> source-UV projective transform once on the CPU.
-    // The old shader rebuilt the camera ray, performed three basis transforms,
-    // and applied the projection for every output pixel. PrevCameraRight/Up/
-    // Forward are shader-private after this point, so reuse them as homogeneous
-    // UV rows (u numerator, v numerator, denominator).
-    ReprojVec3 uvNumeratorX { 0.5f, 0.0f, 0.5f };
-    ReprojVec3 uvNumeratorY { 0.0f, -0.5f, 0.5f };
-    ReprojVec3 denominator { 0.0f, 0.0f, 1.0f };
-    if (std::isfinite(focalX) && std::isfinite(focalY) && std::abs(focalX) > 1.0e-6f && std::abs(focalY) > 1.0e-6f)
+    ReprojVec3 xRow {}, yRow {}, zRow {};
+    BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
+                      predictedForward, &xRow, &yRow, &zRow);
+    auto coverage = EvaluateWarpCoverage(constants, xRow, yRow, zRow);
+
+    ReprojVec3 axis {};
+    float angle = 0.0f;
+    const bool haveAxis = RotationAxisAngle(sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
+                                            predictedForward, &axis, &angle);
+    if (std::isfinite(angle))
+        coverage.requestedDegrees = std::abs(angle) * 180.0f / std::numbers::pi_v<float>;
+    if (coverage.invalidSamples != 0)
     {
-        const ReprojVec3 sx { sourceX.x * focalX, sourceX.y * focalY, sourceX.z };
-        const ReprojVec3 sy { sourceY.x * focalX, sourceY.y * focalY, sourceY.z };
-        denominator = { sourceZ.x * focalX, sourceZ.y * focalY, sourceZ.z };
-        uvNumeratorX = CombineReprojVec3(denominator, 0.5f, sx, 0.5f / focalX);
-        uvNumeratorY = CombineReprojVec3(denominator, 0.5f, sy, -0.5f / focalY);
+        if (haveAxis)
+        {
+            // E3: clamp the requested final rotation to the largest sampled
+            // filter-safe transform. This is presenter-side CPU work only.
+            float low = 0.0f;
+            float high = 1.0f;
+            for (int i = 0; i < 8; ++i)
+            {
+                const float middle = (low + high) * 0.5f;
+                const auto candidateRight = NormalizeReprojVec3(RotateReprojVec3(sourceRight, axis, angle * middle));
+                const auto candidateUp = NormalizeReprojVec3(RotateReprojVec3(sourceUp, axis, angle * middle));
+                const auto candidateForward =
+                    NormalizeReprojVec3(RotateReprojVec3(sourceForward, axis, angle * middle));
+                ReprojVec3 candidateX {}, candidateY {}, candidateZ {};
+                BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, candidateRight,
+                                  candidateUp, candidateForward, &candidateX, &candidateY, &candidateZ);
+                if (EvaluateWarpCoverage(constants, candidateX, candidateY, candidateZ).invalidSamples == 0)
+                    low = middle;
+                else
+                    high = middle;
+            }
+            coverage.safeScale = low;
+            predictedRight = NormalizeReprojVec3(RotateReprojVec3(sourceRight, axis, angle * low));
+            predictedUp = NormalizeReprojVec3(RotateReprojVec3(sourceUp, axis, angle * low));
+            predictedForward = NormalizeReprojVec3(RotateReprojVec3(sourceForward, axis, angle * low));
+            BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, predictedRight,
+                              predictedUp, predictedForward, &xRow, &yRow, &zRow);
+        }
+        else
+        {
+            // A near-180 degree discontinuity has no stable axis from the
+            // skew-symmetric extraction. Failing closed to the source pose is
+            // preferable to exposing an invalid border.
+            coverage.safeScale = 0.0f;
+            predictedRight = sourceRight;
+            predictedUp = sourceUp;
+            predictedForward = sourceForward;
+            BuildRotationRows(constants, guardFraction, sourceRight, sourceUp, sourceForward, predictedRight,
+                              predictedUp, predictedForward, &xRow, &yRow, &zRow);
+        }
     }
-
-    // The validated KCD2 gameplay-camera hook widened the engine frustum before
-    // rendering. Map the player's original FOV into the center of that wider
-    // source. The guard travels per-packet (ContentFrame::renderReserveFraction,
-    // captured at publication): the hook's global may already describe a later
-    // frustum build by display time. Zero stays identity.
-    const float guard = std::clamp(guardFraction, 0.0f, 0.15f);
-    const float guardScale = 1.0f - 2.0f * guard;
-    uvNumeratorX = CombineReprojVec3(uvNumeratorX, guardScale, denominator, guard);
-    uvNumeratorY = CombineReprojVec3(uvNumeratorY, guardScale, denominator, guard);
 
     // Fold pixel-center -> NDC into the same matrix. The compute shader can now
     // transform its integer dispatch coordinate directly, with no per-pixel
@@ -516,9 +664,10 @@ void PrepareRotationConstants(RP_Constants& constants, float guardFraction, bool
         return ReprojVec3 { ndcRow.x * (2.0f / constants.displayWidth), ndcRow.y * (-2.0f / constants.displayHeight),
                             -ndcRow.x + ndcRow.y + ndcRow.z };
     };
-    StoreReprojVec3(constants.prevCameraRight, pixelRow(uvNumeratorX));
-    StoreReprojVec3(constants.prevCameraUp, pixelRow(uvNumeratorY));
-    StoreReprojVec3(constants.prevCameraForward, pixelRow(denominator));
+    StoreReprojVec3(constants.prevCameraRight, pixelRow(xRow));
+    StoreReprojVec3(constants.prevCameraUp, pixelRow(yRow));
+    StoreReprojVec3(constants.prevCameraForward, pixelRow(zRow));
+    return coverage;
 }
 
 } // namespace
@@ -602,8 +751,11 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
         pitch *= maxRotation / rotation;
     }
 
-    PrepareRotationConstants(constants, packet.renderReserveFraction, true, static_cast<float>(yaw),
-                             static_cast<float>(pitch), pBaseRight, pBaseUp, pBaseForward);
+    const auto coverage = PrepareRotationConstants(constants, packet.renderReserveFraction, true, static_cast<float>(yaw),
+                                                   static_cast<float>(pitch), pBaseRight, pBaseUp, pBaseForward);
+    RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
+                       WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
+                       coverage.overrunTop, coverage.overrunBottom);
     ++_metricsLateInputApplied;
     _metricsLateInputMaxDegrees = std::max(
         _metricsLateInputMaxDegrees, static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
@@ -1336,7 +1488,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // Safe fallback for partial initialization: constants are written before
         // execution when no latch fence is available.
         if (!ApplyLateInput(constants, packet))
-            PrepareRotationConstants(constants, contentGuard, false);
+        {
+            const auto coverage = PrepareRotationConstants(constants, contentGuard, false);
+            RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
+                               WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
+                               coverage.overrunTop, coverage.overrunBottom);
+        }
     }
     else
     {
@@ -1419,7 +1576,12 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, packet))
-            PrepareRotationConstants(lateConstants, content.renderReserveFraction, false);
+        {
+            const auto coverage = PrepareRotationConstants(lateConstants, content.renderReserveFraction, false);
+            RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
+                               WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
+                               coverage.overrunTop, coverage.overrunBottom);
+        }
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         // Publish the persistent upload-buffer write before releasing the GPU
@@ -1498,6 +1660,22 @@ void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseA
     LogMetricsIfDue();
 }
 
+void AReproj_Dx12::RecordWarpCoverage(float safeScale, float requestedDegrees, uint32_t invalidSamples,
+                                      uint32_t sampleCount, float overrunLeft, float overrunRight, float overrunTop,
+                                      float overrunBottom)
+{
+    std::scoped_lock lock(_metricsMutex);
+    _metricsWarpCoverageSamples += sampleCount;
+    _metricsWarpCoverageInvalid += invalidSamples;
+    _metricsSafeWarpLimited += safeScale < 0.999f;
+    _metricsWarpCoverageOverrunLeft = std::max(_metricsWarpCoverageOverrunLeft, overrunLeft);
+    _metricsWarpCoverageOverrunRight = std::max(_metricsWarpCoverageOverrunRight, overrunRight);
+    _metricsWarpCoverageOverrunTop = std::max(_metricsWarpCoverageOverrunTop, overrunTop);
+    _metricsWarpCoverageOverrunBottom = std::max(_metricsWarpCoverageOverrunBottom, overrunBottom);
+    _metricsRequestedWarpMaxDegrees = std::max(_metricsRequestedWarpMaxDegrees, requestedDegrees);
+    _metricsSafeWarpMinScale = std::min(_metricsSafeWarpMinScale, safeScale);
+}
+
 void AReproj_Dx12::LogMetricsIfDue()
 {
     double elapsed = 0.0;
@@ -1516,6 +1694,15 @@ void AReproj_Dx12::LogMetricsIfDue()
     uint32_t generatedDisplays = 0;
     float lateInputMaxDegrees = 0.0f;
     float gamePresentBlockMaxMs = 0.0f;
+    uint32_t warpCoverageSamples = 0;
+    uint32_t warpCoverageInvalid = 0;
+    uint32_t safeWarpLimited = 0;
+    float coverageOverrunLeft = 0.0f;
+    float coverageOverrunRight = 0.0f;
+    float coverageOverrunTop = 0.0f;
+    float coverageOverrunBottom = 0.0f;
+    float requestedWarpMaxDegrees = 0.0f;
+    float safeWarpMinScale = 1.0f;
     float meanPresentIntervalMs = 0.0f;
     float p95PresentIntervalMs = 0.0f;
     int queueDepth = 0;
@@ -1548,6 +1735,15 @@ void AReproj_Dx12::LogMetricsIfDue()
         generatedDisplays = _metricsGeneratedDisplays;
         lateInputMaxDegrees = _metricsLateInputMaxDegrees;
         gamePresentBlockMaxMs = _metricsGamePresentBlockMaxMs;
+        warpCoverageSamples = _metricsWarpCoverageSamples;
+        warpCoverageInvalid = _metricsWarpCoverageInvalid;
+        safeWarpLimited = _metricsSafeWarpLimited;
+        coverageOverrunLeft = _metricsWarpCoverageOverrunLeft;
+        coverageOverrunRight = _metricsWarpCoverageOverrunRight;
+        coverageOverrunTop = _metricsWarpCoverageOverrunTop;
+        coverageOverrunBottom = _metricsWarpCoverageOverrunBottom;
+        requestedWarpMaxDegrees = _metricsRequestedWarpMaxDegrees;
+        safeWarpMinScale = _metricsSafeWarpMinScale;
         poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
 
         _runtimeMetrics.realFps = static_cast<float>(realFrames * scale);
@@ -1601,17 +1797,29 @@ void AReproj_Dx12::LogMetricsIfDue()
         _metricsGeneratedDisplays = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _metricsGamePresentBlockMaxMs = 0.0f;
+        _metricsWarpCoverageSamples = 0;
+        _metricsWarpCoverageInvalid = 0;
+        _metricsSafeWarpLimited = 0;
+        _metricsWarpCoverageOverrunLeft = 0.0f;
+        _metricsWarpCoverageOverrunRight = 0.0f;
+        _metricsWarpCoverageOverrunTop = 0.0f;
+        _metricsWarpCoverageOverrunBottom = 0.0f;
+        _metricsRequestedWarpMaxDegrees = 0.0f;
+        _metricsSafeWarpMinScale = 1.0f;
     }
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms latchLead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} guard={:.1f}% "
-             "({}, block={:.2f}ms) generated={}",
+             "({}, block={:.2f}ms) generated={} edge={}/{} scale={:.3f} limited={} rot={:.1f}deg "
+             "overrun={:.3f}/{:.3f}/{:.3f}/{:.3f}",
              realFrames * scale, warpFrames * scale, newAnchorDisplays, repeatedAnchorDisplays, missedDisplaySlots,
              meanPresentIntervalMs, p95PresentIntervalMs, _lastLateSampleLeadMs.load(std::memory_order_relaxed),
              poseAge, queueDepth, lateInputApplied, lateInputSamples, lateInputMaxDegrees, skippedAnchorSamples,
              directCaptures, captureNotReady, _lastContentGuard.load(std::memory_order_relaxed) * 100.0f, presenter,
-             gamePresentBlockMaxMs, generatedDisplays);
+             gamePresentBlockMaxMs, generatedDisplays, warpCoverageInvalid, warpCoverageSamples, safeWarpMinScale,
+             safeWarpLimited, requestedWarpMaxDegrees, coverageOverrunLeft, coverageOverrunRight, coverageOverrunTop,
+             coverageOverrunBottom);
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -1977,6 +2185,15 @@ void AReproj_Dx12::Activate()
         _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;
         _metricsLateInputMaxDegrees = 0.0f;
+        _metricsWarpCoverageSamples = 0;
+        _metricsWarpCoverageInvalid = 0;
+        _metricsSafeWarpLimited = 0;
+        _metricsWarpCoverageOverrunLeft = 0.0f;
+        _metricsWarpCoverageOverrunRight = 0.0f;
+        _metricsWarpCoverageOverrunTop = 0.0f;
+        _metricsWarpCoverageOverrunBottom = 0.0f;
+        _metricsRequestedWarpMaxDegrees = 0.0f;
+        _metricsSafeWarpMinScale = 1.0f;
         _runtimeMetrics = {};
     }
     _cachedRefreshHz = 0.0;
