@@ -208,6 +208,32 @@ With a stable 60 Hz source, determine whether residual judder is smooth near-geo
 
 If the dominant artifact is an anchor-switch rotational snap, test a small cut-gated pose-domain transition on the displayed rotation baseline. Do not blend previous-anchor images. Any smoothing must be disabled across `sourceCutGeneration` changes and must not noticeably delay genuine mouse look.
 
+Status (2026-09-07): camera-feel diagnosis. Reported symptom was
+wobbly/viscous/delayed camera response. Two mechanisms found, both fixed
+without changing queue topology or the game-thread contract:
+
+- `ReprojSmoothing` defaulted to 0.25, so every session ran an EMA on camera
+  angular velocity. The EMA lags motion onset and leaves a geometric creep
+  tail after stop, and it biases the FSR midpoint through the smoothed prev
+  pose. No A/B justified default-on smoothing, so the default is now 0 (off,
+  still opt-in via config/menu). Pinned by `test_smoothing_defaults_off`.
+- `ContentInterpolation` generated slots warped with the real anchor's mouse
+  baseline and a naive linearly-averaged midpoint orientation. The fallback
+  late warp therefore dropped half an interval of mouse motion on every
+  generated slot (alternating under-rotation vs neighbouring real slots), and
+  lerp shortens larger rotations. Generated frames now carry their own
+  midpoint mouse baseline (`GetRawMouseMotionAt` at the midpoint timestamp),
+  `ApplyLateInput` warps the actually-displayed content from its own
+  baseline/timestamp/cut, and the midpoint orientation is a halfway
+  axis-angle slerp. Pinned by
+  `test_late_input_warps_selected_content_from_its_own_baseline`,
+  `test_midpoint_pose_is_a_halfway_slerp_with_own_mouse_baseline`, and
+  `test_halfway_slerp_preserves_angle_while_lerp_shortens_it`.
+
+Live gate: same-scene 60 -> 120 mouse-turn A/B, interpolation off then on;
+expect tight onset, no creep after stop, and no alternating judder on
+generated slots.
+
 ### W2. Positional/depth work remains deferred
 
 Do not revive the old one-pass depth positional warp merely because walking remains imperfect. It previously produced disocclusion tearing, halos, and poor hill/stair behaviour. Revisit positional reprojection only as a separate project with repeatable footage, clear acceptance criteria, and evidence that content interpolation cannot provide the required result.

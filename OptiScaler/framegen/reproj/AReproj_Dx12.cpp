@@ -676,7 +676,8 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, bool inputLatched
 
 } // namespace
 
-bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet)
+bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& content,
+                                    const ReprojFramePacket& packet)
 {
     if (!packet.inputLatchReady || (constants.mode != 2 && constants.mode != 1))
         return false;
@@ -689,8 +690,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     Kcd2Camera::Snapshot latestCamera {};
     Kcd2Camera::Snapshot prevCamera {};
     const bool haveLateCamera = Kcd2Camera::IsAvailable() && Kcd2Camera::ReadSnapshots(latestCamera, prevCamera) &&
-                                latestCamera.timestampMs > packet.sourcePoseTimestamp &&
-                                latestCamera.cutGeneration == packet.sourceCutGeneration;
+                                latestCamera.timestampMs > content.sourcePoseTimestamp &&
+                                latestCamera.cutGeneration == content.sourceCutGeneration;
 
     double deltaX = 0.0;
     double deltaY = 0.0;
@@ -719,8 +720,14 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ReprojFramePack
     }
     else
     {
-        deltaX = static_cast<double>(current.TotalX - packet.sourceMouseX);
-        deltaY = static_cast<double>(current.TotalY - packet.sourceMouseY);
+        // Fallback when no newer rendered pose exists: rotate from this
+        // content's own pose by the mouse motion since this content's own
+        // baseline. Generated midpoints are older than their real anchor, so
+        // they must use their own midpoint baseline — the anchor's baseline
+        // would discard the motion between midpoint and anchor time and make
+        // generated slots systematically under-rotate (alternating wobble).
+        deltaX = static_cast<double>(current.TotalX - content.sourceMouseX);
+        deltaY = static_cast<double>(current.TotalY - content.sourceMouseY);
     }
 
     if (deltaX == 0.0 && deltaY == 0.0 && !haveLateCamera)
@@ -1268,16 +1275,50 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         generated.cameraFar = packet.cameraFar;
         generated.invertedDepth = packet.invertedDepth;
         generated.generated = true;
+        // Midpoint mouse baseline from the timestamped history at the midpoint
+        // time. The fallback late warp measures motion since the displayed
+        // content's own pose; reusing the real anchor's (newer) baseline here
+        // would silently drop half an interval of mouse motion on every
+        // generated slot.
+        const auto midMouse = OptiInput::GetRawMouseMotionAt(generated.sourcePoseTimestamp);
+        generated.sourceMouseX = midMouse.TotalX;
+        generated.sourceMouseY = midMouse.TotalY;
+        generated.sourceMouseTimestamp = midMouse.TimestampMs;
         for (int axis = 0; axis < 3; ++axis)
         {
             generated.constants.cameraPosition[axis] =
                 0.5f * (packet.constants.prevCameraPosition[axis] + packet.constants.cameraPosition[axis]);
-            generated.constants.cameraForward[axis] =
-                0.5f * (packet.constants.prevCameraForward[axis] + packet.constants.cameraForward[axis]);
-            generated.constants.cameraRight[axis] =
-                0.5f * (packet.constants.prevCameraRight[axis] + packet.constants.cameraRight[axis]);
-            generated.constants.cameraUp[axis] =
-                0.5f * (packet.constants.prevCameraUp[axis] + packet.constants.cameraUp[axis]);
+        }
+        // Midpoint orientation is a proper halfway slerp of the prev->current
+        // rotation, not a linear average of basis vectors: lerp shortens the
+        // rotation for larger angles, so generated slots would systematically
+        // under-rotate relative to neighbouring real slots (alternating wobble).
+        {
+            const auto prevRight = NormalizeReprojVec3(LoadReprojVec3(packet.constants.prevCameraRight));
+            const auto prevUp = NormalizeReprojVec3(LoadReprojVec3(packet.constants.prevCameraUp));
+            const auto prevForward = NormalizeReprojVec3(LoadReprojVec3(packet.constants.prevCameraForward));
+            ReprojVec3 midAxis {};
+            float midAngle = 0.0f;
+            if (RotationAxisAngle(prevRight, prevUp, prevForward,
+                                  NormalizeReprojVec3(LoadReprojVec3(packet.constants.cameraRight)),
+                                  NormalizeReprojVec3(LoadReprojVec3(packet.constants.cameraUp)),
+                                  NormalizeReprojVec3(LoadReprojVec3(packet.constants.cameraForward)), &midAxis,
+                                  &midAngle) &&
+                std::isfinite(midAngle) && std::abs(midAngle) > 1.0e-6f)
+            {
+                StoreReprojVec3(generated.constants.cameraRight,
+                                NormalizeReprojVec3(RotateReprojVec3(prevRight, midAxis, midAngle * 0.5f)));
+                StoreReprojVec3(generated.constants.cameraUp,
+                                NormalizeReprojVec3(RotateReprojVec3(prevUp, midAxis, midAngle * 0.5f)));
+                StoreReprojVec3(generated.constants.cameraForward,
+                                NormalizeReprojVec3(RotateReprojVec3(prevForward, midAxis, midAngle * 0.5f)));
+            }
+            else
+            {
+                StoreReprojVec3(generated.constants.cameraRight, prevRight);
+                StoreReprojVec3(generated.constants.cameraUp, prevUp);
+                StoreReprojVec3(generated.constants.cameraForward, prevForward);
+            }
         }
         const auto midForward = NormalizeReprojVec3(LoadReprojVec3(generated.constants.cameraForward));
         auto midRight = LoadReprojVec3(generated.constants.cameraRight);
@@ -1480,7 +1521,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     {
         // Safe fallback for partial initialization: constants are written before
         // execution when no latch fence is available.
-        if (!ApplyLateInput(constants, packet))
+        if (!ApplyLateInput(constants, content, packet))
         {
             const auto coverage = PrepareRotationConstants(constants, false);
             RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
@@ -1568,7 +1609,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
 
         auto lateConstants = content.constants;
         lateConstants.timeStep = timeStep;
-        if (!ApplyLateInput(lateConstants, packet))
+        if (!ApplyLateInput(lateConstants, content, packet))
         {
             const auto coverage = PrepareRotationConstants(lateConstants, false);
             RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,

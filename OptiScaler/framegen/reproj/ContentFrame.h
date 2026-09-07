@@ -25,6 +25,13 @@ struct ContentFrame
     double sourcePoseInterval = 0.0;
     double sourceFrameInterval = 0.0;
     double virtualContentTimestamp = 0.0;
+    // Late-latch mouse baseline: raw-input totals at sourcePoseTimestamp, so a
+    // warp of this content measures only motion after its own pose. Real
+    // anchors snapshot the producer baseline; generated midpoints look it up
+    // from the timestamped history at their (older) midpoint timestamp.
+    std::int64_t sourceMouseX = 0;
+    std::int64_t sourceMouseY = 0;
+    double sourceMouseTimestamp = 0.0;
     std::uint64_t sourceCutGeneration = 0;
     float cameraNear = 0.0f;
     float cameraFar = 0.0f;

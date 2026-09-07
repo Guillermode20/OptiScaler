@@ -620,7 +620,7 @@ class Config
     }; // OPT-IN 60->120 A/B source cap; 0 = never pace (default)
     CustomOptional<float> ReprojMouseSensitivityX { 0.0f }; // 0 = auto-tracked from rendered frames
     CustomOptional<float> ReprojMouseSensitivityY { 0.0f }; // 0 = auto-tracked from rendered frames
-    CustomOptional<float> ReprojSmoothing { 0.25f };        // EMA filter on camera angular velocity (0=off)
+    CustomOptional<float> ReprojSmoothing { 0.0f };         // EMA filter on camera angular velocity (0=off, default off: smoothing delays genuine look and creeps after stop)
     CustomOptional<bool> ReprojHudIsolation {
         true
     }; // separate Scaleform HUD from 3D world (KCD2), composited unwarped

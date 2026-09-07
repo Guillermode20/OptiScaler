@@ -82,9 +82,6 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         UINT64 retirementFenceValue = 0;
         double frameDelta = 0.0;
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
-        int64_t sourceMouseX = 0;
-        int64_t sourceMouseY = 0;
-        double sourceMouseTimestamp = 0.0;
         bool inputLatchReady = false;
         bool hasCamera = false;
         bool warpAllowed = false;
@@ -161,7 +158,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
                             D3D12_RESOURCE_STATES& targetState, const wchar_t* name);
     void FillConstants(int fIndex, RP_Constants& constants);
-    bool ApplyLateInput(RP_Constants& constants, const ReprojFramePacket& packet);
+    bool ApplyLateInput(RP_Constants& constants, const ContentFrame& content, const ReprojFramePacket& packet);
     void UpdateMouseSensitivity(int sourceIndex, double sourcePoseTimestamp);
     int AcquirePacket();
     void RetirePackets();
