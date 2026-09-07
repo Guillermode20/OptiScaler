@@ -10,6 +10,24 @@
 #include <algorithm>
 #include <cmath>
 
+namespace
+{
+void TransitionResource(ID3D12GraphicsCommandList* commandList, ID3D12Resource* resource, D3D12_RESOURCE_STATES before,
+                        D3D12_RESOURCE_STATES after)
+{
+    if (commandList == nullptr || resource == nullptr || before == after)
+        return;
+
+    D3D12_RESOURCE_BARRIER barrier {};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = resource;
+    barrier.Transition.StateBefore = before;
+    barrier.Transition.StateAfter = after;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    commandList->ResourceBarrier(1, &barrier);
+}
+} // namespace
+
 FfxApiResourceState HybridFsrGenerator::FfxState(D3D12_RESOURCE_STATES state)
 {
     switch (state)
@@ -146,6 +164,18 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
         !EnsureOutput(device, realFrame.color, generatedFrame))
         return false;
 
+    // A generated packet is later consumed by the presenter warp as an SRV.
+    // Packet reuse only happens after its presenter retirement fence completes,
+    // but the resource state is still SRV at that point. FFX receives the
+    // declared UAV state below and does not know about our presenter pass, so
+    // restore the actual D3D12 state before it writes this recycled output.
+    // Without this transition, every reused packet can write while still bound
+    // as an SRV, producing corrupted/smeared midpoints on validation layers
+    // and drivers that do not repair the state mismatch.
+    TransitionResource(commandList, generatedFrame.color, generatedFrame.colorState,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    generatedFrame.colorState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
     const bool cut = _cutGeneration != 0 && realFrame.sourceCutGeneration != _cutGeneration;
     _cutGeneration = realFrame.sourceCutGeneration;
     const bool resetEdge = reset && !_resetActive;
@@ -176,8 +206,8 @@ bool HybridFsrGenerator::Generate(ID3D12Device* device, ID3D12GraphicsCommandLis
     {
         LOG_WARN("HybridTimewarp: skipping midpoint, FSR inputs disagree "
                  "(render {}x{} display {}x{} depth {}x{} velocity {}x{} mvScale {:.4f},{:.4f})",
-                 renderW, renderH, _displayWidth, _displayHeight, depthDesc.Width, depthDesc.Height,
-                 velocityDesc.Width, velocityDesc.Height, realFrame.constants.mvScaleX, realFrame.constants.mvScaleY);
+                 renderW, renderH, _displayWidth, _displayHeight, depthDesc.Width, depthDesc.Height, velocityDesc.Width,
+                 velocityDesc.Height, realFrame.constants.mvScaleX, realFrame.constants.mvScaleY);
         return false;
     }
 

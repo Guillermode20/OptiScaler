@@ -175,6 +175,26 @@ Run controlled KCD2 60 -> 120 tests with `ContentInterpolation` off/on in the sa
 
 Do not enable interpolation by default until it is live-validated.
 
+Status (2026-09-07): failed the first KCD2 visual gate. The 2026-09-06
+`ContentInterpolation=true` run was a real midpoint run, not a presenter
+fallback: after warm-up it held roughly 60 source FPS and 120 display FPS with
+about 60 generated outputs per second (`new≈120`, `repeat≈0`, `generated≈60`).
+The captured FSR inputs were internally shape-consistent (1706x960 depth/MV,
+1706x960 render size, 2560x1440 output, MV scale 1706/960), but the generated
+content was reported visibly smeary/ugly. Keep the feature explicitly off for
+KCD2. Do not tune warp constants to hide this: before another opt-in trial,
+prove the KCD2 depth/MV semantics and frame pairing with short matched footage
+in the same walking/hill scene. The ordinary timewarp segment that followed
+returned to approximately 60 new + 60 repeat outputs with `generated=0`.
+
+Follow-up (2026-09-07, runtime pending): fixed a generated-output reuse state
+violation. The presenter samples each generated texture as an SRV, but the next
+FSR dispatch previously declared that recycled texture as a UAV without a
+matching transition. The packet retirement fence makes the ownership safe; the
+new transition restores its actual state before FSR writes it. Re-run the same
+on/off footage after the Windows artifact is installed. If it is still smeary,
+the next gate is KCD2 MV/depth/frame-pair semantics, not presenter cadence.
+
 ### W1. Separate parallax from anchor-refresh discontinuity
 
 With a stable 60 Hz source, determine whether residual judder is smooth near-geometry parallax or a periodic snap when the presenter switches anchors.

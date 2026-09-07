@@ -339,6 +339,10 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("CopyPacketResource(cmdList, velocity", capture)
         self.assertIn("_contentGenerator->Generate", capture)
         self.assertLess(capture.index("_contentGenerator->Generate"), capture.index("SubmitUICommandList"))
+        # Generated output is sampled by the presenter warp, so packet reuse
+        # must return it to UAV state before FFX writes the next midpoint.
+        self.assertIn("TransitionResource(commandList, generatedFrame.color, generatedFrame.colorState", generator)
+        self.assertIn("generatedFrame.colorState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS", generator)
         self.assertIn("packet.constants.mode = 2", capture)
         # The UI alpha mode is baked into the warp constants (premultiplied by
         # default) exactly like the parent branch.
