@@ -31,9 +31,22 @@ struct alignas(256) RP_Constants
     float prevCameraForward[4];
     float cameraVFov;
     float cameraAspect;
+    uint32_t historyCount;
+    uint32_t historyReserved;
+    float targetCameraRight[4];
+    float targetCameraUp[4];
+    float targetCameraForward[4];
+    float history0Right[4];
+    float history0Up[4];
+    float history0Forward[4];
+    float history1Right[4];
+    float history1Up[4];
+    float history1Forward[4];
 };
 
 static_assert(offsetof(RP_Constants, cameraPosition) == 64, "RP_Constants must match HLSL cbuffer packing");
+static_assert(offsetof(RP_Constants, targetCameraRight) == 208, "RP_Constants history fields must match HLSL packing");
+static_assert(sizeof(RP_Constants) == 512, "RP_Constants CBV size must remain 256-byte aligned");
 
 inline static std::string RPD_ShaderCode = R"(
 cbuffer RP_Constants : register(b0)
@@ -60,10 +73,23 @@ cbuffer RP_Constants : register(b0)
     float4 PrevCameraForward;
     float CameraVFov;
     float CameraAspect;
+    uint HistoryCount;
+    uint HistoryReserved;
+    float4 TargetCameraRight;
+    float4 TargetCameraUp;
+    float4 TargetCameraForward;
+    float4 History0Right;
+    float4 History0Up;
+    float4 History0Forward;
+    float4 History1Right;
+    float4 History1Up;
+    float4 History1Forward;
 };
 
 Texture2D<float4> LastColor : register(t0);
 Texture2D<float4> UI : register(t1);
+Texture2D<float4> History0 : register(t2);
+Texture2D<float4> History1 : register(t3);
 RWTexture2D<float4> Output : register(u0);
 SamplerState Bilinear : register(s0);
 
@@ -88,8 +114,9 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     float coverage = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
 
     float3 world;
+    bool historyCovered = false;
     [branch]
-    if (coverage > 0.0f)
+    if (covered)
     {
         float3 warped = LastColor.SampleLevel(Bilinear, sourceUv, 0).rgb;
         if (coverage < 1.0f)
@@ -101,13 +128,39 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     }
     else
     {
-        world = LastColor.Load(int3(dtid.xy, 0)).rgb;
+        float3 historyH = float3(dot(History0Right.xyz, position), dot(History0Up.xyz, position),
+                                 dot(History0Forward.xyz, position));
+        bool history0Covered = HistoryCount > 0 && historyH.z > 1.0e-6f;
+        float2 historyUv = history0Covered ? historyH.xy * rcp(historyH.z) : float2(-1.0f, -1.0f);
+        history0Covered = history0Covered && all(historyUv >= validMin) && all(historyUv <= validMax);
+        if (history0Covered)
+        {
+            world = History0.SampleLevel(Bilinear, historyUv, 0).rgb;
+            historyCovered = true;
+        }
+        else
+        {
+            historyH = float3(dot(History1Right.xyz, position), dot(History1Up.xyz, position),
+                              dot(History1Forward.xyz, position));
+            bool history1Covered = HistoryCount > 1 && historyH.z > 1.0e-6f;
+            historyUv = history1Covered ? historyH.xy * rcp(historyH.z) : float2(-1.0f, -1.0f);
+            history1Covered = history1Covered && all(historyUv >= validMin) && all(historyUv <= validMax);
+            if (history1Covered)
+            {
+                world = History1.SampleLevel(Bilinear, historyUv, 0).rgb;
+                historyCovered = true;
+            }
+            else
+            {
+                world = LastColor.Load(int3(dtid.xy, 0)).rgb;
+            }
+        }
     }
 
     // E2 diagnostic: DebugView == 1 paints invalid coverage magenta ahead of
     // the UI composite. CPU keeps debugView == 0 for normal builds (uniform
     // branch, no hot-path cost).
-    if (DebugView == 1 && coverage <= 0.0f)
+    if (DebugView == 1 && !covered && !historyCovered)
         world = float3(1.0f, 0.0f, 1.0f);
 
     if (HudlessSource != 0)

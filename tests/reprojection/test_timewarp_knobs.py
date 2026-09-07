@@ -17,12 +17,14 @@ class TimewarpKnobTests(unittest.TestCase):
         config = (self._root() / "OptiScaler/Config.h").read_text(encoding="utf-8")
         self.assertRegex(config, r"ReprojSafeWarpBudget\s*\{\s*12\.0f\s*\}")
         self.assertRegex(config, r"ReprojMaxTimeStep\s*\{\s*2\.5f\s*\}")
+        self.assertRegex(config, r"ReprojHistoryBorderFallback\s*\{\s*false\s*\}")
         self.assertRegex(config, r"ReprojDebugView\s*\{\s*false\s*\}")
 
     def test_config_reload_and_save(self):
         cpp = (self._root() / "OptiScaler/Config.cpp").read_text(encoding="utf-8")
         self.assertIn('"AsyncTimewarp", "SafeWarpBudget"', cpp)
         self.assertIn('"AsyncTimewarp", "MaxTimeStep"', cpp)
+        self.assertIn('"AsyncTimewarp", "HistoryBorderFallback"', cpp)
         self.assertIn('"AsyncTimewarp", "DebugView"', cpp)
         # Ranges are enforced on load so a stray ini cannot wedge the presenter.
         self.assertIn("0.0f, 32.0f", cpp)
@@ -32,6 +34,7 @@ class TimewarpKnobTests(unittest.TestCase):
         ini = (self._root() / "OptiScaler.ini").read_text(encoding="utf-8")
         self.assertIn("SafeWarpBudget=auto", ini)
         self.assertIn("MaxTimeStep=auto", ini)
+        self.assertIn("HistoryBorderFallback=auto", ini)
         # DebugView shares the AsyncTimewarp section (distinct from [FrameGen]).
         async_section = ini.split("[AsyncTimewarp]", 1)[1].split("[XeFG]", 1)[0]
         self.assertIn("DebugView=auto", async_section)
@@ -51,8 +54,10 @@ class TimewarpKnobTests(unittest.TestCase):
         self.assertIn("Safe warp budget##reproj-live", menu)
         self.assertIn("Max warp step##reproj-live", menu)
         self.assertIn("Edge debug view##reproj-live", menu)
+        self.assertIn("History border fallback##reproj-live", menu)
         self.assertIn("ReprojSafeWarpBudget", menu)
         self.assertIn("ReprojMaxTimeStep", menu)
+        self.assertIn("ReprojHistoryBorderFallback", menu)
         self.assertIn("ReprojDebugView", menu)
 
 

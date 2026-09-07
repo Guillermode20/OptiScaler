@@ -227,6 +227,253 @@ bool AReproj_Dx12::CreateWarpOutput(int fIndex, ID3D12Resource* source)
     return true;
 }
 
+namespace
+{
+struct ReprojVec3
+{
+    float x;
+    float y;
+    float z;
+};
+
+ReprojVec3 LoadReprojVec3(const float* value);
+ReprojVec3 NormalizeReprojVec3(ReprojVec3 value);
+float DotReprojVec3(ReprojVec3 left, ReprojVec3 right);
+void StoreReprojVec3(float* target, ReprojVec3 value);
+void BuildRotationRows(const RP_Constants& constants, ReprojVec3 sourceRight, ReprojVec3 sourceUp,
+                       ReprojVec3 sourceForward, ReprojVec3 predictedRight, ReprojVec3 predictedUp,
+                       ReprojVec3 predictedForward, ReprojVec3* outX, ReprojVec3* outY, ReprojVec3* outZ);
+} // namespace
+
+bool AReproj_Dx12::EnsureHistoryResource(int historyIndex, ID3D12Resource* source)
+{
+    if (historyIndex < 0 || historyIndex >= kHistoryAnchorCount || source == nullptr || _device == nullptr)
+        return false;
+
+    const auto sourceDesc = source->GetDesc();
+    if (sourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || sourceDesc.SampleDesc.Count != 1)
+        return false;
+
+    auto& history = _historyAnchors[historyIndex];
+    if (history.color != nullptr)
+    {
+        const auto historyDesc = history.color->GetDesc();
+        const bool compatible =
+            historyDesc.Dimension == sourceDesc.Dimension && historyDesc.Width == sourceDesc.Width &&
+            historyDesc.Height == sourceDesc.Height && historyDesc.DepthOrArraySize == sourceDesc.DepthOrArraySize &&
+            historyDesc.MipLevels == sourceDesc.MipLevels && historyDesc.Format == sourceDesc.Format &&
+            historyDesc.SampleDesc.Count == sourceDesc.SampleDesc.Count &&
+            historyDesc.SampleDesc.Quality == sourceDesc.SampleDesc.Quality;
+        // A descriptor change belongs to swapchain recreation. Never release a
+        // history texture in flight just to accommodate an unexpected source.
+        return compatible;
+    }
+
+    D3D12_HEAP_PROPERTIES heapProperties {};
+    D3D12_HEAP_FLAGS heapFlags {};
+    if (FAILED(source->GetHeapProperties(&heapProperties, &heapFlags)))
+        return false;
+
+    const auto result =
+        _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &sourceDesc,
+                                         D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&history.color));
+    if (FAILED(result))
+    {
+        LOG_WARN("Reproj: history texture {} creation failed: {:X}", historyIndex, (UINT) result);
+        return false;
+    }
+
+    history.color->SetName(historyIndex == 0 ? L"Reproj_History0" : L"Reproj_History1");
+    history.colorState = D3D12_RESOURCE_STATE_COMMON;
+    return true;
+}
+
+bool AReproj_Dx12::SnapshotHistoryAnchor(ID3D12GraphicsCommandList* cmdList, int packetIndex)
+{
+    if (!Config::Instance()->ReprojHistoryBorderFallback.value_or_default() || cmdList == nullptr || packetIndex < 0 ||
+        packetIndex >= kReprojFrameSlots)
+        return false;
+
+    auto& packet = _packets[packetIndex];
+    // History is world-only. A composed frame would reintroduce an old HUD at
+    // the border, and a generated frame is intentionally never retained.
+    if (!packet.hasUi || !packet.hasCamera || !packet.warpAllowed || packet.color == nullptr)
+        return false;
+
+    const int historyIndex = (_historyNewestIndex + 1) % kHistoryAnchorCount;
+    if (!EnsureHistoryResource(historyIndex, packet.color))
+    {
+        std::scoped_lock metricsLock(_metricsMutex);
+        ++_metricsHistoryCopyDrops;
+        return false;
+    }
+
+    auto& history = _historyAnchors[historyIndex];
+    ResourceBarrier(cmdList, packet.color, packet.colorState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ResourceBarrier(cmdList, history.color, history.colorState, D3D12_RESOURCE_STATE_COPY_DEST);
+    cmdList->CopyResource(history.color, packet.color);
+    ResourceBarrier(cmdList, packet.color, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    ResourceBarrier(cmdList, history.color, D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    packet.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    history.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    history.sourceConstants = packet.constants;
+    history.frameId = packet.frameId;
+    history.epoch = _historyEpoch;
+    history.renderTimestamp = packet.renderTimestamp;
+    history.sourceCutGeneration = packet.sourceCutGeneration;
+    history.hdr = packet.hdr;
+    history.valid = true;
+    _historyNewestIndex = historyIndex;
+    return true;
+}
+
+uint32_t AReproj_Dx12::SelectHistoryAnchors(const ContentFrame& content, const ReprojFramePacket& packet,
+                                            double scanoutDeadlineMs, HistoryAnchor** selected)
+{
+    selected[0] = nullptr;
+    selected[1] = nullptr;
+    if (!Config::Instance()->ReprojHistoryBorderFallback.value_or_default() || !packet.hasUi || !packet.hasCamera ||
+        content.color == nullptr || _historyNewestIndex < 0)
+        return 0;
+
+    const auto currentDesc = content.color->GetDesc();
+    uint32_t count = 0;
+    float maxAgeMs = 0.0f;
+    for (int offset = 0; offset < kHistoryAnchorCount && count < kHistoryAnchorCount; ++offset)
+    {
+        const int index = (_historyNewestIndex - offset + kHistoryAnchorCount) % kHistoryAnchorCount;
+        auto& history = _historyAnchors[index];
+        if (!history.valid || history.color == nullptr || history.epoch != _historyEpoch ||
+            history.frameId >= packet.frameId || history.sourceCutGeneration != content.sourceCutGeneration ||
+            history.hdr != content.hdr)
+            continue;
+
+        const auto historyDesc = history.color->GetDesc();
+        const bool resourceCompatible =
+            historyDesc.Dimension == currentDesc.Dimension && historyDesc.Width == currentDesc.Width &&
+            historyDesc.Height == currentDesc.Height && historyDesc.Format == currentDesc.Format &&
+            historyDesc.SampleDesc.Count == currentDesc.SampleDesc.Count &&
+            historyDesc.SampleDesc.Quality == currentDesc.SampleDesc.Quality;
+        const float fovDelta = std::abs(history.sourceConstants.cameraVFov - content.constants.cameraVFov);
+        const float aspectBase = std::max(std::abs(content.constants.cameraAspect), 1.0e-6f);
+        const float aspectDelta =
+            std::abs(history.sourceConstants.cameraAspect - content.constants.cameraAspect) / aspectBase;
+        const double ageMs = scanoutDeadlineMs - history.renderTimestamp;
+        if (!resourceCompatible || fovDelta > (0.25f * std::numbers::pi_v<float> / 180.0f) || aspectDelta > 0.005f ||
+            ageMs <= 0.0 || ageMs > 75.0)
+            continue;
+
+        selected[count++] = &history;
+        maxAgeMs = std::max(maxAgeMs, static_cast<float>(ageMs));
+    }
+
+    if (count > 0)
+    {
+        std::scoped_lock metricsLock(_metricsMutex);
+        ++_metricsHistoryEligibleSlots;
+        _metricsHistoryMaxAgeMs = std::max(_metricsHistoryMaxAgeMs, maxAgeMs);
+    }
+    return count;
+}
+
+void AReproj_Dx12::PopulateHistoryConstants(RP_Constants& constants, HistoryAnchor* const* selected,
+                                            uint32_t historyCount) const
+{
+    constants.historyCount = std::min<uint32_t>(historyCount, kHistoryAnchorCount);
+    const auto targetRight = NormalizeReprojVec3(LoadReprojVec3(constants.targetCameraRight));
+    const auto targetUp = NormalizeReprojVec3(LoadReprojVec3(constants.targetCameraUp));
+    const auto targetForward = NormalizeReprojVec3(LoadReprojVec3(constants.targetCameraForward));
+    const auto foldPixelRow = [&](ReprojVec3 row)
+    {
+        return ReprojVec3 { row.x * (2.0f / constants.displayWidth), row.y * (-2.0f / constants.displayHeight),
+                            -row.x + row.y + row.z };
+    };
+
+    float* rows[kHistoryAnchorCount][3] = {
+        { constants.history0Right, constants.history0Up, constants.history0Forward },
+        { constants.history1Right, constants.history1Up, constants.history1Forward },
+    };
+    for (uint32_t i = 0; i < constants.historyCount; ++i)
+    {
+        const auto& sourceConstants = selected[i]->sourceConstants;
+        const auto sourceRight = NormalizeReprojVec3(LoadReprojVec3(sourceConstants.cameraRight));
+        const auto sourceUp = NormalizeReprojVec3(LoadReprojVec3(sourceConstants.cameraUp));
+        const auto sourceForward = NormalizeReprojVec3(LoadReprojVec3(sourceConstants.cameraForward));
+        ReprojVec3 xRow {}, yRow {}, zRow {};
+        BuildRotationRows(sourceConstants, sourceRight, sourceUp, sourceForward, targetRight, targetUp, targetForward,
+                          &xRow, &yRow, &zRow);
+        StoreReprojVec3(rows[i][0], foldPixelRow(xRow));
+        StoreReprojVec3(rows[i][1], foldPixelRow(yRow));
+        StoreReprojVec3(rows[i][2], foldPixelRow(zRow));
+    }
+}
+
+void AReproj_Dx12::RecordHistoryCoverage(const RP_Constants& constants)
+{
+    if (constants.historyCount == 0 || constants.displayWidth == 0 || constants.displayHeight == 0)
+        return;
+
+    const auto covered = [&](const float* xRow, const float* yRow, const float* zRow, float x, float y)
+    {
+        const ReprojVec3 position { 0.5f + x * (constants.displayWidth - 1.0f),
+                                    0.5f + y * (constants.displayHeight - 1.0f), 1.0f };
+        const float denominator = DotReprojVec3(LoadReprojVec3(zRow), position);
+        if (denominator <= 1.0e-6f || !std::isfinite(denominator))
+            return false;
+        const float u = DotReprojVec3(LoadReprojVec3(xRow), position) / denominator;
+        const float v = DotReprojVec3(LoadReprojVec3(yRow), position) / denominator;
+        const float minU = 0.5f / constants.displayWidth;
+        const float minV = 0.5f / constants.displayHeight;
+        return u >= minU && u <= 1.0f - minU && v >= minV && v <= 1.0f - minV;
+    };
+
+    uint32_t history0 = 0;
+    uint32_t history1 = 0;
+    uint32_t unresolved = 0;
+    const auto sample = [&](float x, float y)
+    {
+        if (covered(constants.prevCameraRight, constants.prevCameraUp, constants.prevCameraForward, x, y))
+            return;
+        if (covered(constants.history0Right, constants.history0Up, constants.history0Forward, x, y))
+            ++history0;
+        else if (constants.historyCount > 1 &&
+                 covered(constants.history1Right, constants.history1Up, constants.history1Forward, x, y))
+            ++history1;
+        else
+            ++unresolved;
+    };
+    constexpr float fractions[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    for (float fraction : fractions)
+    {
+        sample(fraction, 0.0f);
+        sample(fraction, 1.0f);
+    }
+    for (float fraction : fractions)
+        if (fraction != 0.0f && fraction != 1.0f)
+        {
+            sample(0.0f, fraction);
+            sample(1.0f, fraction);
+        }
+
+    std::scoped_lock metricsLock(_metricsMutex);
+    _metricsHistoryBoundaryH0 += history0;
+    _metricsHistoryBoundaryH1 += history1;
+    _metricsHistoryBoundaryUnresolved += unresolved;
+}
+
+void AReproj_Dx12::ReleaseHistoryResources()
+{
+    for (auto& history : _historyAnchors)
+    {
+        SAFE_RELEASE(history.color);
+        history = {};
+    }
+    _historyNewestIndex = -1;
+}
+
 bool AReproj_Dx12::IsCameraAllZero(int fIndex) const
 {
     for (int i = 0; i < 3; i++)
@@ -290,13 +537,6 @@ float ReprojHalfToFloat(uint16_t value)
         bits = sign | (exponent + 112u) << 23 | mantissa << 13;
     return std::bit_cast<float>(bits);
 }
-
-struct ReprojVec3
-{
-    float x;
-    float y;
-    float z;
-};
 
 ReprojVec3 LoadReprojVec3(const float* value) { return { value[0], value[1], value[2] }; }
 
@@ -571,6 +811,7 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, bool inputLatched
                                       const ReprojVec3* targetBaseUp = nullptr,
                                       const ReprojVec3* targetBaseForward = nullptr)
 {
+    constants.historyCount = 0;
     // Mode 2 rotates the predicted basis here for the rotation homography.
     // Translation (walking/hills) is intentionally not represented: the warp
     // assumes infinite depth. Depth-corrected warping was prototyped (v10.0.1
@@ -679,6 +920,13 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, bool inputLatched
                               predictedForward, &xRow, &yRow, &zRow);
         }
     }
+
+    // Preserve the final, possibly safe-limited target pose. History anchors
+    // must map to this exact pose or their border pixels would form a seam
+    // against the current anchor.
+    StoreReprojVec3(constants.targetCameraRight, predictedRight);
+    StoreReprojVec3(constants.targetCameraUp, predictedUp);
+    StoreReprojVec3(constants.targetCameraForward, predictedForward);
 
     // Fold pixel-center -> NDC into the same matrix. The compute shader can now
     // transform its integer dispatch coordinate directly, with no per-pixel
@@ -1296,6 +1544,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
         generated.cameraNear = packet.cameraNear;
         generated.cameraFar = packet.cameraFar;
         generated.invertedDepth = packet.invertedDepth;
+        generated.hdr = packet.hdr;
         generated.generated = true;
         // Midpoint mouse baseline from the timestamped history at the midpoint
         // time. The fallback late warp measures motion since the displayed
@@ -1499,7 +1748,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex)
 }
 
 bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs,
-                                      ContentFrame* contentFrame)
+                                      ContentFrame* contentFrame, bool snapshotRealAnchor)
 {
     auto& packet = _packets[packetIndex];
     auto& content = contentFrame != nullptr ? *contentFrame : static_cast<ContentFrame&>(packet);
@@ -1536,6 +1785,19 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // signals it after the warp+copy dispatch.
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
+    HistoryAnchor* selectedHistory[kHistoryAnchorCount] = {};
+    const auto historyCount = SelectHistoryAnchors(content, packet, scanoutDeadlineMs, selectedHistory);
+    // Snapshot metadata before recording this frame's history copy. The copy
+    // may reuse the oldest selected texture after the shader reads it, but the
+    // deferred late-latch constants must continue describing the old contents.
+    HistoryAnchor selectedHistoryMetadata[kHistoryAnchorCount] {};
+    HistoryAnchor* constantHistory[kHistoryAnchorCount] = {};
+    for (uint32_t i = 0; i < historyCount; ++i)
+    {
+        selectedHistoryMetadata[i] = *selectedHistory[i];
+        constantHistory[i] = &selectedHistoryMetadata[i];
+    }
+
     auto constants = content.constants;
     constants.timeStep = timeStep;
     const bool deferredLateLatch = _lateLatchFence != nullptr && _presentQueue != nullptr;
@@ -1550,6 +1812,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
                                WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
                                coverage.overrunTop, coverage.overrunBottom);
         }
+        PopulateHistoryConstants(constants, constantHistory, historyCount);
+        RecordHistoryCoverage(constants);
     }
     else
     {
@@ -1557,6 +1821,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // parked before it can read this upload buffer; the final pose replaces
         // it after submission and before the latch fence is released.
         PrepareRotationConstants(constants, false);
+        PopulateHistoryConstants(constants, constantHistory, historyCount);
         if (!_warp->WriteConstants(outputIndex, constants))
         {
             backBuffer->Release();
@@ -1570,7 +1835,11 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // with ui == nullptr (RPD then samples color for both SRVs).
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
                                     outputIndex, deferredLateLatch, packet.hasUi ? packet.ui : nullptr,
-                                    packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON);
+                                    packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON,
+                                    historyCount > 0 ? selectedHistory[0]->color : nullptr,
+                                    historyCount > 0 ? selectedHistory[0]->colorState : D3D12_RESOURCE_STATE_COMMON,
+                                    historyCount > 1 ? selectedHistory[1]->color : nullptr,
+                                    historyCount > 1 ? selectedHistory[1]->colorState : D3D12_RESOURCE_STATE_COMMON);
     if (!ok)
     {
         backBuffer->Release();
@@ -1580,6 +1849,10 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
 
     content.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    for (uint32_t i = 0; i < historyCount; ++i)
+        selectedHistory[i]->colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (snapshotRealAnchor)
+        SnapshotHistoryAnchor(cmdList, packetIndex);
     ResourceBarrier(cmdList, _warpOutput[outputIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_COPY_SOURCE);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1638,6 +1911,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
                                WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
                                coverage.overrunTop, coverage.overrunBottom);
         }
+        PopulateHistoryConstants(lateConstants, constantHistory, historyCount);
+        RecordHistoryCoverage(lateConstants);
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         // Publish the persistent upload-buffer write before releasing the GPU
@@ -1753,6 +2028,12 @@ void AReproj_Dx12::LogMetricsIfDue()
     uint32_t warpCoverageSamples = 0;
     uint32_t warpCoverageInvalid = 0;
     uint32_t safeWarpLimited = 0;
+    uint32_t historyEligibleSlots = 0;
+    uint32_t historyBoundaryH0 = 0;
+    uint32_t historyBoundaryH1 = 0;
+    uint32_t historyBoundaryUnresolved = 0;
+    uint32_t historyCopyDrops = 0;
+    float historyMaxAgeMs = 0.0f;
     float coverageOverrunLeft = 0.0f;
     float coverageOverrunRight = 0.0f;
     float coverageOverrunTop = 0.0f;
@@ -1794,6 +2075,12 @@ void AReproj_Dx12::LogMetricsIfDue()
         warpCoverageSamples = _metricsWarpCoverageSamples;
         warpCoverageInvalid = _metricsWarpCoverageInvalid;
         safeWarpLimited = _metricsSafeWarpLimited;
+        historyEligibleSlots = _metricsHistoryEligibleSlots;
+        historyBoundaryH0 = _metricsHistoryBoundaryH0;
+        historyBoundaryH1 = _metricsHistoryBoundaryH1;
+        historyBoundaryUnresolved = _metricsHistoryBoundaryUnresolved;
+        historyCopyDrops = _metricsHistoryCopyDrops;
+        historyMaxAgeMs = _metricsHistoryMaxAgeMs;
         coverageOverrunLeft = _metricsWarpCoverageOverrunLeft;
         coverageOverrunRight = _metricsWarpCoverageOverrunRight;
         coverageOverrunTop = _metricsWarpCoverageOverrunTop;
@@ -1856,6 +2143,12 @@ void AReproj_Dx12::LogMetricsIfDue()
         _metricsWarpCoverageSamples = 0;
         _metricsWarpCoverageInvalid = 0;
         _metricsSafeWarpLimited = 0;
+        _metricsHistoryEligibleSlots = 0;
+        _metricsHistoryBoundaryH0 = 0;
+        _metricsHistoryBoundaryH1 = 0;
+        _metricsHistoryBoundaryUnresolved = 0;
+        _metricsHistoryCopyDrops = 0;
+        _metricsHistoryMaxAgeMs = 0.0f;
         _metricsWarpCoverageOverrunLeft = 0.0f;
         _metricsWarpCoverageOverrunRight = 0.0f;
         _metricsWarpCoverageOverrunTop = 0.0f;
@@ -1868,14 +2161,14 @@ void AReproj_Dx12::LogMetricsIfDue()
              "interval={:.2f}/{:.2f}ms latchLead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} "
              "({}, block={:.2f}ms) generated={} edge={}/{} scale={:.3f} limited={} rot={:.1f}deg "
-             "overrun={:.3f}/{:.3f}/{:.3f}/{:.3f}",
+             "overrun={:.3f}/{:.3f}/{:.3f}/{:.3f} hist={}/{}/{}/{} age={:.1f}ms copyDrop={}",
              realFrames * scale, warpFrames * scale, newAnchorDisplays, repeatedAnchorDisplays, missedDisplaySlots,
              meanPresentIntervalMs, p95PresentIntervalMs, _lastLateSampleLeadMs.load(std::memory_order_relaxed),
              poseAge, queueDepth, lateInputApplied, lateInputSamples, lateInputMaxDegrees, skippedAnchorSamples,
              directCaptures, captureNotReady, presenter, gamePresentBlockMaxMs, generatedDisplays, warpCoverageInvalid,
-             warpCoverageSamples, safeWarpMinScale,
-             safeWarpLimited, requestedWarpMaxDegrees, coverageOverrunLeft, coverageOverrunRight, coverageOverrunTop,
-             coverageOverrunBottom);
+             warpCoverageSamples, safeWarpMinScale, safeWarpLimited, requestedWarpMaxDegrees, coverageOverrunLeft,
+             coverageOverrunRight, coverageOverrunTop, coverageOverrunBottom, historyEligibleSlots, historyBoundaryH0,
+             historyBoundaryH1, historyBoundaryUnresolved, historyMaxAgeMs, historyCopyDrops);
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -2244,6 +2537,12 @@ void AReproj_Dx12::Activate()
         _metricsWarpCoverageSamples = 0;
         _metricsWarpCoverageInvalid = 0;
         _metricsSafeWarpLimited = 0;
+        _metricsHistoryEligibleSlots = 0;
+        _metricsHistoryBoundaryH0 = 0;
+        _metricsHistoryBoundaryH1 = 0;
+        _metricsHistoryBoundaryUnresolved = 0;
+        _metricsHistoryCopyDrops = 0;
+        _metricsHistoryMaxAgeMs = 0.0f;
         _metricsWarpCoverageOverrunLeft = 0.0f;
         _metricsWarpCoverageOverrunRight = 0.0f;
         _metricsWarpCoverageOverrunTop = 0.0f;

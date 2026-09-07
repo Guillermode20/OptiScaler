@@ -113,6 +113,7 @@ The active `[AsyncTimewarp]` controls include:
 - `ContentInterpolation`, default off
 - `SafeWarpBudget`, default 12 px, 0 = off (full warp)
 - `MaxTimeStep`, default 2.5 frames, clamp 1.0-4.0
+- `HistoryBorderFallback`, experimental and default off
 - `DebugView`, default off (magenta invalid coverage)
 
 Do not invent a new control before checking `Config.h`, `Config.cpp`, `OptiScaler.ini`, and the in-game menu wiring.

@@ -693,7 +693,7 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("DebugView == 1", shader)
         self.assertIn("float3(1.0f, 0.0f, 1.0f)", shader)
         # Invalid coverage never samples: the else branch falls back to Load.
-        invalid = shader.split("if (coverage > 0.0f)", 1)[1].split("if (HudlessSource != 0)", 1)[0]
+        invalid = shader.split("if (covered)", 1)[1].split("if (HudlessSource != 0)", 1)[0]
         self.assertIn("SampleLevel(Bilinear, sourceUv, 0)", invalid)
         self.assertIn("LastColor.Load(int3(dtid.xy, 0)).rgb", invalid)
 

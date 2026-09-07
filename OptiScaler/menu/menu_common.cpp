@@ -4235,6 +4235,12 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Absolute clamp on rotation extrapolation in frames. Bounds recovery after "
                        "hitches without hitch-hold. 2.5 = default (recommended). "
                        "Lower to 1.5 if anchor-switch snaps appear.");
+        bool historyBorderFallback = config->ReprojHistoryBorderFallback.value_or_default();
+        if (ImGui::Checkbox("History border fallback##reproj-live", &historyBorderFallback))
+            config->ReprojHistoryBorderFallback = historyBorderFallback;
+        ShowHelpMarker("Experimental E5 fallback for invalid world-border pixels only. "
+                       "Uses compatible older anchors after current coverage fails; never blends history "
+                       "over valid current content. Off by default.");
         bool edgeDebug = config->ReprojDebugView.value_or_default();
         if (ImGui::Checkbox("Edge debug view##reproj-live", &edgeDebug))
             config->ReprojDebugView = edgeDebug;

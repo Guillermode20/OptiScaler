@@ -68,6 +68,9 @@ LateSampleLead=auto
 SafeWarpBudget=auto
 # Absolute extrapolation clamp in frames; 2.5 = default (recommended).
 MaxTimeStep=auto
+# E5 experimental history fill for invalid world-border pixels only; default off.
+# Compatible older anchors are never blended over valid current content.
+HistoryBorderFallback=auto
 # E2 magenta invalid-coverage view; visualization only, default off.
 DebugView=auto
 ```

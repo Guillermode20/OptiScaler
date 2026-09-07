@@ -634,6 +634,9 @@ class Config
     CustomOptional<float> ReprojMaxTimeStep {
         2.5f
     }; // absolute clamp on rotation extrapolation step in frames; bounds hitch recovery
+    CustomOptional<bool> ReprojHistoryBorderFallback {
+        false
+    }; // opt-in compatible-anchor fallback for invalid world border pixels only
     CustomOptional<bool> ReprojDebugView { false }; // E2 diagnostic: magenta invalid warp coverage
 
     // As per

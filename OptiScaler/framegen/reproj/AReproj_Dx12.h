@@ -89,6 +89,19 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         std::atomic<PacketState> state { PacketState::Free };
     };
 
+    struct HistoryAnchor
+    {
+        ID3D12Resource* color = nullptr;
+        D3D12_RESOURCE_STATES colorState = D3D12_RESOURCE_STATE_COMMON;
+        RP_Constants sourceConstants {};
+        UINT64 frameId = 0;
+        uint64_t epoch = 0;
+        double renderTimestamp = 0.0;
+        uint64_t sourceCutGeneration = 0;
+        bool hdr = false;
+        bool valid = false;
+    };
+
     std::unique_ptr<RP_Dx12> _warp; // the reprojection pass (v1/v2 PSOs)
     std::unique_ptr<HybridFsrGenerator> _contentGenerator;
     ID3D12Resource* _warpOutput[BUFFER_COUNT] = {}; // private UAV the warp writes into (backbuffers can't be UAVs)
@@ -113,6 +126,10 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     static constexpr int kReprojFrameSlots = 3;
 
     ReprojFramePacket _packets[kReprojFrameSlots];
+    static constexpr int kHistoryAnchorCount = 2;
+    HistoryAnchor _historyAnchors[kHistoryAnchorCount];
+    int _historyNewestIndex = -1; // presenter thread only
+    uint64_t _historyEpoch = 0;
     std::atomic<UINT64> _publishedFrameId { 0 };
     std::atomic<UINT64> _readyFrameId { 0 };
     std::mutex _presentMutex;
@@ -152,7 +169,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     void SkipAnchorPublication(int fIndex, ID3D12Resource* gameBackBuffer, UINT virtualBufferIndex,
                                class WrappedIDXGISwapChain4* wrapped, double presentStartMs);
     bool DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs = 0.0,
-                            ContentFrame* contentFrame = nullptr);
+                            ContentFrame* contentFrame = nullptr, bool snapshotRealAnchor = false);
     bool DisplayPacket(int packetIndex);
     bool CopyPacketResource(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* source,
                             D3D12_RESOURCE_STATES sourceState, ID3D12Resource** target,
@@ -182,6 +199,13 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool SubmitSCCommandList(int fIndex);                      // close + execute the SC command list
     bool WaitForSCAllocator(int fIndex);                       // wait for the previous warp on this slot to finish
     bool CreateWarpOutput(int fIndex, ID3D12Resource* source); // private UAV buffer, SRGB -> typeless
+    bool EnsureHistoryResource(int historyIndex, ID3D12Resource* source);
+    bool SnapshotHistoryAnchor(ID3D12GraphicsCommandList* cmdList, int packetIndex);
+    uint32_t SelectHistoryAnchors(const ContentFrame& content, const ReprojFramePacket& packet,
+                                  double scanoutDeadlineMs, HistoryAnchor** selected);
+    void PopulateHistoryConstants(RP_Constants& constants, HistoryAnchor* const* selected, uint32_t historyCount) const;
+    void RecordHistoryCoverage(const RP_Constants& constants);
+    void ReleaseHistoryResources();
     bool IsCameraAllZero(int fIndex) const;
     bool IsPoseFresh(double timestamp, float* ageMs = nullptr) const;
     bool HasFreshCameraPose(int fIndex, float* ageMs = nullptr) const;
@@ -209,6 +233,12 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsWarpCoverageSamples = 0;
     uint32_t _metricsWarpCoverageInvalid = 0;
     uint32_t _metricsSafeWarpLimited = 0;
+    uint32_t _metricsHistoryEligibleSlots = 0;
+    uint32_t _metricsHistoryBoundaryH0 = 0;
+    uint32_t _metricsHistoryBoundaryH1 = 0;
+    uint32_t _metricsHistoryBoundaryUnresolved = 0;
+    uint32_t _metricsHistoryCopyDrops = 0;
+    float _metricsHistoryMaxAgeMs = 0.0f;
     float _metricsWarpCoverageOverrunLeft = 0.0f;
     float _metricsWarpCoverageOverrunRight = 0.0f;
     float _metricsWarpCoverageOverrunTop = 0.0f;

@@ -24,7 +24,9 @@ void RP_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Resource
 
 bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor,
                        D3D12_RESOURCE_STATES lastColorState, ID3D12Resource* output, RP_Constants& constants,
-                       int constantSlot, bool deferConstants, ID3D12Resource* ui, D3D12_RESOURCE_STATES uiState)
+                       int constantSlot, bool deferConstants, ID3D12Resource* ui, D3D12_RESOURCE_STATES uiState,
+                       ID3D12Resource* history0, D3D12_RESOURCE_STATES history0State, ID3D12Resource* history1,
+                       D3D12_RESOURCE_STATES history1State)
 {
     if (!_init || _device == nullptr || cmdList == nullptr || lastColor == nullptr || output == nullptr)
     {
@@ -44,6 +46,10 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
     ResourceBarrier(cmdList, lastColor, lastColorState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     if (ui != nullptr)
         ResourceBarrier(cmdList, ui, uiState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (history0 != nullptr)
+        ResourceBarrier(cmdList, history0, history0State, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (history1 != nullptr)
+        ResourceBarrier(cmdList, history1, history1State, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ResourceBarrier(cmdList, output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
     // Sample the previous frame byte-faithfully: an sRGB backbuffer copy would otherwise
@@ -66,6 +72,10 @@ bool RP_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastC
         CreateShaderResourceView(_device, ui, currentHeap.GetSrvCPU(1));
     else
         CreateShaderResourceView(_device, lastColor, currentHeap.GetSrvCPU(1), lastColorViewFormat);
+    CreateShaderResourceView(_device, history0 != nullptr ? history0 : lastColor, currentHeap.GetSrvCPU(2),
+                             lastColorViewFormat);
+    CreateShaderResourceView(_device, history1 != nullptr ? history1 : lastColor, currentHeap.GetSrvCPU(3),
+                             lastColorViewFormat);
     CreateUnorderedAccessView(_device, output, currentHeap.GetUavCPU(0), 0);
 
     if (_constantBufferData[heapIndex] == nullptr)
@@ -115,7 +125,7 @@ RP_Dx12::RP_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
 
-    if (!SetupRootSignature(InDevice, 2, 1, 1, 0, 0, 1, &sampler))
+    if (!SetupRootSignature(InDevice, 4, 1, 1, 0, 0, 1, &sampler))
     {
         LOG_ERROR("Failed to setup root signature");
         return;

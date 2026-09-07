@@ -1920,6 +1920,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("Config parameters:");
         for (const std::string& l : Config::Instance()->GetConfigLog())
             spdlog::info(l);
+        spdlog::info("AsyncTimewarp effective: SafeWarpBudget={} px, MaxTimeStep={} frames, "
+                     "HistoryBorderFallback={}",
+                     Config::Instance()->ReprojSafeWarpBudget.value_or_default(),
+                     Config::Instance()->ReprojMaxTimeStep.value_or_default(),
+                     Config::Instance()->ReprojHistoryBorderFallback.value_or_default());
 
         spdlog::info("");
         spdlog::info("Setting DllPath to {}", wstring_to_string(Config::Instance()->MainDllPath.value()));

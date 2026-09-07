@@ -143,6 +143,18 @@ Completed (2026-09-07). Live testing showed that the temporary `CCamera` FOV mut
 
 Only after safe limiting is solid, retain up to two older compatible world anchors as a fallback for pixels that are invalid in the newest anchor.
 
+Status (2026-09-07): code done, Windows CI and live validation pending. The
+public opt-in is `[AsyncTimewarp] HistoryBorderFallback`, default off, with
+matching menu, INI, and startup-effective-value logging. Two presenter-owned
+textures snapshot real HUDless anchors on their first real display; the same
+DIRECT queue orders each snapshot after prior history reads and the packet's
+normal retirement fence covers the copy. History accepts only matching
+dimensions/format/sample count/HDR/cut generation, <=0.25 degree FOV drift,
+<=0.5% aspect drift, and <=75 ms age. The shader samples current-valid content
+first, then newest/older valid history, then the bounded spatial fallback; it
+never blends history over valid current content and composites the current HUD
+last. The existing safe-warp budget remains active independently.
+
 Conceptually:
 
 ```text

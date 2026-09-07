@@ -87,6 +87,9 @@ bool AReproj_Dx12::CreateAsyncPresenter()
 void AReproj_Dx12::DestroyAsyncPresenter()
 {
     _presentWaitableObject = nullptr;
+    // Callers stop and drain the presenter before destruction, so no queued
+    // history read/copy can still reference these resources.
+    ReleaseHistoryResources();
     SAFE_RELEASE(_presentQueue);
 }
 
@@ -105,6 +108,10 @@ bool AReproj_Dx12::StartAsyncPresenter()
     }
 
     _stopPresenter.store(false);
+    ++_historyEpoch;
+    _historyNewestIndex = -1;
+    for (auto& history : _historyAnchors)
+        history.valid = false;
     {
         std::scoped_lock metricsLock(_metricsMutex);
         _lastDisplayPresentMs = 0.0;
@@ -433,9 +440,9 @@ void AReproj_Dx12::PresenterMain()
         // slots included (RepeatWarp is unconditional on this branch; no shed
         // controller exists to take the blit path).
         const bool shouldWarp = kAsyncSimpleStage >= 1 && packet.warpAllowed && !focusLost;
-        const bool dispatched = shouldWarp
-                                    ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs, selectedContent)
-                                    : DisplayPacket(activePacketIndex);
+        const bool dispatched = shouldWarp ? DispatchPacketWarp(activePacketIndex, timeStep, targetDisplayMs,
+                                                                selectedContent, contentPhase == 2)
+                                           : DisplayPacket(activePacketIndex);
 
         if (!dispatched)
         {
