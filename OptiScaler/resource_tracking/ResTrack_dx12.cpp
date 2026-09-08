@@ -169,48 +169,50 @@ void LogKcd2CallerStack(const char* label)
 
 static uintptr_t __fastcall hkKcd2ResourceDescribe(uintptr_t resourceObject, uintptr_t descriptor)
 {
-    const auto result = o_Kcd2ResourceDescribe(resourceObject, descriptor);
-
-    if (!Config::Instance()->ReprojPredictiveProbe.value_or_default() || resourceObject == 0 || descriptor == 0)
-        return result;
-
-    __try
+    if (Config::Instance()->ReprojPredictiveProbe.value_or_default() && resourceObject != 0 && descriptor != 0)
     {
-        const auto sourceWidth = *reinterpret_cast<const uint16_t*>(resourceObject + 0x90);
-        const auto sourceHeight = *reinterpret_cast<const uint16_t*>(resourceObject + 0x92);
-        const auto sourceDepthOrArray = *reinterpret_cast<const uint16_t*>(resourceObject + 0x94);
-        const auto compactWidth = *reinterpret_cast<const uint16_t*>(descriptor + 0x08);
-        const auto compactHeight = *reinterpret_cast<const uint16_t*>(descriptor + 0x0A);
-        const auto compactDepthOrArray = *reinterpret_cast<const uint16_t*>(descriptor + 0x0C);
-        const auto compactMips = *reinterpret_cast<const uint16_t*>(descriptor + 0x0E);
-        const auto compactType = *reinterpret_cast<const uint8_t*>(descriptor + 0x12);
-        const auto compactFormat = *reinterpret_cast<const uint8_t*>(descriptor + 0x10);
-        const auto compactFlags = *reinterpret_cast<const uint32_t*>(descriptor + 0x14);
-        const auto compactTiled = *reinterpret_cast<const uint8_t*>(descriptor + 0x18);
-        const auto callerRva = Kcd2CallerRva(_ReturnAddress());
-        const auto n = g_kcd2ResourceDescribeCount.fetch_add(1, std::memory_order_relaxed);
-        const bool primaryWorldExtent = sourceWidth == 1706 && sourceHeight == 960;
-
-        if (primaryWorldExtent && !g_kcd2ResourceDescribeStackLogged.exchange(true, std::memory_order_relaxed))
-            LogKcd2CallerStack("resource-describe-world");
-
-        // The first bounded batch establishes the resource graph. Continue to
-        // retain every primary world-extent record even if startup is unusually
-        // descriptor-heavy, while never logging on the display hot path.
-        if (n < 96 || primaryWorldExtent)
+        __try
         {
-            LOG_INFO("KCD2 resource desc: #{} callerRva={:X} source={:X} src={}x{}x{} "
-                     "compact={}x{}x{} mips={} type={} format={} flags={:X} tiled={}",
-                     n, callerRva, resourceObject, sourceWidth, sourceHeight, sourceDepthOrArray, compactWidth,
-                     compactHeight, compactDepthOrArray, compactMips, compactType, compactFormat, compactFlags,
-                     compactTiled);
+            const auto sourceWidth = *reinterpret_cast<const uint16_t*>(resourceObject + 0x90);
+            const auto sourceHeight = *reinterpret_cast<const uint16_t*>(resourceObject + 0x92);
+            const auto sourceDepthOrArray = *reinterpret_cast<const uint16_t*>(resourceObject + 0x94);
+            // +0x7B07F0 is a copy helper. These are the values it will write
+            // into the compact descriptor; do not inspect the descriptor after
+            // the original call because its caller relies on RCX surviving the
+            // helper unchanged and immediately dereferences it.
+            const auto compactMips = *reinterpret_cast<const uint16_t*>(resourceObject + 0xA0);
+            const auto compactType = *reinterpret_cast<const uint8_t*>(resourceObject + 0x96);
+            const auto compactFormat = *reinterpret_cast<const uint8_t*>(resourceObject + 0xA2);
+            const auto compactFlags = *reinterpret_cast<const uint32_t*>(resourceObject + 0x98);
+            const auto compactTiled = (*reinterpret_cast<const uint8_t*>(resourceObject + 0x9D) >> 4) & 1;
+            const auto callerRva = Kcd2CallerRva(_ReturnAddress());
+            const auto n = g_kcd2ResourceDescribeCount.fetch_add(1, std::memory_order_relaxed);
+            const bool primaryWorldExtent = sourceWidth == 1706 && sourceHeight == 960;
+
+            if (primaryWorldExtent && !g_kcd2ResourceDescribeStackLogged.exchange(true, std::memory_order_relaxed))
+                LogKcd2CallerStack("resource-describe-world");
+
+            // The first bounded batch establishes the resource graph. Continue
+            // to retain every primary world-extent record even if startup is
+            // unusually descriptor-heavy, while never logging on the display
+            // hot path.
+            if (n < 96 || primaryWorldExtent)
+            {
+                LOG_INFO("KCD2 resource desc: #{} callerRva={:X} source={:X} src={}x{}x{} "
+                         "compact={}x{}x{} mips={} type={} format={} flags={:X} tiled={}",
+                         n, callerRva, resourceObject, sourceWidth, sourceHeight, sourceDepthOrArray, sourceWidth,
+                         sourceHeight, sourceDepthOrArray, compactMips, compactType, compactFormat, compactFlags,
+                         compactTiled);
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
         }
     }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-    }
 
-    return result;
+    // This must remain the last operation in the hook. The retail helper's
+    // caller uses RCX after the call even though RCX is volatile by the ABI.
+    return o_Kcd2ResourceDescribe(resourceObject, descriptor);
 }
 
 static void TryHookKcd2ResourceDescribe()
