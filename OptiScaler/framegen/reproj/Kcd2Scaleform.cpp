@@ -1,7 +1,9 @@
 #include "pch.h"
 #include "Kcd2Scaleform.h"
+#include "Kcd2Camera.h"
 #include "Kcd2HudIsolation.h"
 
+#include "Config.h"
 #include "Logger.h"
 #include <detours/detours.h>
 
@@ -207,14 +209,19 @@ bool IsActiveOnThisThread()
 void TraceOmSetRenderTargets(ID3D12GraphicsCommandList* commandList, uint32_t targetCount,
                              ID3D12Resource* const* targets)
 {
-    if (!IsActiveOnThisThread())
+    if (!IsActiveOnThisThread() || !Config::Instance()->ReprojPredictiveProbe.value_or_default() ||
+        !Kcd2Camera::IsAvailable())
         return;
     const auto sequence = g_omCount.fetch_add(1, std::memory_order_relaxed) + 1;
-    if (sequence <= 12)
+    if (sequence <= 24)
     {
-        LOG_INFO("KCD2 Scaleform trace: OM #{} cmd={:X} targets={} first={:X}", sequence,
-                 reinterpret_cast<size_t>(commandList), targetCount,
-                 targetCount > 0 && targets != nullptr ? reinterpret_cast<size_t>(targets[0]) : 0);
+        auto* first = targetCount > 0 && targets != nullptr ? targets[0] : nullptr;
+        D3D12_RESOURCE_DESC desc {};
+        if (first != nullptr)
+            desc = first->GetDesc();
+        LOG_INFO("KCD2 Scaleform trace: OM #{} cmd={:X} targets={} first={:X} w={} h={} fmt={}", sequence,
+                 reinterpret_cast<size_t>(commandList), targetCount, reinterpret_cast<size_t>(first), desc.Width,
+                 desc.Height, static_cast<UINT>(desc.Format));
     }
 }
 } // namespace Kcd2Scaleform

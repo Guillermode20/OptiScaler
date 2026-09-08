@@ -4,6 +4,7 @@
 #include <Config.h>
 #include <State.h>
 #include <Util.h>
+#include <framegen/reproj/Kcd2Camera.h>
 #include <framegen/reproj/Kcd2HudIsolation.h>
 #include <framegen/reproj/Kcd2Scaleform.h>
 
@@ -124,9 +125,13 @@ static PFN_SetGraphicsRootDescriptorTable o_SetGraphicsRootDescriptorTable = nul
 static PFN_SetComputeRootDescriptorTable o_SetComputeRootDescriptorTable = nullptr;
 static PFN_RSSetViewports o_RSSetViewports = nullptr;
 static PFN_RSSetScissorRects o_RSSetScissorRects = nullptr;
-// E5.1 diagnostic counters: rate-limit viewport/scissor logging, no hot-path allocation.
-static std::atomic<uint64_t> g_viewportDiagCount { 0 };
-static std::atomic<uint64_t> g_scissorDiagCount { 0 };
+// E5.1 diagnostic counters: independent quotas prevent startup/world calls from
+// consuming the HUD evidence. Logging is additionally gated on a validated live
+// KCD2 gameplay camera, so these remain zero until the useful render phase.
+static std::atomic<uint64_t> g_worldViewportDiagCount { 0 };
+static std::atomic<uint64_t> g_hudViewportDiagCount { 0 };
+static std::atomic<uint64_t> g_worldScissorDiagCount { 0 };
+static std::atomic<uint64_t> g_hudScissorDiagCount { 0 };
 
 static std::mutex _hudlessTrackMutex;
 static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*,
@@ -1159,17 +1164,18 @@ void ResTrack_Dx12::hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumVi
         catch (...)
         {
         }
-        if (probe)
+        if (probe && Kcd2Camera::IsAvailable())
         {
-            const auto n = g_viewportDiagCount.fetch_add(1, std::memory_order_relaxed);
+            const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
+            auto& counter = hud ? g_hudViewportDiagCount : g_worldViewportDiagCount;
+            const auto n = counter.fetch_add(1, std::memory_order_relaxed);
             if (n < 24)
             {
-                const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
                 const auto& vp = pViewports[0];
-                LOG_INFO("KCD2 viewport: #{} phase={} count={} x={:.1f} y={:.1f} w={:.1f} h={:.1f} "
+                LOG_INFO("KCD2 viewport: #{} phase={} cmd={:X} count={} x={:.1f} y={:.1f} w={:.1f} h={:.1f} "
                          "minD={:.3f} maxD={:.3f}",
-                         n, hud ? "hud" : "world", NumViewports, vp.TopLeftX, vp.TopLeftY, vp.Width,
-                         vp.Height, vp.MinDepth, vp.MaxDepth);
+                         n, hud ? "hud" : "world", reinterpret_cast<size_t>(This), NumViewports, vp.TopLeftX,
+                         vp.TopLeftY, vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth);
             }
         }
     }
@@ -1188,15 +1194,17 @@ void ResTrack_Dx12::hkRSSetScissorRects(ID3D12GraphicsCommandList* This, UINT Nu
         catch (...)
         {
         }
-        if (probe)
+        if (probe && Kcd2Camera::IsAvailable())
         {
-            const auto n = g_scissorDiagCount.fetch_add(1, std::memory_order_relaxed);
+            const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
+            auto& counter = hud ? g_hudScissorDiagCount : g_worldScissorDiagCount;
+            const auto n = counter.fetch_add(1, std::memory_order_relaxed);
             if (n < 24)
             {
-                const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
                 const auto& rc = pRects[0];
-                LOG_INFO("KCD2 scissor: #{} phase={} count={} l={} t={} r={} b={}", n,
-                         hud ? "hud" : "world", NumRects, rc.left, rc.top, rc.right, rc.bottom);
+                LOG_INFO("KCD2 scissor: #{} phase={} cmd={:X} count={} l={} t={} r={} b={}", n,
+                         hud ? "hud" : "world", reinterpret_cast<size_t>(This), NumRects, rc.left, rc.top,
+                         rc.right, rc.bottom);
             }
         }
     }
