@@ -512,10 +512,6 @@ class ResTrack_Dx12
                                      D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors,
                                      BOOL RTsSingleHandleToDescriptorRange,
                                      D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor);
-    // E5.1 viewport diagnostic: passive observers only, never modify args.
-    static void hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
-                                 const D3D12_VIEWPORT* pViewports);
-    static void hkRSSetScissorRects(ID3D12GraphicsCommandList* This, UINT NumRects, const D3D12_RECT* pRects);
     static void hkSetComputeRootDescriptorTable(ID3D12GraphicsCommandList* This, UINT RootParameterIndex,
                                                 D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor);
 

@@ -16,8 +16,6 @@
 #include <cstdio>
 #include <cstring>
 
-#pragma intrinsic(_ReturnAddress)
-
 namespace Kcd2Camera
 {
 namespace
@@ -30,7 +28,6 @@ std::atomic<int> g_initState { 0 };
 std::atomic<uint64_t> g_sequence { 0 };
 std::atomic<uint64_t> g_poseSequence { 0 };
 std::atomic<uint64_t> g_cutGeneration { 1 };
-std::atomic<bool> g_gameplayCallerLogged { false };
 
 struct Pose
 {
@@ -38,10 +35,6 @@ struct Pose
     float right[3] {};
     float up[3] {};
     float forward[3] {};
-    float unbiasedRight[3] {};
-    float unbiasedUp[3] {};
-    float unbiasedForward[3] {};
-    float biasYaw = 0.0f;
     float verticalFov = 0.0f;
     // Raw CCamera floats at +0x30..+0x7C (20 floats, stride 4). Live-validated mapping (retail
     // 1.5.6, see "KCD2 camera projection" log line):
@@ -164,8 +157,7 @@ bool IsGameplayCamera(uintptr_t camera)
     }
 }
 
-void PublishPose(uintptr_t camera, const float* unbiasedRight = nullptr, const float* unbiasedUp = nullptr,
-                 const float* unbiasedForward = nullptr, float biasYaw = 0.0f)
+void PublishPose(uintptr_t camera)
 {
     __try
     {
@@ -181,20 +173,6 @@ void PublishPose(uintptr_t camera, const float* unbiasedRight = nullptr, const f
             pose.forward[i] = matrix[i][1];
             pose.up[i] = matrix[i][2];
             pose.position[i] = matrix[i][3];
-        }
-        if (unbiasedRight != nullptr && unbiasedUp != nullptr && unbiasedForward != nullptr && biasYaw != 0.0f)
-        {
-            std::memcpy(pose.unbiasedRight, unbiasedRight, sizeof(pose.unbiasedRight));
-            std::memcpy(pose.unbiasedUp, unbiasedUp, sizeof(pose.unbiasedUp));
-            std::memcpy(pose.unbiasedForward, unbiasedForward, sizeof(pose.unbiasedForward));
-            pose.biasYaw = biasYaw;
-        }
-        else
-        {
-            std::memcpy(pose.unbiasedRight, pose.right, sizeof(pose.unbiasedRight));
-            std::memcpy(pose.unbiasedUp, pose.up, sizeof(pose.unbiasedUp));
-            std::memcpy(pose.unbiasedForward, pose.forward, sizeof(pose.unbiasedForward));
-            pose.biasYaw = 0.0f;
         }
         pose.verticalFov = *reinterpret_cast<const float*>(camera + 0x30);
         std::memcpy(pose.projectionRaw, reinterpret_cast<const float*>(camera + 0x30),
@@ -237,65 +215,7 @@ void PublishPose(uintptr_t camera, const float* unbiasedRight = nullptr, const f
 
 uintptr_t __fastcall Hook(uintptr_t camera)
 {
-    const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"WHGame.dll"));
-    const auto caller = reinterpret_cast<uintptr_t>(_ReturnAddress());
-    const auto callerRva = (module != 0 && caller >= module) ? caller - module : 0;
-
-    if (IsGameplayCamera(camera))
-    {
-        if (!g_gameplayCallerLogged.exchange(true, std::memory_order_relaxed))
-        {
-            LOG_INFO("KCD2 camera: gameplay frustum caller RVA={:X} absolute={:X}", callerRva, caller);
-        }
-
-        const bool probeEnabled = Config::Instance()->ReprojPredictiveProbe.value_or_default();
-        if (probeEnabled && callerRva == 0x7F1A68)
-        {
-            auto matrix = reinterpret_cast<float (*)[4]>(camera);
-            const float origRight[3] = { matrix[0][0], matrix[1][0], matrix[2][0] };
-            const float origForward[3] = { matrix[0][1], matrix[1][1], matrix[2][1] };
-            const float origUp[3] = { matrix[0][2], matrix[1][2], matrix[2][2] };
-
-            // Opt-in fixed +1 degree yaw bias around CryEngine world Z (+Z)
-            constexpr float kFixedYawBiasDeg = 1.0f;
-            constexpr float kFixedYawBiasRad = kFixedYawBiasDeg * (3.14159265358979323846f / 180.0f);
-            const float cosT = std::cos(-kFixedYawBiasRad);
-            const float sinT = std::sin(-kFixedYawBiasRad);
-            auto rotZ = [cosT, sinT](const float* v, float* out)
-            {
-                out[0] = v[0] * cosT - v[1] * sinT;
-                out[1] = v[0] * sinT + v[1] * cosT;
-                out[2] = v[2];
-            };
-            float biasedRight[3] {}, biasedForward[3] {}, biasedUp[3] {};
-            rotZ(origRight, biasedRight);
-            rotZ(origForward, biasedForward);
-            rotZ(origUp, biasedUp);
-
-            matrix[0][0] = biasedRight[0];
-            matrix[1][0] = biasedRight[1];
-            matrix[2][0] = biasedRight[2];
-            matrix[0][1] = biasedForward[0];
-            matrix[1][1] = biasedForward[1];
-            matrix[2][1] = biasedForward[2];
-            matrix[0][2] = biasedUp[0];
-            matrix[1][2] = biasedUp[1];
-            matrix[2][2] = biasedUp[2];
-
-            static std::atomic<bool> s_probeLogged { false };
-            if (!s_probeLogged.exchange(true, std::memory_order_relaxed))
-            {
-                LOG_INFO("KCD2 camera: predictive render probe active (fixed +{:.1f} deg yaw bias at RVA={:X})",
-                         kFixedYawBiasDeg, callerRva);
-            }
-
-            PublishPose(camera, origRight, origUp, origForward, kFixedYawBiasRad);
-        }
-        else
-        {
-            PublishPose(camera);
-        }
-    }
+    PublishPose(camera);
     return g_original(camera);
 }
 
@@ -378,10 +298,6 @@ bool ReadSnapshots(Snapshot& current, Snapshot& previous)
         std::memcpy(target.right, source.right, sizeof(target.right));
         std::memcpy(target.up, source.up, sizeof(target.up));
         std::memcpy(target.forward, source.forward, sizeof(target.forward));
-        std::memcpy(target.unbiasedRight, source.unbiasedRight, sizeof(target.unbiasedRight));
-        std::memcpy(target.unbiasedUp, source.unbiasedUp, sizeof(target.unbiasedUp));
-        std::memcpy(target.unbiasedForward, source.unbiasedForward, sizeof(target.unbiasedForward));
-        target.biasYaw = source.biasYaw;
         target.verticalFov = source.verticalFov;
         target.pixelAspect = source.projectionRaw[4];
         target.nearPlane = source.projectionRaw[9];

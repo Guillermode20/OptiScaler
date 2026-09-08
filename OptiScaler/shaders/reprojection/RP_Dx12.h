@@ -12,7 +12,7 @@
 
 // Async camera warp pass. The isolated UI is composited in the
 // same compute dispatch so the presenter never has to cross back to DIRECT.
-// Root signature: 4 SRVs (color, ui, history 0/1), 1 UAV, 1 CBV, 1 static
+// Root signature: 2 SRVs (color, ui), 1 UAV, 1 CBV, 1 static
 // bilinear-clamp sampler.
 class RP_Dx12 : public Shader_Dx12
 {
@@ -30,10 +30,7 @@ class RP_Dx12 : public Shader_Dx12
     // from COPY_SOURCE to UNORDERED_ACCESS (the caller returns it to COPY_SOURCE).
     bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* lastColor, D3D12_RESOURCE_STATES lastColorState,
                   ID3D12Resource* output, RP_Constants& constants, int constantSlot = -1, bool deferConstants = false,
-                  ID3D12Resource* ui = nullptr, D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON,
-                  ID3D12Resource* history0 = nullptr, D3D12_RESOURCE_STATES history0State = D3D12_RESOURCE_STATE_COMMON,
-                  ID3D12Resource* history1 = nullptr,
-                  D3D12_RESOURCE_STATES history1State = D3D12_RESOURCE_STATE_COMMON);
+                  ID3D12Resource* ui = nullptr, D3D12_RESOURCE_STATES uiState = D3D12_RESOURCE_STATE_COMMON);
 
     // Completes a deferred dispatch after the command list has been queued
     // behind a CPU-signaled fence. Each slot is immutable until its SC fence

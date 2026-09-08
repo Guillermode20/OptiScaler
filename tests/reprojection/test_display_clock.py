@@ -364,26 +364,6 @@ class ReprojectionTests(unittest.TestCase):
         self.assertNotIn("KCD2 render reserve", menu)
         self.assertNotIn("Kcd2RenderReservePercent", ini)
 
-    def test_edge_limiter_uses_raw_perimeter_coverage_without_queue_changes(self):
-        root = Path(__file__).resolve().parents[2]
-        reproj = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.cpp").read_text(encoding="utf-8")
-        header = (root / "OptiScaler/framegen/reproj/AReproj_Dx12.h").read_text(encoding="utf-8")
-        coverage = reproj.split("WarpCoverage EvaluateWarpCoverage", 1)[1].split(
-            "ReprojVec3 RotateReprojVec3", 1)[0]
-        prepare = reproj.split("WarpCoverage PrepareRotationConstants(", 1)[1].split("} // namespace", 1)[0]
-        self.assertIn("kBoundarySamples = 16", reproj)
-        self.assertIn("validMinX", coverage)
-        self.assertIn("overrunLeft", coverage)
-        self.assertIn("outputNdc", coverage)
-        self.assertNotIn("DotReprojVec3(zRow, pixel)", coverage)
-        self.assertIn("for (int i = 0; i < 8; ++i)", prepare)
-        self.assertIn("RotationAxisAngle", prepare)
-        self.assertIn("coverage.safeScale = low", prepare)
-        self.assertIn("RecordWarpCoverage", reproj)
-        self.assertIn("edge={}/{} scale={:.3f}", reproj)
-        self.assertNotIn("_gameCommandQueue->Wait(_lateLatchFence", reproj)
-        self.assertNotIn("_computeQueue", header)
-
     def test_async_warp_dispatches_on_the_presenter_direct_queue(self):
         # async-simple P7: DispatchPacketWarp records the warp + copy-to-
         # backbuffer on the presenter's SC (DIRECT) command list and retires on
@@ -693,7 +673,7 @@ class ReprojectionTests(unittest.TestCase):
         self.assertIn("DebugView == 1", shader)
         self.assertIn("float3(1.0f, 0.0f, 1.0f)", shader)
         # Invalid coverage never samples: the else branch falls back to Load.
-        invalid = shader.split("if (covered)", 1)[1].split("if (HudlessSource != 0)", 1)[0]
+        invalid = shader.split("if (coverage > 0.0f)", 1)[1].split("if (HudlessSource != 0)", 1)[0]
         self.assertIn("SampleLevel(Bilinear, sourceUv, 0)", invalid)
         self.assertIn("LastColor.Load(int3(dtid.xy, 0)).rgb", invalid)
 

@@ -237,242 +237,7 @@ struct ReprojVec3
 };
 
 ReprojVec3 LoadReprojVec3(const float* value);
-ReprojVec3 NormalizeReprojVec3(ReprojVec3 value);
-float DotReprojVec3(ReprojVec3 left, ReprojVec3 right);
-void StoreReprojVec3(float* target, ReprojVec3 value);
-void BuildRotationRows(const RP_Constants& constants, ReprojVec3 sourceRight, ReprojVec3 sourceUp,
-                       ReprojVec3 sourceForward, ReprojVec3 predictedRight, ReprojVec3 predictedUp,
-                       ReprojVec3 predictedForward, ReprojVec3* outX, ReprojVec3* outY, ReprojVec3* outZ);
 } // namespace
-
-bool AReproj_Dx12::EnsureHistoryResource(int historyIndex, ID3D12Resource* source)
-{
-    if (historyIndex < 0 || historyIndex >= kHistoryAnchorCount || source == nullptr || _device == nullptr)
-        return false;
-
-    const auto sourceDesc = source->GetDesc();
-    if (sourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || sourceDesc.SampleDesc.Count != 1)
-        return false;
-
-    auto& history = _historyAnchors[historyIndex];
-    if (history.color != nullptr)
-    {
-        const auto historyDesc = history.color->GetDesc();
-        const bool compatible =
-            historyDesc.Dimension == sourceDesc.Dimension && historyDesc.Width == sourceDesc.Width &&
-            historyDesc.Height == sourceDesc.Height && historyDesc.DepthOrArraySize == sourceDesc.DepthOrArraySize &&
-            historyDesc.MipLevels == sourceDesc.MipLevels && historyDesc.Format == sourceDesc.Format &&
-            historyDesc.SampleDesc.Count == sourceDesc.SampleDesc.Count &&
-            historyDesc.SampleDesc.Quality == sourceDesc.SampleDesc.Quality;
-        // A descriptor change belongs to swapchain recreation. Never release a
-        // history texture in flight just to accommodate an unexpected source.
-        return compatible;
-    }
-
-    D3D12_HEAP_PROPERTIES heapProperties {};
-    D3D12_HEAP_FLAGS heapFlags {};
-    if (FAILED(source->GetHeapProperties(&heapProperties, &heapFlags)))
-        return false;
-
-    const auto result =
-        _device->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &sourceDesc,
-                                         D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&history.color));
-    if (FAILED(result))
-    {
-        LOG_WARN("Reproj: history texture {} creation failed: {:X}", historyIndex, (UINT) result);
-        return false;
-    }
-
-    history.color->SetName(historyIndex == 0 ? L"Reproj_History0" : L"Reproj_History1");
-    history.colorState = D3D12_RESOURCE_STATE_COMMON;
-    return true;
-}
-
-bool AReproj_Dx12::SnapshotHistoryAnchor(ID3D12GraphicsCommandList* cmdList, int packetIndex)
-{
-    if (!Config::Instance()->ReprojHistoryBorderFallback.value_or_default() || cmdList == nullptr || packetIndex < 0 ||
-        packetIndex >= kReprojFrameSlots)
-        return false;
-
-    auto& packet = _packets[packetIndex];
-    // History is world-only. A composed frame would reintroduce an old HUD at
-    // the border, and a generated frame is intentionally never retained.
-    if (!packet.hasUi || !packet.hasCamera || !packet.warpAllowed || packet.color == nullptr)
-        return false;
-
-    const int historyIndex = (_historyNewestIndex + 1) % kHistoryAnchorCount;
-    if (!EnsureHistoryResource(historyIndex, packet.color))
-    {
-        std::scoped_lock metricsLock(_metricsMutex);
-        ++_metricsHistoryCopyDrops;
-        return false;
-    }
-
-    auto& history = _historyAnchors[historyIndex];
-    ResourceBarrier(cmdList, packet.color, packet.colorState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    ResourceBarrier(cmdList, history.color, history.colorState, D3D12_RESOURCE_STATE_COPY_DEST);
-    cmdList->CopyResource(history.color, packet.color);
-    ResourceBarrier(cmdList, packet.color, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    ResourceBarrier(cmdList, history.color, D3D12_RESOURCE_STATE_COPY_DEST,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-    packet.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    history.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    history.sourceConstants = packet.constants;
-    history.frameId = packet.frameId;
-    history.epoch = _historyEpoch;
-    history.renderTimestamp = packet.renderTimestamp;
-    history.sourceCutGeneration = packet.sourceCutGeneration;
-    history.hdr = packet.hdr;
-    history.valid = true;
-    _historyNewestIndex = historyIndex;
-    return true;
-}
-
-uint32_t AReproj_Dx12::SelectHistoryAnchors(const ContentFrame& content, const ReprojFramePacket& packet,
-                                            double scanoutDeadlineMs, HistoryAnchor** selected)
-{
-    selected[0] = nullptr;
-    selected[1] = nullptr;
-    if (!Config::Instance()->ReprojHistoryBorderFallback.value_or_default() || !packet.hasUi || !packet.hasCamera ||
-        content.color == nullptr || _historyNewestIndex < 0)
-        return 0;
-
-    const auto currentDesc = content.color->GetDesc();
-    uint32_t count = 0;
-    float maxAgeMs = 0.0f;
-    for (int offset = 0; offset < kHistoryAnchorCount && count < kHistoryAnchorCount; ++offset)
-    {
-        const int index = (_historyNewestIndex - offset + kHistoryAnchorCount) % kHistoryAnchorCount;
-        auto& history = _historyAnchors[index];
-        if (!history.valid || history.color == nullptr || history.epoch != _historyEpoch ||
-            history.frameId >= packet.frameId || history.sourceCutGeneration != content.sourceCutGeneration ||
-            history.hdr != content.hdr)
-            continue;
-
-        const auto historyDesc = history.color->GetDesc();
-        const bool resourceCompatible =
-            historyDesc.Dimension == currentDesc.Dimension && historyDesc.Width == currentDesc.Width &&
-            historyDesc.Height == currentDesc.Height && historyDesc.Format == currentDesc.Format &&
-            historyDesc.SampleDesc.Count == currentDesc.SampleDesc.Count &&
-            historyDesc.SampleDesc.Quality == currentDesc.SampleDesc.Quality;
-        const float fovDelta = std::abs(history.sourceConstants.cameraVFov - content.constants.cameraVFov);
-        const float aspectBase = std::max(std::abs(content.constants.cameraAspect), 1.0e-6f);
-        const float aspectDelta =
-            std::abs(history.sourceConstants.cameraAspect - content.constants.cameraAspect) / aspectBase;
-        const double ageMs = scanoutDeadlineMs - history.renderTimestamp;
-        if (!resourceCompatible || fovDelta > (0.25f * std::numbers::pi_v<float> / 180.0f) || aspectDelta > 0.005f ||
-            ageMs <= 0.0 || ageMs > 75.0)
-            continue;
-
-        selected[count++] = &history;
-        maxAgeMs = std::max(maxAgeMs, static_cast<float>(ageMs));
-    }
-
-    if (count > 0)
-    {
-        std::scoped_lock metricsLock(_metricsMutex);
-        ++_metricsHistoryEligibleSlots;
-        _metricsHistoryMaxAgeMs = std::max(_metricsHistoryMaxAgeMs, maxAgeMs);
-    }
-    return count;
-}
-
-void AReproj_Dx12::PopulateHistoryConstants(RP_Constants& constants, HistoryAnchor* const* selected,
-                                            uint32_t historyCount) const
-{
-    constants.historyCount = std::min<uint32_t>(historyCount, kHistoryAnchorCount);
-    const auto targetRight = NormalizeReprojVec3(LoadReprojVec3(constants.targetCameraRight));
-    const auto targetUp = NormalizeReprojVec3(LoadReprojVec3(constants.targetCameraUp));
-    const auto targetForward = NormalizeReprojVec3(LoadReprojVec3(constants.targetCameraForward));
-    const auto foldPixelRow = [&](ReprojVec3 row)
-    {
-        return ReprojVec3 { row.x * (2.0f / constants.displayWidth), row.y * (-2.0f / constants.displayHeight),
-                            -row.x + row.y + row.z };
-    };
-
-    float* rows[kHistoryAnchorCount][3] = {
-        { constants.history0Right, constants.history0Up, constants.history0Forward },
-        { constants.history1Right, constants.history1Up, constants.history1Forward },
-    };
-    for (uint32_t i = 0; i < constants.historyCount; ++i)
-    {
-        const auto& sourceConstants = selected[i]->sourceConstants;
-        const auto sourceRight = NormalizeReprojVec3(LoadReprojVec3(sourceConstants.cameraRight));
-        const auto sourceUp = NormalizeReprojVec3(LoadReprojVec3(sourceConstants.cameraUp));
-        const auto sourceForward = NormalizeReprojVec3(LoadReprojVec3(sourceConstants.cameraForward));
-        ReprojVec3 xRow {}, yRow {}, zRow {};
-        BuildRotationRows(sourceConstants, sourceRight, sourceUp, sourceForward, targetRight, targetUp, targetForward,
-                          &xRow, &yRow, &zRow);
-        StoreReprojVec3(rows[i][0], foldPixelRow(xRow));
-        StoreReprojVec3(rows[i][1], foldPixelRow(yRow));
-        StoreReprojVec3(rows[i][2], foldPixelRow(zRow));
-    }
-}
-
-void AReproj_Dx12::RecordHistoryCoverage(const RP_Constants& constants)
-{
-    if (constants.historyCount == 0 || constants.displayWidth == 0 || constants.displayHeight == 0)
-        return;
-
-    const auto covered = [&](const float* xRow, const float* yRow, const float* zRow, float x, float y)
-    {
-        const ReprojVec3 position { 0.5f + x * (constants.displayWidth - 1.0f),
-                                    0.5f + y * (constants.displayHeight - 1.0f), 1.0f };
-        const float denominator = DotReprojVec3(LoadReprojVec3(zRow), position);
-        if (denominator <= 1.0e-6f || !std::isfinite(denominator))
-            return false;
-        const float u = DotReprojVec3(LoadReprojVec3(xRow), position) / denominator;
-        const float v = DotReprojVec3(LoadReprojVec3(yRow), position) / denominator;
-        const float minU = 0.5f / constants.displayWidth;
-        const float minV = 0.5f / constants.displayHeight;
-        return u >= minU && u <= 1.0f - minU && v >= minV && v <= 1.0f - minV;
-    };
-
-    uint32_t history0 = 0;
-    uint32_t history1 = 0;
-    uint32_t unresolved = 0;
-    const auto sample = [&](float x, float y)
-    {
-        if (covered(constants.prevCameraRight, constants.prevCameraUp, constants.prevCameraForward, x, y))
-            return;
-        if (covered(constants.history0Right, constants.history0Up, constants.history0Forward, x, y))
-            ++history0;
-        else if (constants.historyCount > 1 &&
-                 covered(constants.history1Right, constants.history1Up, constants.history1Forward, x, y))
-            ++history1;
-        else
-            ++unresolved;
-    };
-    constexpr float fractions[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
-    for (float fraction : fractions)
-    {
-        sample(fraction, 0.0f);
-        sample(fraction, 1.0f);
-    }
-    for (float fraction : fractions)
-        if (fraction != 0.0f && fraction != 1.0f)
-        {
-            sample(0.0f, fraction);
-            sample(1.0f, fraction);
-        }
-
-    std::scoped_lock metricsLock(_metricsMutex);
-    _metricsHistoryBoundaryH0 += history0;
-    _metricsHistoryBoundaryH1 += history1;
-    _metricsHistoryBoundaryUnresolved += unresolved;
-}
-
-void AReproj_Dx12::ReleaseHistoryResources()
-{
-    for (auto& history : _historyAnchors)
-    {
-        SAFE_RELEASE(history.color);
-        history = {};
-    }
-    _historyNewestIndex = -1;
-}
 
 bool AReproj_Dx12::IsCameraAllZero(int fIndex) const
 {
@@ -573,18 +338,6 @@ ReprojVec3 CrossReprojVec3(ReprojVec3 a, ReprojVec3 b)
     return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
 }
 
-struct WarpCoverage
-{
-    static constexpr uint32_t kBoundarySamples = 16;
-    float safeScale = 1.0f;
-    float requestedDegrees = 0.0f;
-    uint32_t invalidSamples = 0;
-    float overrunLeft = 0.0f;
-    float overrunRight = 0.0f;
-    float overrunTop = 0.0f;
-    float overrunBottom = 0.0f;
-};
-
 // The relative world-space rotation maps each source camera basis vector to
 // its target counterpart. Scaling this axis-angle is slerp(identity, R, s).
 bool RotationAxisAngle(ReprojVec3 sourceRight, ReprojVec3 sourceUp, ReprojVec3 sourceForward,
@@ -623,16 +376,20 @@ bool RotationAxisAngle(ReprojVec3 sourceRight, ReprojVec3 sourceUp, ReprojVec3 s
     return DotReprojVec3(*axis, *axis) > 0.5f;
 }
 
-void BuildRotationRows(const RP_Constants& constants, ReprojVec3 sourceRight, ReprojVec3 sourceUp,
+void BuildRotationRows(RP_Constants& constants, ReprojVec3 sourceRight, ReprojVec3 sourceUp,
                        ReprojVec3 sourceForward, ReprojVec3 predictedRight, ReprojVec3 predictedUp,
-                       ReprojVec3 predictedForward, ReprojVec3* outX, ReprojVec3* outY, ReprojVec3* outZ)
+                       ReprojVec3 predictedForward, ReprojVec3* outX = nullptr, ReprojVec3* outY = nullptr,
+                       ReprojVec3* outZ = nullptr)
 {
     const auto sourceX = ReprojTransformRow(sourceRight, predictedRight, predictedUp, predictedForward);
     const auto sourceY = ReprojTransformRow(sourceUp, predictedRight, predictedUp, predictedForward);
     const auto sourceZ = ReprojTransformRow(sourceForward, predictedRight, predictedUp, predictedForward);
+    if (constants.mode != 2 && constants.mode != 1)
+        return;
     const float tanHalfFov = std::tan(constants.cameraVFov * 0.5f);
     const float focalX = constants.cameraAspect * tanHalfFov;
     const float focalY = tanHalfFov;
+
     ReprojVec3 uvNumeratorX { 0.5f, 0.0f, 0.5f };
     ReprojVec3 uvNumeratorY { 0.0f, -0.5f, 0.5f };
     ReprojVec3 denominator { 0.0f, 0.0f, 1.0f };
@@ -644,84 +401,20 @@ void BuildRotationRows(const RP_Constants& constants, ReprojVec3 sourceRight, Re
         uvNumeratorX = CombineReprojVec3(denominator, 0.5f, sx, 0.5f / focalX);
         uvNumeratorY = CombineReprojVec3(denominator, 0.5f, sy, -0.5f / focalY);
     }
-    *outX = uvNumeratorX;
-    *outY = uvNumeratorY;
-    *outZ = denominator;
-}
 
-WarpCoverage EvaluateWarpCoverage(const RP_Constants& constants, ReprojVec3 xRow, ReprojVec3 yRow, ReprojVec3 zRow)
-{
-    WarpCoverage coverage {};
-    if (constants.displayWidth == 0 || constants.displayHeight == 0)
-        return coverage;
-    // E3 edge-width budget: any real rotation moves uncovered content in at
-    // one screen edge (roughly 22 px per degree at 1280 px focal length), so a
-    // zero-overrun validity policy can only ever return safeScale 0 for real
-    // motion. Live 2026-09-07 confirmed it: scale=0.000 with limited~=all
-    // slots on every motion second, i.e. the warp was fully neutralized and
-    // frames displayed 25-45 ms stale with no correction (floaty, worse than
-    // native). Samples may therefore exceed the filter-safe rect by up to
-    // kEdgeOverrunBudgetPx: the shader feathers the first 2 px and the rest
-    // is a bounded lag band. Overruns beyond the budget still drive the
-    // binary search toward a smaller rotation. Raw overrun magnitudes are
-    // still recorded so telemetry keeps reporting the true coverage demand.
-    // The budget also dwarfs float noise, which previously flipped identity
-    // warps between valid/invalid across seconds. SafeWarpBudget <= 0 disables
-    // limiting (full warp); otherwise clamped 0..32 px in Config.
-    const float edgeBudgetPx = std::clamp(Config::Instance()->ReprojSafeWarpBudget.value_or_default(), 0.0f, 32.0f);
-    const float budgetU = edgeBudgetPx / constants.displayWidth;
-    const float budgetV = edgeBudgetPx / constants.displayHeight;
-    const float validMinX = 0.5f / constants.displayWidth;
-    const float validMinY = 0.5f / constants.displayHeight;
-    const float validMaxX = 1.0f - validMinX;
-    const float validMaxY = 1.0f - validMinY;
-    const auto sample = [&](float x, float y)
+    const auto pixelRow = [&](ReprojVec3 ndcRow)
     {
-        const float pixelX = 0.5f + x * (constants.displayWidth - 1.0f);
-        const float pixelY = 0.5f + y * (constants.displayHeight - 1.0f);
-        // BuildRotationRows produces output-NDC -> source-UV rows. The shader
-        // later folds pixel centers into those rows, but the CPU coverage test
-        // must evaluate the original NDC representation rather than passing
-        // pixel coordinates directly to it.
-        const ReprojVec3 outputNdc { pixelX * (2.0f / constants.displayWidth) - 1.0f,
-                                    1.0f - pixelY * (2.0f / constants.displayHeight), 1.0f };
-        const float denominator = DotReprojVec3(zRow, outputNdc);
-        if (denominator <= 1.0e-6f || !std::isfinite(denominator))
-        {
-            ++coverage.invalidSamples;
-            return;
-        }
-        const float u = DotReprojVec3(xRow, outputNdc) / denominator;
-        const float v = DotReprojVec3(yRow, outputNdc) / denominator;
-        const float left = std::max(0.0f, validMinX - u);
-        const float right = std::max(0.0f, u - validMaxX);
-        const float top = std::max(0.0f, validMinY - v);
-        const float bottom = std::max(0.0f, v - validMaxY);
-        coverage.overrunLeft = std::max(coverage.overrunLeft, left);
-        coverage.overrunRight = std::max(coverage.overrunRight, right);
-        coverage.overrunTop = std::max(coverage.overrunTop, top);
-        coverage.overrunBottom = std::max(coverage.overrunBottom, bottom);
-        // Validity is budget-relative (see above); the recorded overruns stay
-        // raw so the 1 Hz line keeps showing the true coverage demand.
-        coverage.invalidSamples += left > budgetU || right > budgetU || top > budgetV || bottom > budgetV;
+        if (constants.displayWidth == 0 || constants.displayHeight == 0)
+            return ReprojVec3 { 0.0f, 0.0f, ndcRow.z };
+        return ReprojVec3 { ndcRow.x * (2.0f / constants.displayWidth), ndcRow.y * (-2.0f / constants.displayHeight),
+                            -ndcRow.x + ndcRow.y + ndcRow.z };
     };
-    constexpr float fractions[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
-    for (float fraction : fractions)
-    {
-        sample(fraction, 0.0f);
-        sample(fraction, 1.0f);
-    }
-    for (float fraction : fractions)
-    {
-        if (fraction != 0.0f && fraction != 1.0f)
-        {
-            sample(0.0f, fraction);
-            sample(1.0f, fraction);
-        }
-    }
-    if (edgeBudgetPx <= 0.0f)
-        coverage.invalidSamples = 0;
-    return coverage;
+    StoreReprojVec3(constants.prevCameraRight, pixelRow(uvNumeratorX));
+    StoreReprojVec3(constants.prevCameraUp, pixelRow(uvNumeratorY));
+    StoreReprojVec3(constants.prevCameraForward, pixelRow(denominator));
+    if (outX) *outX = uvNumeratorX;
+    if (outY) *outY = uvNumeratorY;
+    if (outZ) *outZ = denominator;
 }
 
 ReprojVec3 RotateReprojVec3(ReprojVec3 value, ReprojVec3 axis, float angle)
@@ -805,13 +498,12 @@ void DecomposeCameraPairRotation(const float* forward, const float* prevForward,
     *pitchRadians = std::atan2(dot(forward, prevUp), dot(forward, prevForward));
 }
 
-WarpCoverage PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false,
-                                      float lateYaw = 0.0f, float latePitch = 0.0f,
-                                      const ReprojVec3* targetBaseRight = nullptr,
-                                      const ReprojVec3* targetBaseUp = nullptr,
-                                      const ReprojVec3* targetBaseForward = nullptr)
+void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false,
+                              float lateYaw = 0.0f, float latePitch = 0.0f,
+                              const ReprojVec3* targetBaseRight = nullptr,
+                              const ReprojVec3* targetBaseUp = nullptr,
+                              const ReprojVec3* targetBaseForward = nullptr)
 {
-    constants.historyCount = 0;
     // Mode 2 rotates the predicted basis here for the rotation homography.
     // Translation (walking/hills) is intentionally not represented: the warp
     // assumes infinite depth. Depth-corrected warping was prototyped (v10.0.1
@@ -861,93 +553,14 @@ WarpCoverage PrepareRotationConstants(RP_Constants& constants, bool inputLatched
         }
     }
 
-    // Mode reaches here as 2 (rotation) or 1 (depth+translation) or 0 (no camera)
-    if (constants.mode != 2 && constants.mode != 1)
-        return {};
-
-    ReprojVec3 xRow {}, yRow {}, zRow {};
-    BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp, predictedForward,
-                      &xRow, &yRow, &zRow);
-    auto coverage = EvaluateWarpCoverage(constants, xRow, yRow, zRow);
-
-    ReprojVec3 axis {};
-    float angle = 0.0f;
-    const bool haveAxis = RotationAxisAngle(sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
-                                            predictedForward, &axis, &angle);
-    if (std::isfinite(angle))
-        coverage.requestedDegrees = std::abs(angle) * 180.0f / std::numbers::pi_v<float>;
-    if (coverage.invalidSamples != 0)
-    {
-        if (haveAxis)
-        {
-            // E3: clamp the requested final rotation to the largest sampled
-            // transform within the edge-width budget (see EvaluateWarpCoverage).
-            // This is presenter-side CPU work only.
-            float low = 0.0f;
-            float high = 1.0f;
-            for (int i = 0; i < 8; ++i)
-            {
-                const float middle = (low + high) * 0.5f;
-                const auto candidateRight = NormalizeReprojVec3(RotateReprojVec3(sourceRight, axis, angle * middle));
-                const auto candidateUp = NormalizeReprojVec3(RotateReprojVec3(sourceUp, axis, angle * middle));
-                const auto candidateForward =
-                    NormalizeReprojVec3(RotateReprojVec3(sourceForward, axis, angle * middle));
-                ReprojVec3 candidateX {}, candidateY {}, candidateZ {};
-                BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, candidateRight, candidateUp,
-                                  candidateForward, &candidateX, &candidateY, &candidateZ);
-                if (EvaluateWarpCoverage(constants, candidateX, candidateY, candidateZ).invalidSamples == 0)
-                    low = middle;
-                else
-                    high = middle;
-            }
-            coverage.safeScale = low;
-            predictedRight = NormalizeReprojVec3(RotateReprojVec3(sourceRight, axis, angle * low));
-            predictedUp = NormalizeReprojVec3(RotateReprojVec3(sourceUp, axis, angle * low));
-            predictedForward = NormalizeReprojVec3(RotateReprojVec3(sourceForward, axis, angle * low));
-            BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
-                              predictedForward, &xRow, &yRow, &zRow);
-        }
-        else
-        {
-            // A near-180 degree discontinuity has no stable axis from the
-            // skew-symmetric extraction. Failing closed to the source pose is
-            // preferable to exposing an invalid border.
-            coverage.safeScale = 0.0f;
-            predictedRight = sourceRight;
-            predictedUp = sourceUp;
-            predictedForward = sourceForward;
-            BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
-                              predictedForward, &xRow, &yRow, &zRow);
-        }
-    }
-
-    // Preserve the final, possibly safe-limited target pose. History anchors
-    // must map to this exact pose or their border pixels would form a seam
-    // against the current anchor.
-    StoreReprojVec3(constants.targetCameraRight, predictedRight);
-    StoreReprojVec3(constants.targetCameraUp, predictedUp);
-    StoreReprojVec3(constants.targetCameraForward, predictedForward);
-
-    // Fold pixel-center -> NDC into the same matrix. The compute shader can now
-    // transform its integer dispatch coordinate directly, with no per-pixel
-    // division by DisplaySize or UV/NDC reconstruction.
-    const auto pixelRow = [&](ReprojVec3 ndcRow)
-    {
-        if (constants.displayWidth == 0 || constants.displayHeight == 0)
-            return ReprojVec3 { 0.0f, 0.0f, ndcRow.z };
-        return ReprojVec3 { ndcRow.x * (2.0f / constants.displayWidth), ndcRow.y * (-2.0f / constants.displayHeight),
-                            -ndcRow.x + ndcRow.y + ndcRow.z };
-    };
-    StoreReprojVec3(constants.prevCameraRight, pixelRow(xRow));
-    StoreReprojVec3(constants.prevCameraUp, pixelRow(yRow));
-    StoreReprojVec3(constants.prevCameraForward, pixelRow(zRow));
-    return coverage;
+    BuildRotationRows(constants, sourceRight, sourceUp, sourceForward, predictedRight, predictedUp,
+                      predictedForward);
 }
 
 } // namespace
 
 bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& content,
-                                    const ReprojFramePacket& packet)
+                                  const ReprojFramePacket& packet)
 {
     if (!packet.inputLatchReady || (constants.mode != 2 && constants.mode != 1))
         return false;
@@ -975,14 +588,9 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
         // CryEngine's culling pass has already computed an authoritative camera pose
         // for the next frame. Use it directly as the target orientation, and compute
         // only the residual mouse motion from that latest pose timestamp to now!
-        const auto* targetBasis = (latestCamera.biasYaw != 0.0f) ? latestCamera.unbiasedRight : latestCamera.right;
-        const auto* targetBasisUp = (latestCamera.biasYaw != 0.0f) ? latestCamera.unbiasedUp : latestCamera.up;
-        const auto* targetBasisForward =
-            (latestCamera.biasYaw != 0.0f) ? latestCamera.unbiasedForward : latestCamera.forward;
-
-        lateBaseRight = { targetBasis[0], targetBasis[1], targetBasis[2] };
-        lateBaseUp = { targetBasisUp[0], targetBasisUp[1], targetBasisUp[2] };
-        lateBaseForward = { targetBasisForward[0], targetBasisForward[1], targetBasisForward[2] };
+        lateBaseRight = { latestCamera.right[0], latestCamera.right[1], latestCamera.right[2] };
+        lateBaseUp = { latestCamera.up[0], latestCamera.up[1], latestCamera.up[2] };
+        lateBaseForward = { latestCamera.forward[0], latestCamera.forward[1], latestCamera.forward[2] };
         pBaseRight = &lateBaseRight;
         pBaseUp = &lateBaseUp;
         pBaseForward = &lateBaseForward;
@@ -995,16 +603,6 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
     }
     else
     {
-        if (content.biasYaw != 0.0f)
-        {
-            lateBaseRight = { content.unbiasedRight[0], content.unbiasedRight[1], content.unbiasedRight[2] };
-            lateBaseUp = { content.unbiasedUp[0], content.unbiasedUp[1], content.unbiasedUp[2] };
-            lateBaseForward = { content.unbiasedForward[0], content.unbiasedForward[1], content.unbiasedForward[2] };
-            pBaseRight = &lateBaseRight;
-            pBaseUp = &lateBaseUp;
-            pBaseForward = &lateBaseForward;
-        }
-
         // Fallback when no newer rendered pose exists: rotate from this
         // content's own pose by the mouse motion since this content's own
         // baseline. Generated midpoints are older than their real anchor, so
@@ -1015,7 +613,7 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
         deltaY = static_cast<double>(current.TotalY - content.sourceMouseY);
     }
 
-    if (deltaX == 0.0 && deltaY == 0.0 && !haveLateCamera && content.biasYaw == 0.0f)
+    if (deltaX == 0.0 && deltaY == 0.0 && !haveLateCamera)
         return false;
 
     float sensX = Config::Instance()->ReprojMouseSensitivityX.value_or_default();
@@ -1047,11 +645,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
         pitch *= maxRotation / rotation;
     }
 
-    const auto coverage = PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch),
-                                                   pBaseRight, pBaseUp, pBaseForward);
-    RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
-                       WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
-                       coverage.overrunTop, coverage.overrunBottom);
+    PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch),
+                             pBaseRight, pBaseUp, pBaseForward);
     ++_metricsLateInputApplied;
     _metricsLateInputMaxDegrees = std::max(
         _metricsLateInputMaxDegrees, static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
@@ -1131,9 +726,9 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.jitterY = _jitterY[fIndex];
     cb.invertMV = 0;
     cb.jitterCancelled = 0;
-    cb.safeWarpBudget = Config::Instance()->ReprojSafeWarpBudget.value_or_default();
+    cb.reserved = 0;
     cb.mode = 2;
-    cb.debugView = Config::Instance()->ReprojDebugView.value_or_default() ? 1u : 0u;
+    cb.debugView = 0;
     cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
@@ -1441,20 +1036,6 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.sourceCutGeneration = haveKcd2Snapshots ? currentCamera.cutGeneration : 0;
     packet.cameraNear = haveKcd2Snapshots ? currentCamera.nearPlane : 0.0f;
     packet.cameraFar = haveKcd2Snapshots ? currentCamera.farPlane : 0.0f;
-    if (haveKcd2Snapshots && currentCamera.biasYaw != 0.0f)
-    {
-        std::memcpy(packet.unbiasedRight, currentCamera.unbiasedRight, sizeof(packet.unbiasedRight));
-        std::memcpy(packet.unbiasedUp, currentCamera.unbiasedUp, sizeof(packet.unbiasedUp));
-        std::memcpy(packet.unbiasedForward, currentCamera.unbiasedForward, sizeof(packet.unbiasedForward));
-        packet.biasYaw = currentCamera.biasYaw;
-    }
-    else
-    {
-        std::memcpy(packet.unbiasedRight, packet.constants.cameraRight, sizeof(packet.unbiasedRight));
-        std::memcpy(packet.unbiasedUp, packet.constants.cameraUp, sizeof(packet.unbiasedUp));
-        std::memcpy(packet.unbiasedForward, packet.constants.cameraForward, sizeof(packet.unbiasedForward));
-        packet.biasYaw = 0.0f;
-    }
     packet.invertedDepth = !!(_constants.flags & FG_Flags::InvertedDepth);
     packet.hdr = !!(_constants.flags & FG_Flags::Hdr);
     packet.jitteredMotionVectors = !!(_constants.flags & FG_Flags::JitteredMVs);
@@ -1778,7 +1359,7 @@ bool AReproj_Dx12::DisplayPacket(int packetIndex)
 }
 
 bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double scanoutDeadlineMs,
-                                      ContentFrame* contentFrame, bool snapshotRealAnchor)
+                                      ContentFrame* contentFrame)
 {
     auto& packet = _packets[packetIndex];
     auto& content = contentFrame != nullptr ? *contentFrame : static_cast<ContentFrame&>(packet);
@@ -1815,30 +1396,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // signals it after the warp+copy dispatch.
     _scAllocatorFenceValues[outputIndex] = ++_scFenceValue;
 
-    HistoryAnchor* selectedHistory[kHistoryAnchorCount] = {};
-    const auto historyCount = SelectHistoryAnchors(content, packet, scanoutDeadlineMs, selectedHistory);
-    // Snapshot metadata before recording this frame's history copy. The copy
-    // may reuse the oldest selected texture after the shader reads it, but the
-    // deferred late-latch constants must continue describing the old contents.
-    HistoryAnchor selectedHistoryMetadata[kHistoryAnchorCount] {};
-    HistoryAnchor* constantHistory[kHistoryAnchorCount] = {};
-    for (uint32_t i = 0; i < historyCount; ++i)
-    {
-        selectedHistoryMetadata[i] = *selectedHistory[i];
-        constantHistory[i] = &selectedHistoryMetadata[i];
-    }
-
     auto constants = content.constants;
     constants.timeStep = timeStep;
-    const ReprojVec3 contentUnbiasedRight { content.unbiasedRight[0], content.unbiasedRight[1],
-                                            content.unbiasedRight[2] };
-    const ReprojVec3 contentUnbiasedUp { content.unbiasedUp[0], content.unbiasedUp[1], content.unbiasedUp[2] };
-    const ReprojVec3 contentUnbiasedForward { content.unbiasedForward[0], content.unbiasedForward[1],
-                                              content.unbiasedForward[2] };
-    const bool hasUnbiased = content.biasYaw != 0.0f;
-    const ReprojVec3* pDefaultTargetRight = hasUnbiased ? &contentUnbiasedRight : nullptr;
-    const ReprojVec3* pDefaultTargetUp = hasUnbiased ? &contentUnbiasedUp : nullptr;
-    const ReprojVec3* pDefaultTargetForward = hasUnbiased ? &contentUnbiasedForward : nullptr;
 
     const bool deferredLateLatch = _lateLatchFence != nullptr && _presentQueue != nullptr;
     if (!deferredLateLatch)
@@ -1847,13 +1406,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // execution when no latch fence is available.
         if (!ApplyLateInput(constants, content, packet))
         {
-            const auto coverage = PrepareRotationConstants(constants, false);
-            RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
-                               WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
-                               coverage.overrunTop, coverage.overrunBottom);
+            PrepareRotationConstants(constants, false);
         }
-        PopulateHistoryConstants(constants, constantHistory, historyCount);
-        RecordHistoryCoverage(constants);
     }
     else
     {
@@ -1861,7 +1415,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         // parked before it can read this upload buffer; the final pose replaces
         // it after submission and before the latch fence is released.
         PrepareRotationConstants(constants, false);
-        PopulateHistoryConstants(constants, constantHistory, historyCount);
         if (!_warp->WriteConstants(outputIndex, constants))
         {
             backBuffer->Release();
@@ -1875,11 +1428,7 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     // with ui == nullptr (RPD then samples color for both SRVs).
     const bool ok = _warp->Dispatch(cmdList, content.color, content.colorState, _warpOutput[outputIndex], constants,
                                     outputIndex, deferredLateLatch, packet.hasUi ? packet.ui : nullptr,
-                                    packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON,
-                                    historyCount > 0 ? selectedHistory[0]->color : nullptr,
-                                    historyCount > 0 ? selectedHistory[0]->colorState : D3D12_RESOURCE_STATE_COMMON,
-                                    historyCount > 1 ? selectedHistory[1]->color : nullptr,
-                                    historyCount > 1 ? selectedHistory[1]->colorState : D3D12_RESOURCE_STATE_COMMON);
+                                    packet.hasUi ? packet.uiState : D3D12_RESOURCE_STATE_COMMON);
     if (!ok)
     {
         backBuffer->Release();
@@ -1889,10 +1438,6 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
     }
 
     content.colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    for (uint32_t i = 0; i < historyCount; ++i)
-        selectedHistory[i]->colorState = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    if (snapshotRealAnchor)
-        SnapshotHistoryAnchor(cmdList, packetIndex);
     ResourceBarrier(cmdList, _warpOutput[outputIndex], D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_COPY_SOURCE);
     ResourceBarrier(cmdList, backBuffer, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1946,13 +1491,8 @@ bool AReproj_Dx12::DispatchPacketWarp(int packetIndex, float timeStep, double sc
         lateConstants.timeStep = timeStep;
         if (!ApplyLateInput(lateConstants, content, packet))
         {
-            const auto coverage = PrepareRotationConstants(lateConstants, false);
-            RecordWarpCoverage(coverage.safeScale, coverage.requestedDegrees, coverage.invalidSamples,
-                               WarpCoverage::kBoundarySamples, coverage.overrunLeft, coverage.overrunRight,
-                               coverage.overrunTop, coverage.overrunBottom);
+            PrepareRotationConstants(lateConstants, false);
         }
-        PopulateHistoryConstants(lateConstants, constantHistory, historyCount);
-        RecordHistoryCoverage(lateConstants);
 
         const bool constantsWritten = _warp->WriteConstants(outputIndex, lateConstants);
         // Publish the persistent upload-buffer write before releasing the GPU
@@ -2031,22 +1571,6 @@ void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseA
     LogMetricsIfDue();
 }
 
-void AReproj_Dx12::RecordWarpCoverage(float safeScale, float requestedDegrees, uint32_t invalidSamples,
-                                      uint32_t sampleCount, float overrunLeft, float overrunRight, float overrunTop,
-                                      float overrunBottom)
-{
-    std::scoped_lock lock(_metricsMutex);
-    _metricsWarpCoverageSamples += sampleCount;
-    _metricsWarpCoverageInvalid += invalidSamples;
-    _metricsSafeWarpLimited += safeScale < 0.999f;
-    _metricsWarpCoverageOverrunLeft = std::max(_metricsWarpCoverageOverrunLeft, overrunLeft);
-    _metricsWarpCoverageOverrunRight = std::max(_metricsWarpCoverageOverrunRight, overrunRight);
-    _metricsWarpCoverageOverrunTop = std::max(_metricsWarpCoverageOverrunTop, overrunTop);
-    _metricsWarpCoverageOverrunBottom = std::max(_metricsWarpCoverageOverrunBottom, overrunBottom);
-    _metricsRequestedWarpMaxDegrees = std::max(_metricsRequestedWarpMaxDegrees, requestedDegrees);
-    _metricsSafeWarpMinScale = std::min(_metricsSafeWarpMinScale, safeScale);
-}
-
 void AReproj_Dx12::LogMetricsIfDue()
 {
     double elapsed = 0.0;
@@ -2065,21 +1589,6 @@ void AReproj_Dx12::LogMetricsIfDue()
     uint32_t generatedDisplays = 0;
     float lateInputMaxDegrees = 0.0f;
     float gamePresentBlockMaxMs = 0.0f;
-    uint32_t warpCoverageSamples = 0;
-    uint32_t warpCoverageInvalid = 0;
-    uint32_t safeWarpLimited = 0;
-    uint32_t historyEligibleSlots = 0;
-    uint32_t historyBoundaryH0 = 0;
-    uint32_t historyBoundaryH1 = 0;
-    uint32_t historyBoundaryUnresolved = 0;
-    uint32_t historyCopyDrops = 0;
-    float historyMaxAgeMs = 0.0f;
-    float coverageOverrunLeft = 0.0f;
-    float coverageOverrunRight = 0.0f;
-    float coverageOverrunTop = 0.0f;
-    float coverageOverrunBottom = 0.0f;
-    float requestedWarpMaxDegrees = 0.0f;
-    float safeWarpMinScale = 1.0f;
     float meanPresentIntervalMs = 0.0f;
     float p95PresentIntervalMs = 0.0f;
     int queueDepth = 0;
@@ -2112,21 +1621,6 @@ void AReproj_Dx12::LogMetricsIfDue()
         generatedDisplays = _metricsGeneratedDisplays;
         lateInputMaxDegrees = _metricsLateInputMaxDegrees;
         gamePresentBlockMaxMs = _metricsGamePresentBlockMaxMs;
-        warpCoverageSamples = _metricsWarpCoverageSamples;
-        warpCoverageInvalid = _metricsWarpCoverageInvalid;
-        safeWarpLimited = _metricsSafeWarpLimited;
-        historyEligibleSlots = _metricsHistoryEligibleSlots;
-        historyBoundaryH0 = _metricsHistoryBoundaryH0;
-        historyBoundaryH1 = _metricsHistoryBoundaryH1;
-        historyBoundaryUnresolved = _metricsHistoryBoundaryUnresolved;
-        historyCopyDrops = _metricsHistoryCopyDrops;
-        historyMaxAgeMs = _metricsHistoryMaxAgeMs;
-        coverageOverrunLeft = _metricsWarpCoverageOverrunLeft;
-        coverageOverrunRight = _metricsWarpCoverageOverrunRight;
-        coverageOverrunTop = _metricsWarpCoverageOverrunTop;
-        coverageOverrunBottom = _metricsWarpCoverageOverrunBottom;
-        requestedWarpMaxDegrees = _metricsRequestedWarpMaxDegrees;
-        safeWarpMinScale = _metricsSafeWarpMinScale;
         poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
 
         _runtimeMetrics.realFps = static_cast<float>(realFrames * scale);
@@ -2180,35 +1674,16 @@ void AReproj_Dx12::LogMetricsIfDue()
         _metricsGeneratedDisplays = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _metricsGamePresentBlockMaxMs = 0.0f;
-        _metricsWarpCoverageSamples = 0;
-        _metricsWarpCoverageInvalid = 0;
-        _metricsSafeWarpLimited = 0;
-        _metricsHistoryEligibleSlots = 0;
-        _metricsHistoryBoundaryH0 = 0;
-        _metricsHistoryBoundaryH1 = 0;
-        _metricsHistoryBoundaryUnresolved = 0;
-        _metricsHistoryCopyDrops = 0;
-        _metricsHistoryMaxAgeMs = 0.0f;
-        _metricsWarpCoverageOverrunLeft = 0.0f;
-        _metricsWarpCoverageOverrunRight = 0.0f;
-        _metricsWarpCoverageOverrunTop = 0.0f;
-        _metricsWarpCoverageOverrunBottom = 0.0f;
-        _metricsRequestedWarpMaxDegrees = 0.0f;
-        _metricsSafeWarpMinScale = 1.0f;
     }
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
              "interval={:.2f}/{:.2f}ms latchLead={:.2f}ms poseAge={:.1f}ms queue={} "
              "late={}/{} maxDeg={:.2f} dropAnchor={} capC={} capWait={} "
-             "({}, block={:.2f}ms) generated={} edge={}/{} scale={:.3f} limited={} rot={:.1f}deg "
-             "overrun={:.3f}/{:.3f}/{:.3f}/{:.3f} hist={}/{}/{}/{} age={:.1f}ms copyDrop={}",
+             "({}, block={:.2f}ms) generated={}",
              realFrames * scale, warpFrames * scale, newAnchorDisplays, repeatedAnchorDisplays, missedDisplaySlots,
              meanPresentIntervalMs, p95PresentIntervalMs, _lastLateSampleLeadMs.load(std::memory_order_relaxed),
              poseAge, queueDepth, lateInputApplied, lateInputSamples, lateInputMaxDegrees, skippedAnchorSamples,
-             directCaptures, captureNotReady, presenter, gamePresentBlockMaxMs, generatedDisplays, warpCoverageInvalid,
-             warpCoverageSamples, safeWarpMinScale, safeWarpLimited, requestedWarpMaxDegrees, coverageOverrunLeft,
-             coverageOverrunRight, coverageOverrunTop, coverageOverrunBottom, historyEligibleSlots, historyBoundaryH0,
-             historyBoundaryH1, historyBoundaryUnresolved, historyMaxAgeMs, historyCopyDrops);
+             directCaptures, captureNotReady, presenter, gamePresentBlockMaxMs, generatedDisplays);
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const
@@ -2574,21 +2049,6 @@ void AReproj_Dx12::Activate()
         _metricsDirectCaptures = 0;
         _metricsCaptureNotReady = 0;
         _metricsLateInputMaxDegrees = 0.0f;
-        _metricsWarpCoverageSamples = 0;
-        _metricsWarpCoverageInvalid = 0;
-        _metricsSafeWarpLimited = 0;
-        _metricsHistoryEligibleSlots = 0;
-        _metricsHistoryBoundaryH0 = 0;
-        _metricsHistoryBoundaryH1 = 0;
-        _metricsHistoryBoundaryUnresolved = 0;
-        _metricsHistoryCopyDrops = 0;
-        _metricsHistoryMaxAgeMs = 0.0f;
-        _metricsWarpCoverageOverrunLeft = 0.0f;
-        _metricsWarpCoverageOverrunRight = 0.0f;
-        _metricsWarpCoverageOverrunTop = 0.0f;
-        _metricsWarpCoverageOverrunBottom = 0.0f;
-        _metricsRequestedWarpMaxDegrees = 0.0f;
-        _metricsSafeWarpMinScale = 1.0f;
         _runtimeMetrics = {};
     }
     _cachedRefreshHz = 0.0;

@@ -17,10 +17,6 @@ struct Snapshot
     float right[3] {};
     float up[3] {};
     float forward[3] {};
-    float unbiasedRight[3] {};
-    float unbiasedUp[3] {};
-    float unbiasedForward[3] {};
-    float biasYaw = 0.0f;
     float verticalFov = 0.0f;
     float pixelAspect = 0.0f;
     float nearPlane = 0.0f;

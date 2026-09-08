@@ -4223,36 +4223,6 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("ms before the present deadline to release the deferred latch and sample "
                        "input. auto/0 = fixed 3 ms (recommended). Smaller = fresher input; "
                        "too small misses display slots.");
-        float safeBudget = config->ReprojSafeWarpBudget.value_or_default();
-        if (ImGui::InputFloat("Safe warp budget##reproj-live", &safeBudget, 1.0f, 4.0f, "%.1f px"))
-            config->ReprojSafeWarpBudget = std::clamp(safeBudget, 0.0f, 32.0f);
-        ShowHelpMarker("E3 maximum-safe-warp edge budget. 0 = off (full warp, edges may smear). "
-                       "12 px = default (recommended). 16-20 = looser fast flicks. "
-                       "Watch scale/limited/rot on the Reproj: health line.");
-        float maxStep = config->ReprojMaxTimeStep.value_or_default();
-        if (ImGui::InputFloat("Max warp step##reproj-live", &maxStep, 0.5f, 0.5f, "%.2f frames"))
-            config->ReprojMaxTimeStep = std::clamp(maxStep, 1.0f, 4.0f);
-        ShowHelpMarker("Absolute clamp on rotation extrapolation in frames. Bounds recovery after "
-                       "hitches without hitch-hold. 2.5 = default (recommended). "
-                       "Lower to 1.5 if anchor-switch snaps appear.");
-        bool historyBorderFallback = config->ReprojHistoryBorderFallback.value_or_default();
-        if (ImGui::Checkbox("History border fallback##reproj-live", &historyBorderFallback))
-            config->ReprojHistoryBorderFallback = historyBorderFallback;
-        ShowHelpMarker("Experimental E5 fallback for invalid world-border pixels only. "
-                       "Uses compatible older anchors after current coverage fails; never blends history "
-                       "over valid current content. Off by default.");
-        bool edgeDebug = config->ReprojDebugView.value_or_default();
-        if (ImGui::Checkbox("Edge debug view##reproj-live", &edgeDebug))
-            config->ReprojDebugView = edgeDebug;
-        ShowHelpMarker("E2 diagnostic: paints filter-unsafe warp pixels magenta before HUD composite. "
-                       "Visualization only. Off for normal play (recommended).");
-        bool predictiveProbe = config->ReprojPredictiveProbe.value_or_default();
-        if (ImGui::Checkbox("Predictive render probe##reproj-live", &predictiveProbe))
-            config->ReprojPredictiveProbe = predictiveProbe;
-        ShowHelpMarker("Opt-in 1-degree yaw probe for predictive render-pose steering.\n"
-                       "Biases the KCD2 render camera by +1 deg yaw, then applies an inverse\n"
-                       "-1 deg residual warp so the presented center returns to original.\n"
-                       "Off by default.");
         float sensX = config->ReprojMouseSensitivityX.value_or_default();
         if (ImGui::InputFloat("Mouse sens X##reproj-live", &sensX, 0.0001f, 0.001f, "%.5f"))
             config->ReprojMouseSensitivityX = std::clamp(sensX, 0.0f, 0.00065f);

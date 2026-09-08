@@ -191,13 +191,6 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojHudIsolation.set_from_config(readBool("AsyncTimewarp", "HudIsolation"));
             ReprojContentInterpolation.set_from_config(readBool("AsyncTimewarp", "ContentInterpolation"));
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
-            if (auto setting = readFloat("AsyncTimewarp", "SafeWarpBudget"); setting.has_value())
-                ReprojSafeWarpBudget.set_from_config(std::clamp(setting.value(), 0.0f, 32.0f));
-            if (auto setting = readFloat("AsyncTimewarp", "MaxTimeStep"); setting.has_value())
-                ReprojMaxTimeStep.set_from_config(std::clamp(setting.value(), 1.0f, 4.0f));
-            ReprojHistoryBorderFallback.set_from_config(readBool("AsyncTimewarp", "HistoryBorderFallback"));
-            ReprojDebugView.set_from_config(readBool("AsyncTimewarp", "DebugView"));
-            ReprojPredictiveProbe.set_from_config(readBool("AsyncTimewarp", "PredictiveProbe"));
         }
 
         // OptiFG
@@ -1034,16 +1027,6 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojContentInterpolation.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "LateSampleLead",
                      GetFloatValue(Instance()->ReprojLateSampleLead.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "SafeWarpBudget",
-                     GetFloatValue(Instance()->ReprojSafeWarpBudget.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "MaxTimeStep",
-                     GetFloatValue(Instance()->ReprojMaxTimeStep.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "HistoryBorderFallback",
-                     GetBoolValue(Instance()->ReprojHistoryBorderFallback.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "DebugView",
-                     GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
-        ini.SetValue("AsyncTimewarp", "PredictiveProbe",
-                     GetBoolValue(Instance()->ReprojPredictiveProbe.value_for_config()).c_str());
     }
 
     // XeFG output

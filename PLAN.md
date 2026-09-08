@@ -1,6 +1,6 @@
 # async-simple ongoing plan
 
-Updated: 2026-09-07
+Updated: 2026-09-08
 Branch: `async-simple`
 Primary live target: Kingdom Come: Deliverance II (KCD2)
 Regression target: Deep Rock Galactic (DRG)
@@ -207,7 +207,7 @@ Status (2026-09-08): implemented first diagnostic probe.
 - When active on gameplay cameras at caller RVA `0x7F1A68`, applies a fixed +1.0 degree yaw bias around CryEngine world Z (`[0, 0, 1]`) directly to the camera matrix before `UpdateFrustumPlanes` updates frustum culling. Because `CView::Update` reconstructs the camera matrix each frame from internal view parameters, game state is not permanently mutated.
 - Packet captures both the biased render basis and the unbiased target basis.
 - Presenter `ApplyLateInput` detects `biasYaw != 0` and warps from the biased render basis to the unbiased target pose, producing an exact -1.0 degree residual yaw warp that restores the presented center while shifting genuine rasterized coverage.
-- Next step: live validate in KCD2 with `PredictiveProbe=true` and `ContentInterpolation=false`. Confirm log message, stable center/crosshair, and edge shift.
+- Live run on the safe `c7f1c29d` artifact confirmed the probe log at `0x7F1A68` and showed the expected telemetry transition: `rot=1.0deg` with the fixed bias, `rot=0.0deg` after disabling it, and `rot=1.0deg` after re-enabling it. The run also reached the expected world/HUD split (`1706x960` world, `2560x1440` Scaleform) without the resource-helper crash. This validates activation and the inverse-warp plumbing, but not new rasterized geometry: no pre-warp image capture was made. The visual test showed a small repeated edge slice, but `HistoryBorderFallback=true` and the metrics show history boundary fills (`hist=.../H0/H1/...`), so that slice may be historical fallback rather than proof that the render camera failed to move; final output alone also hides the leading-edge geometry after inverse warp. Menu/diagnostic activity makes it unsuitable as a cadence A/B. The follow-up 13:28-13:30 run achieved `hist=0/0/0/0` throughout the measured intervals and showed the fixed-bias `rot=1.0deg` state switching to `rot=0.0deg` after the menu toggle. The user still observed a small repeated edge slice with the probe enabled; with history disabled this is no longer attributable to historical-anchor fill, although `DebugView` was not confirmed in the runtime log and final output is still not a pre-warp capture. Treat the fixed probe as unproven/failed for now: do not convert it to dynamic prediction. Next step is to capture the pre-warp world target or hook the actual world render-view transform after the frustum callback; only a visible leading-edge difference in that source image can promote the probe.
 
 ### E5.1 Predictive overscan investigation gate (2026-09-08)
 
@@ -237,6 +237,51 @@ Status (2026-09-08): first viewport diagnostic live run was safe but inconclusiv
 - Fourth live run produced exact retail-1.5.6 RVAs: primary viewport setup returns at `0x5020D5`, reduced-resolution chain viewport setup at `0x501A82`, OM wrapper at `0x4FF700`, and all traced 1706x960 RTV creation at `0x12F68C3`. Static disassembly shows `0x5020D5` passes a viewport already stored at render-context offset `+0x1B0`; it does not calculate the extent. `0x12F68C3` is a generic resource/RTV wrapper producing the complete world family (many formats), not the policy owner.
 - Fifth live run resolved the upstream stacks. World submission is `0x502068 -> 0x5025F0 -> 0xC22644`, reached from the render-job/orchestration paths at `0x45F15F` and `0x4B3284`; HUD instead follows `0x501A82 -> 0x4EC258 -> 0x7728DD`. World resource creation follows `0x12F68C3 -> 0x7B6CE8 -> 0x7B38D4 -> 0x7AD47C -> 0x7ACEBC -> 0x1DF75C0`. Crucially, `0x7AD47C` is the resource-description materializer: it reads 16-bit width and height from input descriptor offsets `+0x08/+0x0A`, validates them, and writes the resulting native resource dimensions. This gives a build-gatable mutation boundary upstream of D3D12 creation, while the independently identified world/HUD stacks provide a way to keep Scaleform nominal.
 - The bounded `0x7B07F0` resource observer is disabled after two startup crashes. The first callback clobbered `RCX`, which the caller dereferences at `WHGame.dll+0x7ACEE4`; moving diagnostics before the original call fixed that fault but still clobbered hidden volatile `R10`, which the caller copies into `R8` and dereferences at `WHGame.dll+0x7AE1DB`. A normal C++ Detours callback cannot preserve this private register contract. Do not reinstall the hook without an ABI-preserving assembly thunk. Continue using the passive D3D12 probes to correlate resource families, and require a frame capture proving distinct geometry outside the nominal rect before any mutation.
+
+### E5.2 CryEngine custom-resolution canary (proposed, not implementation approval)
+
+The guard-band end state is accepted as the architectural target: the physical
+swapchain stays nominal, the complete KCD2 world graph renders into an
+oversized source, the late warp samples that source into a nominal destination,
+and Scaleform remains nominal/unwarped. Do not add a `GuardBandScale` control or
+resize the virtual swapchain until the canary proves where KCD2 applies custom
+resolution.
+
+First test the retail CVar path externally, without changing OptiScaler
+resources or the camera probe:
+
+```text
+r_CustomResMaxSize=4096
+r_CustomResWidth=2880
+r_CustomResHeight=1620
+r_CustomResPreview=2
+```
+
+Treat this as a diagnostic only. A pass requires the passive KCD2 trace to show
+the primary world colour/depth/MV/temporal family growing coherently while the
+physical swapchain and Scaleform remain nominal. A changed preview or a single
+larger post-process texture is not sufficient. The current trace's primary
+world input is `1706x960` dynamic resolution and the HUD/output is
+`2560x1440`, so `2880x1620` must not be assumed to be the correct source extent.
+
+Canary result (2026-09-08): the values were appended to the retail root
+`system.cfg`, but the run still reported a `2560x1440` swapchain, `1706x960`
+primary world viewport, reduced-resolution chain, and `2560x1440` Scaleform.
+No `2880x1620` extent appeared in either the KCD2 or OptiScaler trace. The
+CVar path had no observable gameplay effect in this build (ignored, overridden,
+or capture-only); it is not a guard-band implementation. The run also toggled
+`HistoryBorderFallback` on briefly through the menu, visible as nonzero `hist=`
+counts after startup, so those seconds are not an edge A/B. Do not spend
+another run tuning these CVars. Reverse-engineer the internal render-resolution
+owner before any descriptor or viewport mutation.
+
+The TPVCamera `UpdateFrustumPlanes` hook/signature and validated gameplay-CView
+gate are reusable for synchronized culling/projection diagnostics, but changing
+`CCamera +0x30` and cull-edge fields alone is explicitly insufficient. Any
+future implementation must update the actual render projection, viewport,
+world resource family, MV/depth/jitter/temporal metadata, and source-to-display
+warp together, while keeping HUD allocation nominal and the game thread
+GPU-wait-free.
 
 ### E6. Tiny spatial fallback for the final gap
 
@@ -440,7 +485,10 @@ Rejected or removed unless new evidence changes the decision:
 - capture worker/COPY queue/mid-frame world-fence complexity;
 - UI borrowing and hitch-hold machinery;
 - old KCD2 input-prediction/target-pose stack;
-- heavy per-slot telemetry.
-- attempted KCD2 render reserve and presenter guard crop; live testing showed only reduced displayed FOV, not wider captured coverage.
+- attempted KCD2 render reserve and presenter guard crop; live testing showed only reduced displayed FOV, not wider captured coverage;
+- predictive render-pose steering, yaw probe, and camera callback hooks;
+- overscan tracing (viewport, scissor, and resource descriptor intercept hooks);
+- safe-warp budget / edge limiter and boundary binary search;
+- history border fallback and multi-anchor sampling.
 
 When one of these decisions changes, record the measured reason here and update the relevant active section above.

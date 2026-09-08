@@ -1,259 +1,482 @@
 #!/usr/bin/env python3
-"""
-Reprojection Telemetry Analyzer
-Parses OptiScaler.log for ReprojTelemetry v=1 lines and ReprojSlot dumps.
-See telemetry_plan.md section 16 & 21.
+"""Analyze OptiScaler reprojection telemetry (RTv=2 / RDv=2 / RHv=2 grammar).
+
+Grammar owner: telemetry_plan.md  -- this tool is the contract enforcer.
+
+Usage:
+    python3 analyze_telemetry.py story  <OptiScaler.log>          # chronological narrative + verdicts
+    python3 analyze_telemetry.py health <OptiScaler.log>          # session-wide verdict only
+    python3 analyze_telemetry.py diff   <before.log> <after.log>  # A/B comparison
+
+Accepts logs with the RTv=2 sparse-event grammar (telemetry_plan.md) AND logs from
+current builds that only emit the legacy 1 Hz `Reproj:` line — the latter yields
+cadence stats and heuristic suspect windows, but no episode verdicts (episodes need
+the v2 emitter).
+
+Exit codes: 0 = parsed, 1 = no telemetry found / empty verdict, 2 = grammar violation.
 """
 
+from __future__ import annotations
+
+import math
 import re
 import sys
-import argparse
-from collections import defaultdict, Counter
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
-import statistics
+from typing import Iterable, Sequence
 
-TELEMETRY_RE = re.compile(
-    r"ReprojTelemetry v=1 slots=(?P<slots>\d+) presented=(?P<presented>\d+) missed=(?P<missed>\d+) legacyMissed=(?P<legacy>\d+) "
-    r"newAnchor=(?P<newAnchor>\d+) repeatAnchor=(?P<repeat>\d+) skippedRep=(?P<skipped>\d+) "
-    r"cause\.cpu=(?P<ccpu>\d+) cause\.wait=(?P<cwait>\d+) cause\.capture=(?P<ccap>\d+) cause\.queue=(?P<cqueue>\d+) cause\.gpu=(?P<cgpu>\d+) cause\.present=(?P<cpresent>\d+) cause\.clock=(?P<cclock>\d+) "
-    r"(?:cause\.schedule=(?P<cschedule>\d+) )?cause\.unknown=(?P<cunknown>\d+) "
-    r"interval\.p50=(?P<ip50>[-\d\.NaN]+) interval\.p95=(?P<ip95>[-\d\.NaN]+) interval\.p99=(?P<ip99>[-\d\.NaN]+) interval\.max=(?P<imax>[-\d\.NaN]+) "
-    r"wake\.p50=(?P<wp50>[-\d\.NaN]+) wake\.p95=(?P<wp95>[-\d\.NaN]+) wake\.p99=(?P<wp99>[-\d\.NaN]+) wake\.max=(?P<wmax>[-\d\.NaN]+) lateWakes=(?P<lateWakes>\d+) "
-    r"wait\.p50=(?P<waitp50>[-\d\.NaN]+) wait\.p95=(?P<waitp95>[-\d\.NaN]+) wait\.p99=(?P<waitp99>[-\d\.NaN]+) "
-    r"queue\.p50=(?P<qp50>[-\d\.NaN]+) queue\.p95=(?P<qp95>[-\d\.NaN]+) queue\.p99=(?P<qp99>[-\d\.NaN]+) queue\.max=(?P<qmax>[-\d\.NaN]+) "
-    r"gpu\.p50=(?P<gp50>[-\d\.NaN]+) gpu\.p95=(?P<gp95>[-\d\.NaN]+) gpu\.p99=(?P<gp99>[-\d\.NaN]+) gpu\.max=(?P<gmax>[-\d\.NaN]+) gpuMargin\.p50=(?P<gm50>[-\d\.NaN]+) gpuSkipped=(?P<gskipped>\d+) calibFail=(?P<calibFail>\d+) calibValid=(?P<calibValid>\d) "
-    r"present\.p50=(?P<pp50>[-\d\.NaN]+) present\.p95=(?P<pp95>[-\d\.NaN]+) present\.p99=(?P<pp99>[-\d\.NaN]+) present\.max=(?P<pmax>[-\d\.NaN]+) "
-    r"mode\.mv=(?P<mmv>\d+) mode\.depth=(?P<mdepth>\d+) mode\.rotation=(?P<mrot>\d+) mode\.unwarped=(?P<munwarp>\d+) "
-    r"source\.raw\.p50=(?P<sr50>[-\d\.NaN]+) source\.raw\.p95=(?P<sr95>[-\d\.NaN]+) source\.selected\.p50=(?P<ss50>[-\d\.NaN]+) source\.selected\.p95=(?P<ss95>[-\d\.NaN]+) ratio\.p50=(?P<rp50>[-\d\.NaN]+) ratio\.p95=(?P<rp95>[-\d\.NaN]+) source\.capHz=(?P<sourceCapHz>[-\d\.NaN]+) source\.capError=(?P<sourceCapError>[-\d\.NaN]+) "
-    r"anchorAge\.p50=(?P<ap50>[-\d\.NaN]+) anchorAge\.p95=(?P<ap95>[-\d\.NaN]+) anchorAge\.max=(?P<amax>[-\d\.NaN]+) "
-    r"step\.raw\.p50=(?P<stepRaw50>[-\d\.NaN]+) step\.raw\.p95=(?P<stepRaw95>[-\d\.NaN]+) step\.raw\.max=(?P<stepRawMax>[-\d\.NaN]+) step\.final\.p50=(?P<stepF50>[-\d\.NaN]+) step\.final\.p95=(?P<stepF95>[-\d\.NaN]+) step\.final\.max=(?P<stepFMax>[-\d\.NaN]+) step\.clamped=(?P<clamped>\d+) "
-    r"camera=(?P<camAvail>\d+)/(?P<camTotal>\d+) depth=(?P<depthAvail>\d+)/(?P<depthTotal>\d+) depthConstants=(?P<dcAvail>\d+)/(?P<dcTotal>\d+) hudless=(?P<hAvail>\d+)/(?P<hTotal>\d+) "
-    r"fps=(?P<fps>[-\d\.NaN]+)"
-)
+TELEMETRY_VERSION = 2  # fail loudly if the log uses a different grammar version
 
-# Kept separate from the core v1 expression so the parser can reliably read
-# the extension on both legacy lines and new lines. The core expression is
-# intentionally unanchored for compatibility with logger prefixes.
-TELEMETRY_EXT_RE = re.compile(
-    r"slipped=(?P<slipped>\d+) source\.capRequestedHz=(?P<sourceCapRequestedHz>[-\d\.NaN]+) "
-    r"source\.capActive=(?P<sourceCapActive>\d+) target\.enabled=(?P<targetEnabled>\d+) "
-    r"target\.samples=(?P<targetSamples>\d+)"
-)
+# ReprojMeta keys that identify a session for diff alignment.
+META_IDENTITY_KEYS = ("refresh", "stage", "ver", "commit")
 
-LATE_INPUT_EXT_RE = re.compile(
-    r"latchGpu\.p95=(?P<latchGpuP95>[-\d\.NaN]+) "
-    r"lateInput\.applied=(?P<lateInputApplied>\d+) lateInput\.nonzero=(?P<lateInputNonzero>\d+) "
-    r"lateInput\.deltaP95=(?P<lateInputDeltaP95>[-\d\.NaN]+) "
-    r"lateInput\.rotationDegP95=(?P<lateInputRotationDegP95>[-\d\.NaN]+)"
-    r"(?:.*?sens\.x=(?P<sensX>[-\d\.NaN]+) sens\.y=(?P<sensY>[-\d\.NaN]+))?"
-)
+# thresholds mirrored from telemetry_plan.md section 4 (analysis-side only)
+STALE_ANCHOR_AGE_MS = 25.0
+PRESSURE_QUEUE_DEPTH = 2
 
-SLOT_RE = re.compile(
-    r"ReprojSlot v=1 seq=(?P<seq>\d+) outcome=(?P<outcome>\d+) cause=(?P<cause>\d+) secondary=(?P<sec>[0-9a-fA-FxX]+) anchor=(?P<anchor>\d+) new=(?P<new>\d+) repeat=(?P<repeat>\d+) effMode=(?P<mode>\d+) wake=(?P<wake>[-\d\.A-Za-z]+) wait=(?P<wait>[-\d\.A-Za-z]+) queue=(?P<queue>[-\d\.A-Za-z]+) gpu=(?P<gpu>[-\d\.A-Za-z]+) present=(?P<present>[-\d\.A-Za-z]+) interval=(?P<interval>[-\d\.A-Za-z]+) age=(?P<age>[-\d\.A-Za-z]+) step=(?P<stepUnc>[-\d\.A-Za-z]+)/(?P<stepFinal>[-\d\.A-Za-z]+) vel=(?P<vel>\d+) depth=(?P<depth>\d+) cam=(?P<cam>\d+)"
-)
+EVENT_CLASSES = ("nps", "gapSrc", "late", "outlier", "blk", "sess")
+EPISODE_CLASSES = ("nps", "gapSrc", "late", "outlier", "blk")
 
-def parse_float(s):
+
+class GrammarError(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------
+# parsing
+# --------------------------------------------------------------------------
+
+_KV_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(-?[\w./:+-]*)")
+
+
+@dataclass
+class ParsedLine:
+    ts: float
+    ev: str
+    kv: dict
+    kind: str = "ev"  # "ev" = raw ReprojEv event, "hit" = ReprojHit rollup (derived)
+
+
+def _parse_kv_pairs(payload: str) -> dict:
+    out = {}
+    for match in _KV_RE.finditer(payload):
+        key, value = match.group(1), match.group(2)
+        out[key] = value
+    return out
+
+
+def _to_float(raw: str, where: str) -> float:
     try:
-        v = float(s)
-        if v != v:  # NaN
-            return None
-        return v
-    except:
+        return float(raw)
+    except ValueError:
+        raise GrammarError(f"{where}: non-numeric value {raw!r}") from None
+
+
+def parse_line(line: str) -> ParsedLine | None:
+    """Parse one telemetry line; returns None for non-telemetry lines."""
+    stripped = line.strip()
+    if "ReprojEv v=" in stripped:
+        prefix, kind = "ReprojEv v=", "ev"
+    elif "ReprojHit v=" in stripped:
+        prefix, kind = "ReprojHit v=", "hit"
+    else:
         return None
+    payload = stripped.split(prefix, 1)[1]
+    if not payload.startswith(f"{TELEMETRY_VERSION} "):
+        raise GrammarError(
+            f"unsupported telemetry version in: {stripped[:100]!r} "
+            f"(expected v={TELEMETRY_VERSION})"
+        )
+    kv = _parse_kv_pairs(payload)
+    # the version number itself was consumed as a keyless token; drop strays
+    kv.pop(TELEMETRY_VERSION, None)
+    where = f"{prefix}line"
+    if "ts" not in kv:
+        raise GrammarError(f"{where}: missing ts: {stripped[:100]!r}")
+    ts = _to_float(kv.pop("ts"), where)
+    ev = kv.pop("ev", "" if prefix.startswith("ReprojHit") else "")
+    if prefix.startswith("ReprojEv") and ev not in EVENT_CLASSES:
+        raise GrammarError(f"{where}: unknown ev={ev!r} in: {stripped[:100]!r}")
+    if prefix.startswith("ReprojHit") and ev not in EPISODE_CLASSES:
+        raise GrammarError(f"{where}: unknown episode ev={ev!r} in: {stripped[:100]!r}")
+    return ParsedLine(ts=ts, ev=ev, kv=kv, kind=kind)
 
-def load_log(path):
-    telemetry = []
-    slots = []
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            m = TELEMETRY_RE.search(line)
-            if m:
-                d = m.groupdict()
-                extension = TELEMETRY_EXT_RE.search(line)
-                if extension:
-                    d.update(extension.groupdict())
-                late_input_extension = LATE_INPUT_EXT_RE.search(line)
-                if late_input_extension:
-                    d.update(late_input_extension.groupdict())
-                # convert numeric
-                for k in d:
-                    if d[k] is None:
-                        continue
-                    try:
-                        if "." in d[k] or "NaN" in d[k] or "nan" in d[k]:
-                            d[k] = parse_float(d[k])
-                        else:
-                            d[k] = int(d[k])
-                    except:
-                        pass
-                telemetry.append(d)
-                continue
-            m2 = SLOT_RE.search(line)
-            if m2:
-                d = m2.groupdict()
-                for k in d:
-                    try:
-                        if "." in d[k] or "NaN" in d[k] or "nan" in d[k].lower():
-                            d[k] = parse_float(d[k])
-                        else:
-                            if k == "sec":
-                                d[k] = int(d[k], 0)
-                            else:
-                                d[k] = int(d[k])
-                    except:
-                        pass
-                slots.append(d)
-    return telemetry, slots
 
-def percentile(data, p):
-    if not data:
+def parse_log(path: Path) -> list[ParsedLine]:
+    lines: list[ParsedLine] = []
+    for raw in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            parsed = parse_line(raw)
+        except GrammarError:
+            raise
+        if parsed is not None:
+            lines.append(parsed)
+    return lines
+
+
+def parse_meta(path: Path) -> dict:
+    """Return the first ReprojMeta v=2 record as a dict ({} if absent)."""
+    for raw in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        if "ReprojMeta v=" not in raw:
+            continue
+        payload = raw.split("ReprojMeta v=", 1)[1]
+        if not payload.startswith(f"{TELEMETRY_VERSION} "):
+            raise GrammarError(f"unsupported ReprojMeta version in: {raw[:100]!r}")
+        return _parse_kv_pairs(payload)
+    return {}
+
+
+# --------------------------------------------------------------------------
+# episode reconstruction
+# --------------------------------------------------------------------------
+
+EPISODE_TRIGGER = 3          # same-class events within this window roll up
+EPISODE_WINDOW_S = 1.0
+EPISODE_MERGE_GAP_S = 1.0    # same-class events within this gap merge into one episode
+
+
+@dataclass
+class Episode:
+    cls: str
+    first_ts: float
+    last_ts: float
+    events: list = field(default_factory=list)
+
+    @property
+    def duration_s(self) -> float:
+        return round(self.last_ts - self.first_ts + 1.0, 1)
+
+    @property
+    def count(self) -> int:
+        return len(self.events)
+
+    def max_num(self, key: str) -> float | None:
+        vals = [float(e.kv[key]) for e in self.events if key in e.kv]
+        return max(vals) if vals else None
+
+    def mean_num(self, key: str) -> float | None:
+        vals = [float(e.kv[key]) for e in self.events if key in e.kv]
+        return sum(vals) / len(vals) if vals else None
+
+
+def build_episodes(events: Sequence[ParsedLine]) -> list[Episode]:
+    """Reconstruct episodes from ReprojEv lines.
+
+    The DLL emits ReprojHit rollups too; the analyzer re-derives episodes from
+    raw events only (kind == "ev") so rollup lines never double-count, and it
+    works on logs from builds without rollup support.
+    """
+    episodes: list[Episode] = []
+    by_class: dict[str, list[ParsedLine]] = {c: [] for c in EPISODE_CLASSES}
+    for e in events:
+        if e.kind == "ev" and e.ev in by_class:
+            by_class[e.ev].append(e)
+    for cls, evs in by_class.items():
+        current: Episode | None = None
+        for e in evs:
+            if current is None or e.ts - current.last_ts > EPISODE_MERGE_GAP_S:
+                current = Episode(cls=cls, first_ts=e.ts, last_ts=e.ts)
+                episodes.append(current)
+            current.last_ts = max(current.last_ts, e.ts)
+            current.events.append(e)
+    episodes.sort(key=lambda ep: ep.first_ts)
+    return episodes
+
+
+def attribute(episodes: Sequence[Episode], events: Sequence[ParsedLine]) -> None:
+    """Attach a verdict to each episode (mutates .verdict), precedence per plan §3.3."""
+    for ep in episodes:
+        overlap = [
+            e
+            for e in events
+            if ep.first_ts - EPISODE_MERGE_GAP_S <= e.ts <= ep.last_ts + EPISODE_MERGE_GAP_S
+        ]
+        overlap_src = [e for e in overlap if e.ev == "gapSrc"]
+        overlap_blk = [e for e in overlap if e.ev == "blk"]
+        q_vals = [float(e.kv.get("q", 0)) for e in ep.events]
+        age_mean = ep.mean_num("age")
+        q_max = max(q_vals) if q_vals else 0
+        if ep.cls == "gapSrc":
+            ep.verdict = (
+                f"source-bound: the game published frames late "
+                f"(gap {ep.max_num('gap'):.1f} ms vs EMA {ep.mean_num('ema'):.1f} ms)"
+            )
+        elif overlap_src:
+            ep.verdict = (
+                f"source-bound: {len(overlap_src)} source gap(s) overlap "
+                f"(worst gap {max(float(e.kv.get('gap', 0)) for e in overlap_src):.1f} ms)"
+            )
+        elif q_max >= PRESSURE_QUEUE_DEPTH:
+            ep.verdict = (
+                f"capture/packet pressure: queue depth reached {q_max:.0f} "
+                f"(packets backed up while the presenter needed one)"
+            )
+        elif age_mean is not None and age_mean > STALE_ANCHOR_AGE_MS:
+            ep.verdict = (
+                f"stale anchors: mean anchor age {age_mean:.1f} ms > "
+                f"{STALE_ANCHOR_AGE_MS:.0f} ms with queue empty "
+                f"(capture latency, not starvation)"
+            )
+        elif overlap_blk:
+            ep.verdict = (
+                f"game-thread block: {len(overlap_blk)} block event(s) overlap "
+                f"(worst {max(float(e.kv.get('blk', 0)) for e in overlap_blk):.1f} ms)"
+            )
+        else:
+            ep.verdict = "presenter-bound (no source gap, no queue pressure, no block evidence)"
+
+
+# --------------------------------------------------------------------------
+# 1 Hz window extraction (from the RTv=2 health line)
+# --------------------------------------------------------------------------
+
+@dataclass
+class Window:
+    ts: float
+    src: float | None = None
+    disp: float | None = None
+    miss: float | None = None
+    drop: float | None = None
+    notrdy: float | None = None
+    age: float | None = None
+    low1: float | None = None
+    p95: float | None = None
+    blk: float | None = None
+    q: float | None = None
+
+
+# The documented legacy 1 Hz line (AGENTS.md "Reading the once-per-second log line",
+# current emitter). Field names there are normative; this regex is allowed to grow
+# with them. It exists so real logs from builds without the RTv=2 emitter stay
+# auditable and A/B-diffable.
+_V1_WINDOW_RE = re.compile(
+    r"^\[(?P<h>\d{2}):(?P<m>\d{2}):(?P<s>\d{2}(?:\.\d+)?)\].*?"
+    r"Reproj: source=(?P<src>[\d.]+) FPS display=(?P<disp>[\d.]+) FPS "
+    r"\(new=(?P<new>\d+) repeat=(?P<rep>\d+)\) missed=(?P<miss>\d+) "
+    r"interval=(?P<intMean>[\d.]+)/(?P<intP95>[\d.]+)ms .*?"
+    r"poseAge=(?P<age>[\d.]+)ms queue=(?P<q>\d+) .*?"
+    r"dropAnchor=(?P<drop>\d+) capC=(?P<cap>\d+) capWait=(?P<notRdy>\d+) "
+    r"\((?P<presenter>[^,]+), block=(?P<blk>[\d.]+)ms\)"
+)
+
+
+def parse_windows(path: Path) -> list[Window]:
+    """Extract the once-per-second health line.
+
+    Accepts both the planned RTv=2 line and the legacy v1 line (old format is
+    recognized by `source=... FPS display=...`, never version-gated). Prose
+    lines are skipped; a *mismatched RTv* is a grammar violation.
+    """
+    out: list[Window] = []
+    for raw in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
+        if "Reproj:" not in raw:
+            continue
+        if "RTv=" in raw:
+            payload = raw.split("Reproj:", 1)[1]
+            kv = _parse_kv_pairs(payload)
+            if kv.get("RTv") != str(TELEMETRY_VERSION):
+                raise GrammarError(
+                    f"unsupported RTv={kv.get('RTv')!r} in: {raw[:100]!r}"
+                )
+            w = Window(ts=_to_float(kv.get("ts", "0"), "Reproj: ts"))
+            for key in ("src", "disp", "miss", "drop", "notRdy", "age", "low1", "p95", "blk", "q"):
+                if key in kv:
+                    setattr(w, key.lower() if key != "notRdy" else "notrdy",
+                            _to_float(kv[key], f"Reproj: {key}"))
+            out.append(w)
+            continue
+        match = _V1_WINDOW_RE.match(raw.strip())
+        if match is None:
+            continue  # some other Reproj: shape (activation banner etc.)
+        g = match.groupdict()
+        ts = int(g["h"]) * 3600 + int(g["m"]) * 60 + float(g["s"])
+        out.append(Window(
+            ts=ts,
+            src=float(g["src"]),
+            disp=float(g["disp"]),
+            miss=float(g["miss"]),
+            drop=float(g["drop"]),
+            notrdy=float(g["notRdy"]),
+            age=float(g["age"]),
+            p95=float(g["intP95"]),
+            blk=float(g["blk"]),
+            q=float(g["q"]),
+        ))
+    return out
+
+
+# legacy-window suspicion heuristics (plan §4 thresholds; heuristic, not verdicts)
+_BAD_WINDOW_MISS = 3
+_BAD_WINDOW_DISP = 110.0
+_BLOCK_SUSPECT_MS = 4.0
+_NOTRDY_SUSPECT = 40.0
+
+
+def _window_suspect(w: Window) -> str | None:
+    if (w.miss or 0) < _BAD_WINDOW_MISS and (w.disp is None or w.disp >= _BAD_WINDOW_DISP):
         return None
-    s = sorted(data)
-    k = int(round(p * (len(s)-1)))
-    return s[k]
+    if (w.blk or 0) > _BLOCK_SUSPECT_MS:
+        return "game-thread block suspected"
+    if (w.notrdy or 0) >= _NOTRDY_SUSPECT:
+        return "capture latency suspected (high capWait)"
+    return "presenter cadence suspect (no block/queue evidence)"
 
-def analyze(path):
-    telemetry, slots = load_log(path)
-    print(f"Time range: {len(telemetry)} telemetry windows")
-    if not telemetry:
-        print("No telemetry found. Is Reproj.Telemetry=true?")
-        if slots:
-            print(f"Found {len(slots)} slot dumps without telemetry windows")
-        return
 
-    # Display rate distribution
-    fps_vals = [t["fps"] for t in telemetry if isinstance(t["fps"], (int,float)) and t["fps"] is not None]
-    print(f"Display FPS: p50 {percentile(fps_vals,0.5):.1f} p95 {percentile(fps_vals,0.95):.1f} max {max(fps_vals):.1f}" if fps_vals else "No FPS data")
+# --------------------------------------------------------------------------
+# narratives
+# --------------------------------------------------------------------------
 
-    # Miss causes are emitted only for slots that were not presented. A
-    # successful long-interval present is reported separately as "slipped".
-    cause_totals = Counter()
-    for t in telemetry:
-        cause_totals["cpu"] += t.get("ccpu",0) or 0
-        cause_totals["wait"] += t.get("cwait",0) or 0
-        cause_totals["capture"] += t.get("ccap",0) or 0
-        cause_totals["queue"] += t.get("cqueue",0) or 0
-        cause_totals["gpu"] += t.get("cgpu",0) or 0
-        cause_totals["present"] += t.get("cpresent",0) or 0
-        cause_totals["clock"] += t.get("cclock",0) or 0
-        cause_totals["schedule"] += t.get("cschedule",0) or 0
-        cause_totals["unknown"] += t.get("cunknown",0) or 0
-    slipped_total = sum(t.get("slipped", 0) or 0 for t in telemetry)
-    total_missed = sum(t.get("missed", 0) or 0 for t in telemetry)
-    total_skipped = sum(t.get("skipped", 0) or 0 for t in telemetry)
-    print("Misses by cause:", dict(cause_totals))
-    total_sched = sum(t.get("slots",0) for t in telemetry)
-    effective_slots = sum((t.get("presented", 0) or 0) + (t.get("missed", 0) or 0) +
-                          (t.get("skipped", 0) or 0) for t in telemetry)
-    print(f"Total scheduled {total_sched} missed {total_missed} ({(total_missed/total_sched*100 if total_sched else 0):.1f}%) "
-          f"coalescedSkipped {total_skipped} slippedPresented {slipped_total}")
-    if effective_slots:
-        print(f"Effective display slots {effective_slots} presented {sum(t.get('presented', 0) or 0 for t in telemetry)} "
-              f"drop rate {((total_missed + total_skipped) / effective_slots * 100):.1f}%")
+def _fmt_worst_value(ep: Episode) -> str:
+    key = {"nps": "gap", "gapSrc": "gap", "late": "interval", "outlier": "interval", "blk": "blk"}.get(ep.cls)
+    if key:
+        val = ep.max_num(key)
+        if val is not None:
+            return f"worst {key} {val:.1f} ms"
+    age = ep.max_num("age")
+    return f"age {age:.1f} ms" if age is not None else "no numeric fields"
 
-    # Interval percentiles
-    ip50 = [t["ip50"] for t in telemetry if t.get("ip50") is not None]
-    ip95 = [t["ip95"] for t in telemetry if t.get("ip95") is not None]
-    print(f"Present interval p50: {percentile(ip50,0.5):.2f} p95: {percentile(ip95,0.95):.2f}" if ip50 else "No interval")
 
-    # Queue and warp
-    qp95 = [t["qp95"] for t in telemetry if t.get("qp95") is not None]
-    gp95 = [t["gp95"] for t in telemetry if t.get("gp95") is not None]
-    print(f"Queue p95: {percentile(qp95,0.5):.2f} Warp p95: {percentile(gp95,0.5):.2f}" if qp95 else "No queue/gpu")
+def _verdict(ep: Episode) -> str:
+    return getattr(ep, "verdict", "unattributed")
 
-    # Source rate
-    sr50 = [t["sr50"] for t in telemetry if t.get("sr50") is not None]
-    print(f"Source raw p50: {percentile(sr50,0.5):.1f} ms ({(1000/percentile(sr50,0.5) if percentile(sr50,0.5) else 0):.1f} FPS)" if sr50 else "No source")
-    cap_hz = [t["sourceCapHz"] for t in telemetry if t.get("sourceCapHz")]
-    cap_error = [t["sourceCapError"] for t in telemetry if t.get("sourceCapError") is not None]
-    if cap_hz:
-        print(f"Source cap: {percentile(cap_hz,0.5):.1f} Hz | last timing error p95 {percentile(cap_error,0.95):.2f} ms")
-    requested_caps = [t["sourceCapRequestedHz"] for t in telemetry
-                      if t.get("sourceCapRequestedHz") is not None and t.get("sourceCapRequestedHz", 0) > 0]
-    active_caps = [t["sourceCapActive"] for t in telemetry if t.get("sourceCapActive") is not None]
-    if requested_caps:
-        active_windows = sum(1 for t in telemetry if t.get("sourceCapActive") == 1)
-        print(f"Source cap requested: {percentile(requested_caps,0.5):.1f} Hz | active windows "
-              f"{active_windows}/{len(active_caps) if active_caps else len(telemetry)}")
 
-    target_flags = [t.get("targetEnabled") for t in telemetry if t.get("targetEnabled") is not None]
-    if target_flags:
-        target_samples = sum(t.get("targetSamples", 0) or 0 for t in telemetry)
-        print(f"Target-pose resolver: {'enabled' if any(target_flags) else 'disabled'} | active samples {target_samples}")
+def build_story(events: Sequence[ParsedLine], episodes: Sequence[Episode], windows: Sequence[Window]) -> str:
+    out: list[str] = []
+    sess_events = [e for e in events if e.ev == "sess"]
+    out.append(f"=== Reproj telemetry story: {len(sess_events)} session boundary event(s) ===")
+    last_state = None
+    for e in sess_events:
+        state = e.kv.get("state", "?")
+        out.append(f"  t={e.ts:>9.1f}s  session {last_state} -> {state}")
+        last_state = state
 
-    late_input_windows = [t for t in telemetry if t.get("lateInputApplied") is not None]
-    if late_input_windows:
-        applied = sum(t.get("lateInputApplied", 0) or 0 for t in late_input_windows)
-        nonzero = sum(t.get("lateInputNonzero", 0) or 0 for t in late_input_windows)
-        delta_p95 = [t.get("lateInputDeltaP95") for t in late_input_windows
-                     if t.get("lateInputDeltaP95") is not None]
-        rotation_p95 = [t.get("lateInputRotationDegP95") for t in late_input_windows
-                        if t.get("lateInputRotationDegP95") is not None]
-        latch_gpu = [t.get("latchGpuP95") for t in late_input_windows if t.get("latchGpuP95") is not None]
-        summary = f"Late input: applied {applied}, nonzero {nonzero}"
-        if delta_p95:
-            summary += f" | delta p95 {percentile(delta_p95, 0.95):.2f} counts"
-        print(summary)
-        if rotation_p95:
-            print(f"Late input rotation p95: {percentile(rotation_p95, 0.95):.3f} deg")
-        sens_x = [t.get("sensX") for t in late_input_windows if t.get("sensX") is not None]
-        if sens_x:
-            print(f"Late input sensitivity p50: {percentile(sens_x, 0.50):.7f} rad/count")
-        if latch_gpu:
-            print(f"Late-latch signal-to-GPU-start p95: {percentile(latch_gpu, 0.95):.2f} ms")
+    out.append(f"--- {len(windows)} health window(s) ---")
+    suspect = [(w, _window_suspect(w)) for w in windows]
+    suspect = [(w, why) for w, why in suspect if why]
+    if suspect:
+        out.append(f"  suspect windows: {len(suspect)} (legacy 1 Hz line: heuristic, not verdicts)")
+        for w, why in suspect[:10]:
+            out.append(
+                f"    t={w.ts:>9.1f}  src={w.src:.1f} disp={w.disp:.1f} miss={w.miss:.0f} "
+                f"age={w.age:.1f} blk={w.blk:.2f} q={w.q:.0f} — {why}"
+            )
+        if len(suspect) > 10:
+            out.append(f"    … and {len(suspect) - 10} more")
+    low1s = [w.low1 for w in windows if w.low1 is not None]
+    if low1s:
+        out.append(
+            f"  low1 fps: mean {sum(low1s) / len(low1s):.1f}, "
+            f"worst {min(low1s):.1f} (1% low = mean of worst 1% of display intervals)"
+        )
+    else:
+        out.append("  low1 fps: n/a (needs the RTv=2 emitter; not present in this log)")
+    misses = [w.miss for w in windows if w.miss is not None]
+    if misses:
+        out.append(
+            f"  missed slots: total {sum(misses):.0f}, "
+            f"worst window {max(misses):.0f}, mean {sum(misses) / len(misses):.1f}/s"
+        )
 
-    # Timestep
-    stepF95 = [t["stepF95"] for t in telemetry if t.get("stepF95") is not None]
-    print(f"Timestep final p95: {percentile(stepF95,0.95):.2f}" if stepF95 else "No timestep")
-    clamped = sum(t.get("clamped",0) for t in telemetry)
-    print(f"Clamped steps total: {clamped}")
+    out.append(f"--- {len(episodes)} episode(s) ---")
+    for ep in episodes:
+        out.append(
+            f"  [{ep.cls:>7}] t={ep.first_ts:>9.1f}s dur={ep.duration_s:.1f}s N={ep.count} "
+            f"{_fmt_worst_value(ep)}"
+        )
+        out.append(f"             verdict: {_verdict(ep)}")
+    if not episodes:
+        out.append("  (none — clean log)")
+    return "\n".join(out)
 
-    # Effective path
-    mv = sum(t.get("mmv",0) for t in telemetry)
-    depth = sum(t.get("mdepth",0) for t in telemetry)
-    rot = sum(t.get("mrot",0) for t in telemetry)
-    print(f"Effective path: MV {mv} depth {depth} rotation {rot}")
 
-    # Correlation: queue delay vs missed
-    # Simple: compute avg queue p95 for windows with misses vs without
-    with_miss = [t["qp95"] for t in telemetry if t.get("missed",0)>0 and t.get("qp95") is not None]
-    without = [t["qp95"] for t in telemetry if t.get("missed",0)==0 and t.get("qp95") is not None]
-    if with_miss and without:
-        print(f"Queue p95 with miss {statistics.mean(with_miss):.2f} without {statistics.mean(without):.2f} delta {statistics.mean(with_miss)-statistics.mean(without):.2f}")
+def build_health(events: Sequence[ParsedLine], episodes: Sequence[Episode], windows: Sequence[Window]) -> str:
+    out: list[str] = []
+    active = [ep for ep in episodes if ep.cls != "sess"]
+    out.append(f"episodes: {len(active)} across {len(windows)} window(s)")
+    per_class = Counter(ep.cls for ep in active)
+    for cls, count in sorted(per_class.items()):
+        time_in = sum(ep.duration_s for ep in active if ep.cls == cls)
+        out.append(f"  {cls:>7}: {count} episode(s), ~{time_in:.1f}s affected")
+    if active:
+        worst = max(active, key=lambda ep: ep.count)
+        out.append(
+            f"worst episode: [{worst.cls}] t={worst.first_ts:.1f}s N={worst.count} — {_verdict(worst)}"
+        )
+    low1s = [w.low1 for w in windows if w.low1 is not None]
+    if low1s:
+        out.append(
+            f"low1 fps: mean {sum(low1s) / len(low1s):.1f}, worst {min(low1s):.1f}"
+        )
+    if not active and not low1s:
+        out.append("(no episodes and no low1 data — nothing to report)")
+    return "\n".join(out)
 
-    # Correlation source interval change vs timestep error: check if high source variance correlates with step variance
-    # Placeholder: compare ratio p95
-    ratio = [t["rp95"] for t in telemetry if t.get("rp95") is not None]
-    if ratio:
-        print(f"Source selected/raw ratio p95 {percentile(ratio,0.95):.2f}")
 
-    # Worst ten windows by missed
-    worst = sorted(telemetry, key=lambda x: x.get("missed",0), reverse=True)[:10]
-    print("Worst 10 windows by missed:")
-    for w in worst:
-        print(f"  missed={w.get('missed')} queue.p95={w.get('qp95')} gpu.p95={w.get('gp95')} interval.p95={w.get('ip95')} fps={w.get('fps')}")
+def diff_sessions(before_path: Path, after_path: Path) -> str:
+    """A/B two logs on the v1 1 Hz line + meta fields."""
+    meta_a, meta_b = parse_meta(before_path), parse_meta(after_path)
+    wa, wb = parse_windows(before_path), parse_windows(after_path)
 
-    # Detailed slots if present
-    if slots:
-        print(f"Detailed slots: {len(slots)}")
-        def _slot_interval(s):
-            v = s.get("interval")
-            if isinstance(v, (int, float)):
-                return v
-            try:
-                return float(v) if v is not None else 0
-            except:
-                return 0
-        worst_slots = sorted(slots, key=_slot_interval, reverse=True)[:10]
-        print("Worst slots by interval:")
-        for s in worst_slots:
-            print(f"  seq={s.get('seq')} outcome={s.get('outcome')} cause={s.get('cause')} interval={s.get('interval')} queue={s.get('queue')} gpu={s.get('gpu')}")
+    def stats(windows: Sequence[Window]) -> dict:
+        out: dict = {}
+        for key in ("src", "disp", "miss", "drop", "notrdy", "low1", "p95"):
+            vals = [getattr(w, key) for w in windows if getattr(w, key) is not None]
+            out[key] = sum(vals) / len(vals) if vals else None
+        return out
 
-def main():
-    p = argparse.ArgumentParser(description="Analyze OptiScaler reprojection telemetry")
-    p.add_argument("log", help="Path to OptiScaler.log")
-    args = p.parse_args()
-    analyze(args.log)
+    sa, sb = stats(wa), stats(wb)
+    lines = ["A/B diff (mean per 1 Hz window):"]
+    keys = [k for k in sa if sa[k] is not None and sb[k] is not None]
+    if not keys:
+        lines.append("  (no common numeric keys — nothing to compare)")
+    for key in keys:
+        delta = sb[key] - sa[key]
+        sign = "+" if delta >= 0 else ""
+        lines.append(f"  {key:>6}: {sa[key]:>7.2f} -> {sb[key]:>7.2f}  ({sign}{delta:.2f})")
+    lines.append("meta: " + " ".join(
+        f"{k}: {meta_a.get(k, '?')} -> {meta_b.get(k, '?')}" for k in META_IDENTITY_KEYS
+    ))
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# entry point
+# --------------------------------------------------------------------------
+
+def main(argv: Sequence[str]) -> int:
+    if len(argv) < 3:
+        print(__doc__)
+        return 2
+    mode = argv[1]
+    try:
+        if mode == "story":
+            events = parse_log(Path(argv[2]))
+            episodes = build_episodes(events)
+            attribute(episodes, events)
+            windows = parse_windows(Path(argv[2]))
+            print(build_story(events, episodes, windows))
+            return 0 if events or windows else 1
+        if mode == "health":
+            events = parse_log(Path(argv[2]))
+            episodes = build_episodes(events)
+            attribute(episodes, events)
+            windows = parse_windows(Path(argv[2]))
+            print(build_health(events, episodes, windows))
+            return 0 if events or windows else 1
+        if mode == "diff":
+            if len(argv) < 4:
+                print(__doc__)
+                return 2
+            print(diff_sessions(Path(argv[2]), Path(argv[3])))
+            return 0
+        print(f"unknown mode {mode!r}", file=sys.stderr)
+        print(__doc__)
+        return 2
+    except GrammarError as exc:
+        print(f"telemetry grammar violation: {exc}", file=sys.stderr)
+        return 2
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv))

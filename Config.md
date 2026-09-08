@@ -64,15 +64,6 @@ HudIsolation=auto
 ContentInterpolation=false
 # ms before present to release the latch; auto = fixed 3 ms (recommended).
 LateSampleLead=auto
-# E3 edge budget in px; 0 = off/full warp, 12 = default (recommended).
-SafeWarpBudget=auto
-# Absolute extrapolation clamp in frames; 2.5 = default (recommended).
-MaxTimeStep=auto
-# E5 experimental history fill for invalid world-border pixels only; default off.
-# Compatible older anchors are never blended over valid current content.
-HistoryBorderFallback=auto
-# E2 magenta invalid-coverage view; visualization only, default off.
-DebugView=auto
 ```
 
 `Async=true` uses a worker-owned presenter on the real main swapchain, keeping warp writes

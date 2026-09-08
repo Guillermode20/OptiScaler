@@ -4,23 +4,17 @@
 #include <Config.h>
 #include <State.h>
 #include <Util.h>
-#include <framegen/reproj/Kcd2Camera.h>
 #include <framegen/reproj/Kcd2HudIsolation.h>
 #include <framegen/reproj/Kcd2Scaleform.h>
-#include <scanner/scanner.h>
 
 #include <menu/menu_overlay_dx.h>
 
 #include <algorithm>
-#include <atomic>
 #include <future>
-#include <string_view>
 
 #include <magic_enum_utility.hpp>
 #include <include/d3dx/d3dx12.h>
 #include <detours/detours.h>
-
-#pragma intrinsic(_ReturnAddress)
 
 #ifndef STDMETHODCALLTYPE
 #include <Unknwn.h> // or <objbase.h> to get STDMETHODCALLTYPE
@@ -91,10 +85,6 @@ typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D12GraphicsCommandList* This, U
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteBundle)(ID3D12GraphicsCommandList* This,
                                                    ID3D12GraphicsCommandList* pCommandList);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Close)(ID3D12GraphicsCommandList* This);
-typedef void(STDMETHODCALLTYPE* PFN_RSSetViewports)(ID3D12GraphicsCommandList* This, UINT NumViewports,
-                                                    const D3D12_VIEWPORT* pViewports);
-typedef void(STDMETHODCALLTYPE* PFN_RSSetScissorRects)(ID3D12GraphicsCommandList* This, UINT NumRects,
-                                                       const D3D12_RECT* pRects);
 
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandLists)(ID3D12CommandQueue* This, UINT NumCommandLists,
                                                          ID3D12CommandList* const* ppCommandLists);
@@ -127,136 +117,6 @@ static PFN_Release o_Release = nullptr;
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
 static PFN_SetGraphicsRootDescriptorTable o_SetGraphicsRootDescriptorTable = nullptr;
 static PFN_SetComputeRootDescriptorTable o_SetComputeRootDescriptorTable = nullptr;
-static PFN_RSSetViewports o_RSSetViewports = nullptr;
-static PFN_RSSetScissorRects o_RSSetScissorRects = nullptr;
-// E5.1 diagnostic counters: independent quotas prevent startup/world calls from
-// consuming the HUD evidence. Logging is additionally gated on a validated live
-// KCD2 gameplay camera, so these remain zero until the useful render phase.
-static std::atomic<uint64_t> g_worldViewportDiagCount { 0 };
-static std::atomic<uint64_t> g_hudViewportDiagCount { 0 };
-static std::atomic<uint64_t> g_worldScissorDiagCount { 0 };
-static std::atomic<uint64_t> g_hudScissorDiagCount { 0 };
-static std::atomic<uint64_t> g_worldOmDiagCount { 0 };
-static std::atomic<uint64_t> g_worldRtvCreateDiagCount { 0 };
-
-// KCD2 retail 1.5.6 resource-description observer. This function is a small
-// leaf that copies the game-owned resource dimensions into the descriptor
-// consumed by the materializer at WHGame.dll+0x7AD47C. Keep this diagnostic
-// strictly observational until the complete world resource family is mapped.
-using PFN_Kcd2ResourceDescribe = uintptr_t(__fastcall*)(uintptr_t resourceObject, uintptr_t descriptor);
-static PFN_Kcd2ResourceDescribe o_Kcd2ResourceDescribe = nullptr;
-static bool g_kcd2ResourceDescribeAttempted = false;
-static std::atomic<uint64_t> g_kcd2ResourceDescribeCount { 0 };
-static std::atomic<bool> g_kcd2ResourceDescribeStackLogged { false };
-
-uintptr_t Kcd2CallerRva(void* returnAddress)
-{
-    const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"WHGame.dll"));
-    const auto caller = reinterpret_cast<uintptr_t>(returnAddress);
-    return module != 0 && caller >= module ? caller - module : 0;
-}
-
-void LogKcd2CallerStack(const char* label)
-{
-    void* frames[8] {};
-    const auto count = RtlCaptureStackBackTrace(0, static_cast<ULONG>(std::size(frames)), frames, nullptr);
-    uintptr_t rvas[8] {};
-    for (USHORT i = 0; i < count; ++i)
-        rvas[i] = Kcd2CallerRva(frames[i]);
-    LOG_INFO("KCD2 stack {}: count={} rva={:X}/{:X}/{:X}/{:X}/{:X}/{:X}/{:X}/{:X}", label, count, rvas[0],
-             rvas[1], rvas[2], rvas[3], rvas[4], rvas[5], rvas[6], rvas[7]);
-}
-
-static uintptr_t __fastcall hkKcd2ResourceDescribe(uintptr_t resourceObject, uintptr_t descriptor)
-{
-    if (Config::Instance()->ReprojPredictiveProbe.value_or_default() && resourceObject != 0 && descriptor != 0)
-    {
-        __try
-        {
-            const auto sourceWidth = *reinterpret_cast<const uint16_t*>(resourceObject + 0x90);
-            const auto sourceHeight = *reinterpret_cast<const uint16_t*>(resourceObject + 0x92);
-            const auto sourceDepthOrArray = *reinterpret_cast<const uint16_t*>(resourceObject + 0x94);
-            // +0x7B07F0 is a copy helper. These are the values it will write
-            // into the compact descriptor; do not inspect the descriptor after
-            // the original call because its caller relies on RCX surviving the
-            // helper unchanged and immediately dereferences it.
-            const auto compactMips = *reinterpret_cast<const uint16_t*>(resourceObject + 0xA0);
-            const auto compactType = *reinterpret_cast<const uint8_t*>(resourceObject + 0x96);
-            const auto compactFormat = *reinterpret_cast<const uint8_t*>(resourceObject + 0xA2);
-            const auto compactFlags = *reinterpret_cast<const uint32_t*>(resourceObject + 0x98);
-            const auto compactTiled = (*reinterpret_cast<const uint8_t*>(resourceObject + 0x9D) >> 4) & 1;
-            const auto callerRva = Kcd2CallerRva(_ReturnAddress());
-            const auto n = g_kcd2ResourceDescribeCount.fetch_add(1, std::memory_order_relaxed);
-            const bool primaryWorldExtent = sourceWidth == 1706 && sourceHeight == 960;
-
-            if (primaryWorldExtent && !g_kcd2ResourceDescribeStackLogged.exchange(true, std::memory_order_relaxed))
-                LogKcd2CallerStack("resource-describe-world");
-
-            // The first bounded batch establishes the resource graph. Continue
-            // to retain every primary world-extent record even if startup is
-            // unusually descriptor-heavy, while never logging on the display
-            // hot path.
-            if (n < 96 || primaryWorldExtent)
-            {
-                LOG_INFO("KCD2 resource desc: #{} callerRva={:X} source={:X} src={}x{}x{} "
-                         "compact={}x{}x{} mips={} type={} format={} flags={:X} tiled={}",
-                         n, callerRva, resourceObject, sourceWidth, sourceHeight, sourceDepthOrArray, sourceWidth,
-                         sourceHeight, sourceDepthOrArray, compactMips, compactType, compactFormat, compactFlags,
-                         compactTiled);
-            }
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-        }
-    }
-
-    // This must remain the last operation in the hook. The retail helper's
-    // caller uses RCX after the call even though RCX is volatile by the ABI.
-    return o_Kcd2ResourceDescribe(resourceObject, descriptor);
-}
-
-static void TryHookKcd2ResourceDescribe()
-{
-    if (g_kcd2ResourceDescribeAttempted || o_Kcd2ResourceDescribe != nullptr ||
-        !Config::Instance()->ReprojPredictiveProbe.value_or_default())
-        return;
-
-    const auto module = GetModuleHandleW(L"WHGame.dll");
-    if (module == nullptr)
-        return;
-
-    g_kcd2ResourceDescribeAttempted = true;
-
-    // Exact retail-1.5.6 body signature. The fixed RVA check deliberately
-    // fails closed if a future build moves or changes this helper; update the
-    // signature and its evidence only after a new bounded trace.
-    static constexpr std::string_view pattern =
-        "0F B6 81 96 00 00 00 4C 8D 05 ? ? ? ? 49 8B 04 C0 48 89 02 "
-        "0F B7 81 90 00 00 00 66 89 42 08 0F B7 81 92 00 00 00 66 89 42 0A "
-        "0F B7 81 94 00 00 00 66 89 42 0C";
-    const auto address = scanner::GetAddress(module, pattern);
-    const auto moduleAddress = reinterpret_cast<uintptr_t>(module);
-    if (address == 0 || address - moduleAddress != 0x7B07F0)
-    {
-        LOG_WARN("KCD2 resource descriptor probe unavailable (signature/RVA mismatch: {:X})",
-                 address != 0 && address >= moduleAddress ? address - moduleAddress : 0);
-        return;
-    }
-
-    o_Kcd2ResourceDescribe = reinterpret_cast<PFN_Kcd2ResourceDescribe>(address);
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    DetourAttach(reinterpret_cast<PVOID*>(&o_Kcd2ResourceDescribe), hkKcd2ResourceDescribe);
-    const auto result = DetourTransactionCommit();
-    if (result != NO_ERROR)
-    {
-        LOG_WARN("KCD2 resource descriptor probe detour failed: {:X}", result);
-        o_Kcd2ResourceDescribe = nullptr;
-        return;
-    }
-
-    LOG_INFO("KCD2 resource descriptor probe installed at RVA={:X}", address - moduleAddress);
-}
 
 static std::mutex _hudlessTrackMutex;
 static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*,
@@ -628,27 +488,6 @@ void ResTrack_Dx12::hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource*
     }
 
     o_CreateRenderTargetView(This, pResource, pDesc, DestDescriptor);
-
-    // E5.1 reverse-engineering probe: the live viewport trace established
-    // 1706x960 as KCD2's primary world extent. Record creation callsites and
-    // formats directly because generic HUD tracking deliberately ignores many
-    // game-owned descriptors until capture is active.
-    if (pResource != nullptr && Config::Instance()->ReprojPredictiveProbe.value_or_default())
-    {
-        const auto desc = pResource->GetDesc();
-        if (desc.Width == 1706 && desc.Height == 960)
-        {
-            const auto n = g_worldRtvCreateDiagCount.fetch_add(1, std::memory_order_relaxed);
-            if (n < 32)
-            {
-                if (n == 0)
-                    LogKcd2CallerStack("RTV-create");
-                LOG_INFO("KCD2 world RTV create: #{} callerRva={:X} resource={:X} handle={:X} fmt={} flags={:X}", n,
-                         Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(pResource), DestDescriptor.ptr,
-                         static_cast<UINT>(desc.Format), static_cast<UINT>(desc.Flags));
-            }
-        }
-    }
 
     if (Config::Instance()->FGHudfixDisableRTV.value_or_default())
         return;
@@ -1293,106 +1132,11 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
 
 #pragma region Shader output hooks
 
-// E5.1 predictive-overscan diagnostic: log RSSetViewports/ScissorRects extents
-// split by world (Scaleform inactive) vs HUD (Scaleform active) phase. Passive
-// observer only: never edits args, rate-limited to the first few calls while
-// [AsyncTimewarp] PredictiveProbe is enabled, zero behaviour change otherwise.
-void ResTrack_Dx12::hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
-                                      const D3D12_VIEWPORT* pViewports)
-{
-    if (o_RSSetViewports != nullptr && pViewports != nullptr && NumViewports > 0)
-    {
-        bool probe = false;
-        try
-        {
-            probe = Config::Instance()->ReprojPredictiveProbe.value_or_default();
-        }
-        catch (...)
-        {
-        }
-        if (probe && Kcd2Camera::IsAvailable())
-        {
-            const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
-            auto& counter = hud ? g_hudViewportDiagCount : g_worldViewportDiagCount;
-            const auto n = counter.fetch_add(1, std::memory_order_relaxed);
-            if (n < 24)
-            {
-                if (n == 0)
-                    LogKcd2CallerStack(hud ? "HUD-viewport" : "world-viewport");
-                const auto& vp = pViewports[0];
-                LOG_INFO("KCD2 viewport: #{} phase={} callerRva={:X} cmd={:X} count={} x={:.1f} y={:.1f} w={:.1f} "
-                         "h={:.1f} minD={:.3f} maxD={:.3f}",
-                         n, hud ? "hud" : "world", Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(This),
-                         NumViewports, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth);
-            }
-        }
-    }
-    o_RSSetViewports(This, NumViewports, pViewports);
-}
-
-void ResTrack_Dx12::hkRSSetScissorRects(ID3D12GraphicsCommandList* This, UINT NumRects, const D3D12_RECT* pRects)
-{
-    if (o_RSSetScissorRects != nullptr && pRects != nullptr && NumRects > 0)
-    {
-        bool probe = false;
-        try
-        {
-            probe = Config::Instance()->ReprojPredictiveProbe.value_or_default();
-        }
-        catch (...)
-        {
-        }
-        if (probe && Kcd2Camera::IsAvailable())
-        {
-            const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
-            auto& counter = hud ? g_hudScissorDiagCount : g_worldScissorDiagCount;
-            const auto n = counter.fetch_add(1, std::memory_order_relaxed);
-            if (n < 24)
-            {
-                const auto& rc = pRects[0];
-                LOG_INFO("KCD2 scissor: #{} phase={} callerRva={:X} cmd={:X} count={} l={} t={} r={} b={}", n,
-                         hud ? "hud" : "world", Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(This),
-                         NumRects, rc.left, rc.top, rc.right, rc.bottom);
-            }
-        }
-    }
-    o_RSSetScissorRects(This, NumRects, pRects);
-}
-
 void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT NumRenderTargetDescriptors,
                                          D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors,
                                          BOOL RTsSingleHandleToDescriptorRange,
                                          D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
-    // Reverse-engineering probe: correlate the viewport caller/command list with
-    // the actual world RTV dimensions. This is passive and bounded; unresolved
-    // descriptors are still useful because their caller and handle are recorded.
-    if (!Kcd2Scaleform::IsActiveOnThisThread() && NumRenderTargetDescriptors > 0 &&
-        pRenderTargetDescriptors != nullptr && Config::Instance()->ReprojPredictiveProbe.value_or_default() &&
-        Kcd2Camera::IsAvailable())
-    {
-        const auto n = g_worldOmDiagCount.fetch_add(1, std::memory_order_relaxed);
-        if (n < 64)
-        {
-            if (n == 0)
-                LogKcd2CallerStack("world-OM");
-            const auto handle = pRenderTargetDescriptors[0];
-            auto heap = GetHeapByCpuHandleRTV(handle.ptr);
-            ResourceInfo info {};
-            ID3D12Resource* resource = nullptr;
-            if (heap != nullptr && heap->GetByCpuHandle(handle.ptr, info))
-                resource = info.buffer;
-            D3D12_RESOURCE_DESC desc {};
-            if (resource != nullptr)
-                desc = resource->GetDesc();
-            LOG_INFO("KCD2 world OM: #{} callerRva={:X} cmd={:X} targets={} first={:X} handle={:X} w={} h={} "
-                     "fmt={} dsv={:X}",
-                     n, Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(This), NumRenderTargetDescriptors,
-                     reinterpret_cast<size_t>(resource), handle.ptr, desc.Width, desc.Height,
-                     static_cast<UINT>(desc.Format), pDepthStencilDescriptor != nullptr ? pDepthStencilDescriptor->ptr : 0);
-        }
-    }
-
     // KCD2's Scaleform pass is bracketed by CScaleformPlayback, but it can occur while the
     // generic HUD detector is intentionally inactive. Trace it before that detector's gate and
     // never alter the command list or descriptor handles. This establishes whether the UI uses
@@ -2150,8 +1894,6 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
 
             // hudless shader
             o_OMSetRenderTargets = (PFN_OMSetRenderTargets) pVTable[46];
-            o_RSSetViewports = (PFN_RSSetViewports) pVTable[21];
-            o_RSSetScissorRects = (PFN_RSSetScissorRects) pVTable[22];
             o_SetGraphicsRootDescriptorTable = (PFN_SetGraphicsRootDescriptorTable) pVTable[32];
 
             o_DrawInstanced = (PFN_DrawInstanced) pVTable[12];
@@ -2194,12 +1936,6 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                 if (o_Close != nullptr)
                     DetourAttach(&(PVOID&) o_Close, hkClose);
 
-                if (o_RSSetViewports != nullptr)
-                    DetourAttach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
-
-                if (o_RSSetScissorRects != nullptr)
-                    DetourAttach(&(PVOID&) o_RSSetScissorRects, hkRSSetScissorRects);
-
                 if (o_ExecuteBundle != nullptr)
                     DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
 
@@ -2208,8 +1944,6 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                 {
                     LOG_ERROR("Failed to hook CommandList methods: {:X}", detourResult);
                     o_OMSetRenderTargets = nullptr;
-                    o_RSSetViewports = nullptr;
-                    o_RSSetScissorRects = nullptr;
                     o_SetGraphicsRootDescriptorTable = nullptr;
                     o_DrawInstanced = nullptr;
                     o_DrawIndexedInstanced = nullptr;
@@ -2355,11 +2089,6 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
         }
     }
 
-    // Do not detour the retail resource-copy helper. Its caller relies on the
-    // helper preserving volatile R10 as well as RCX; a normal C++ Detours
-    // callback cannot guarantee that register contract. Keep the bounded
-    // D3D12 probes below enabled, and use an ABI-preserving assembly thunk
-    // before revisiting this private hook.
     HookToQueue(device);
     HookCommandList(device);
     HookResource(device);
@@ -2398,12 +2127,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_OMSetRenderTargets != nullptr)
         DetourDetach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
 
-    if (o_RSSetViewports != nullptr)
-        DetourDetach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
-
-    if (o_RSSetScissorRects != nullptr)
-        DetourDetach(&(PVOID&) o_RSSetScissorRects, hkRSSetScissorRects);
-
     if (o_SetGraphicsRootDescriptorTable != nullptr)
         DetourDetach(&(PVOID&) o_SetGraphicsRootDescriptorTable, hkSetGraphicsRootDescriptorTable);
 
@@ -2429,9 +2152,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_Release != nullptr)
         DetourDetach(&(PVOID&) o_Release, hkRelease);
 
-    if (o_Kcd2ResourceDescribe != nullptr)
-        DetourDetach(reinterpret_cast<PVOID*>(&o_Kcd2ResourceDescribe), hkKcd2ResourceDescribe);
-
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
@@ -2452,8 +2172,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 
         // CommandList
         o_OMSetRenderTargets = nullptr;
-        o_RSSetViewports = nullptr;
-        o_RSSetScissorRects = nullptr;
         o_SetGraphicsRootDescriptorTable = nullptr;
         o_SetComputeRootDescriptorTable = nullptr;
         o_DrawIndexedInstanced = nullptr;
@@ -2464,7 +2182,6 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 
         // Resource
         o_Release = nullptr;
-        o_Kcd2ResourceDescribe = nullptr;
     }
 }
 
@@ -2513,12 +2230,6 @@ void ResTrack_Dx12::ReleaseHooks()
     if (o_OMSetRenderTargets != nullptr)
         DetourDetach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
 
-    if (o_RSSetViewports != nullptr)
-        DetourDetach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
-
-    if (o_RSSetScissorRects != nullptr)
-        DetourDetach(&(PVOID&) o_RSSetScissorRects, hkRSSetScissorRects);
-
     if (o_SetGraphicsRootDescriptorTable != nullptr)
         DetourDetach(&(PVOID&) o_SetGraphicsRootDescriptorTable, hkSetGraphicsRootDescriptorTable);
 
@@ -2548,8 +2259,6 @@ void ResTrack_Dx12::ReleaseHooks()
     else
     {
         o_OMSetRenderTargets = nullptr;
-        o_RSSetViewports = nullptr;
-        o_RSSetScissorRects = nullptr;
         o_SetGraphicsRootDescriptorTable = nullptr;
         o_SetComputeRootDescriptorTable = nullptr;
         o_DrawIndexedInstanced = nullptr;

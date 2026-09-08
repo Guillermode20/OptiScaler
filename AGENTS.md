@@ -108,13 +108,9 @@ The active `[AsyncTimewarp]` controls include:
 - `SourceFramerateLimit`, opt-in, default uncapped
 - `MouseSensitivityX/Y`
 - `Smoothing`
-- `LateSampleLead`, default fixed 3 ms when automatic/default value is selected
 - `HudIsolation`
 - `ContentInterpolation`, default off
-- `SafeWarpBudget`, default 12 px, 0 = off (full warp)
-- `MaxTimeStep`, default 2.5 frames, clamp 1.0-4.0
-- `HistoryBorderFallback`, experimental and default off
-- `DebugView`, default off (magenta invalid coverage)
+- `LateSampleLead`, default fixed 3 ms when automatic/default value is selected
 
 Do not invent a new control before checking `Config.h`, `Config.cpp`, `OptiScaler.ini`, and the in-game menu wiring.
 
@@ -157,9 +153,13 @@ Do not copy mechanisms back from `async-timewarp` simply because they exist ther
 - adaptive late-sample/dispatch controller;
 - old KCD2 input predictor and target-pose resolver stack;
 - full positional depth/MV final warp;
-- heavy per-slot telemetry.
+- heavy per-slot telemetry;
+- predictive render-pose steering, yaw probe, and camera callback hooks;
+- overscan tracing (viewport, scissor, and resource descriptor intercept hooks);
+- safe-warp budget / edge limiter and boundary binary search;
+- history border fallback and multi-anchor sampling.
 
-The opt-in source cap, one-midpoint FSR generator, and future edge-history fallback described in `PLAN.md` are self-contained exceptions only when they preserve the simplified ownership/queue model.
+The opt-in source cap and one-midpoint FSR generator described in `PLAN.md` are self-contained exceptions only when they preserve the simplified ownership/queue model.
 
 ## Working rule
 
