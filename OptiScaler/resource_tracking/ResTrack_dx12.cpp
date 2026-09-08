@@ -10,6 +10,7 @@
 #include <menu/menu_overlay_dx.h>
 
 #include <algorithm>
+#include <atomic>
 #include <future>
 
 #include <magic_enum_utility.hpp>
@@ -85,6 +86,10 @@ typedef void(STDMETHODCALLTYPE* PFN_Dispatch)(ID3D12GraphicsCommandList* This, U
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteBundle)(ID3D12GraphicsCommandList* This,
                                                    ID3D12GraphicsCommandList* pCommandList);
 typedef HRESULT(STDMETHODCALLTYPE* PFN_Close)(ID3D12GraphicsCommandList* This);
+typedef void(STDMETHODCALLTYPE* PFN_RSSetViewports)(ID3D12GraphicsCommandList* This, UINT NumViewports,
+                                                    const D3D12_VIEWPORT* pViewports);
+typedef void(STDMETHODCALLTYPE* PFN_RSSetScissorRects)(ID3D12GraphicsCommandList* This, UINT NumRects,
+                                                       const D3D12_RECT* pRects);
 
 typedef void(STDMETHODCALLTYPE* PFN_ExecuteCommandLists)(ID3D12CommandQueue* This, UINT NumCommandLists,
                                                          ID3D12CommandList* const* ppCommandLists);
@@ -117,6 +122,11 @@ static PFN_Release o_Release = nullptr;
 static PFN_OMSetRenderTargets o_OMSetRenderTargets = nullptr;
 static PFN_SetGraphicsRootDescriptorTable o_SetGraphicsRootDescriptorTable = nullptr;
 static PFN_SetComputeRootDescriptorTable o_SetComputeRootDescriptorTable = nullptr;
+static PFN_RSSetViewports o_RSSetViewports = nullptr;
+static PFN_RSSetScissorRects o_RSSetScissorRects = nullptr;
+// E5.1 diagnostic counters: rate-limit viewport/scissor logging, no hot-path allocation.
+static std::atomic<uint64_t> g_viewportDiagCount { 0 };
+static std::atomic<uint64_t> g_scissorDiagCount { 0 };
 
 static std::mutex _hudlessTrackMutex;
 static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*,
@@ -1132,6 +1142,67 @@ void ResTrack_Dx12::hkSetGraphicsRootDescriptorTable(ID3D12GraphicsCommandList* 
 
 #pragma region Shader output hooks
 
+// E5.1 predictive-overscan diagnostic: log RSSetViewports/ScissorRects extents
+// split by world (Scaleform inactive) vs HUD (Scaleform active) phase. Passive
+// observer only: never edits args, rate-limited to the first few calls while
+// [AsyncTimewarp] PredictiveProbe is enabled, zero behaviour change otherwise.
+void ResTrack_Dx12::hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumViewports,
+                                      const D3D12_VIEWPORT* pViewports)
+{
+    if (o_RSSetViewports != nullptr && pViewports != nullptr && NumViewports > 0)
+    {
+        bool probe = false;
+        try
+        {
+            probe = Config::Instance()->ReprojPredictiveProbe.value_or_default();
+        }
+        catch (...)
+        {
+        }
+        if (probe)
+        {
+            const auto n = g_viewportDiagCount.fetch_add(1, std::memory_order_relaxed);
+            if (n < 24)
+            {
+                const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
+                const auto& vp = pViewports[0];
+                LOG_INFO("KCD2 viewport: #{} phase={} count={} x={:.1f} y={:.1f} w={:.1f} h={:.1f} "
+                         "minD={:.3f} maxD={:.3f}",
+                         n, hud ? "hud" : "world", NumViewports, vp.TopLeftX, vp.TopLeftY, vp.Width,
+                         vp.Height, vp.MinDepth, vp.MaxDepth);
+            }
+        }
+    }
+    o_RSSetViewports(This, NumViewports, pViewports);
+}
+
+void ResTrack_Dx12::hkRSSetScissorRects(ID3D12GraphicsCommandList* This, UINT NumRects, const D3D12_RECT* pRects)
+{
+    if (o_RSSetScissorRects != nullptr && pRects != nullptr && NumRects > 0)
+    {
+        bool probe = false;
+        try
+        {
+            probe = Config::Instance()->ReprojPredictiveProbe.value_or_default();
+        }
+        catch (...)
+        {
+        }
+        if (probe)
+        {
+            const auto n = g_scissorDiagCount.fetch_add(1, std::memory_order_relaxed);
+            if (n < 24)
+            {
+                const bool hud = Kcd2Scaleform::IsActiveOnThisThread();
+                const auto& rc = pRects[0];
+                LOG_INFO("KCD2 scissor: #{} phase={} count={} l={} t={} r={} b={}", n,
+                         hud ? "hud" : "world", NumRects, rc.left, rc.top, rc.right, rc.bottom);
+            }
+        }
+    }
+    o_RSSetScissorRects(This, NumRects, pRects);
+}
+
 void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT NumRenderTargetDescriptors,
                                          D3D12_CPU_DESCRIPTOR_HANDLE* pRenderTargetDescriptors,
                                          BOOL RTsSingleHandleToDescriptorRange,
@@ -1894,6 +1965,8 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
 
             // hudless shader
             o_OMSetRenderTargets = (PFN_OMSetRenderTargets) pVTable[46];
+            o_RSSetViewports = (PFN_RSSetViewports) pVTable[21];
+            o_RSSetScissorRects = (PFN_RSSetScissorRects) pVTable[22];
             o_SetGraphicsRootDescriptorTable = (PFN_SetGraphicsRootDescriptorTable) pVTable[32];
 
             o_DrawInstanced = (PFN_DrawInstanced) pVTable[12];
@@ -1936,6 +2009,12 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                 if (o_Close != nullptr)
                     DetourAttach(&(PVOID&) o_Close, hkClose);
 
+                if (o_RSSetViewports != nullptr)
+                    DetourAttach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
+
+                if (o_RSSetScissorRects != nullptr)
+                    DetourAttach(&(PVOID&) o_RSSetScissorRects, hkRSSetScissorRects);
+
                 if (o_ExecuteBundle != nullptr)
                     DetourAttach(&(PVOID&) o_ExecuteBundle, hkExecuteBundle);
 
@@ -1944,6 +2023,8 @@ void ResTrack_Dx12::HookCommandList(ID3D12Device* InDevice)
                 {
                     LOG_ERROR("Failed to hook CommandList methods: {:X}", detourResult);
                     o_OMSetRenderTargets = nullptr;
+                    o_RSSetViewports = nullptr;
+                    o_RSSetScissorRects = nullptr;
                     o_SetGraphicsRootDescriptorTable = nullptr;
                     o_DrawInstanced = nullptr;
                     o_DrawIndexedInstanced = nullptr;
@@ -2127,6 +2208,12 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_OMSetRenderTargets != nullptr)
         DetourDetach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
 
+    if (o_RSSetViewports != nullptr)
+        DetourDetach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
+
+    if (o_RSSetScissorRects != nullptr)
+        DetourDetach(&(PVOID&) o_RSSetScissorRects, hkRSSetScissorRects);
+
     if (o_SetGraphicsRootDescriptorTable != nullptr)
         DetourDetach(&(PVOID&) o_SetGraphicsRootDescriptorTable, hkSetGraphicsRootDescriptorTable);
 
@@ -2172,6 +2259,8 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 
         // CommandList
         o_OMSetRenderTargets = nullptr;
+        o_RSSetViewports = nullptr;
+        o_RSSetScissorRects = nullptr;
         o_SetGraphicsRootDescriptorTable = nullptr;
         o_SetComputeRootDescriptorTable = nullptr;
         o_DrawIndexedInstanced = nullptr;
@@ -2230,6 +2319,12 @@ void ResTrack_Dx12::ReleaseHooks()
     if (o_OMSetRenderTargets != nullptr)
         DetourDetach(&(PVOID&) o_OMSetRenderTargets, hkOMSetRenderTargets);
 
+    if (o_RSSetViewports != nullptr)
+        DetourDetach(&(PVOID&) o_RSSetViewports, hkRSSetViewports);
+
+    if (o_RSSetScissorRects != nullptr)
+        DetourDetach(&(PVOID&) o_RSSetScissorRects, hkRSSetScissorRects);
+
     if (o_SetGraphicsRootDescriptorTable != nullptr)
         DetourDetach(&(PVOID&) o_SetGraphicsRootDescriptorTable, hkSetGraphicsRootDescriptorTable);
 
@@ -2259,6 +2354,8 @@ void ResTrack_Dx12::ReleaseHooks()
     else
     {
         o_OMSetRenderTargets = nullptr;
+        o_RSSetViewports = nullptr;
+        o_RSSetScissorRects = nullptr;
         o_SetGraphicsRootDescriptorTable = nullptr;
         o_SetComputeRootDescriptorTable = nullptr;
         o_DrawIndexedInstanced = nullptr;
