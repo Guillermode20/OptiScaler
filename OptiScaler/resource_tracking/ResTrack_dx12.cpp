@@ -135,6 +135,14 @@ static std::atomic<uint64_t> g_hudViewportDiagCount { 0 };
 static std::atomic<uint64_t> g_worldScissorDiagCount { 0 };
 static std::atomic<uint64_t> g_hudScissorDiagCount { 0 };
 static std::atomic<uint64_t> g_worldOmDiagCount { 0 };
+static std::atomic<uint64_t> g_worldRtvCreateDiagCount { 0 };
+
+uintptr_t Kcd2CallerRva(void* returnAddress)
+{
+    const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"WHGame.dll"));
+    const auto caller = reinterpret_cast<uintptr_t>(returnAddress);
+    return module != 0 && caller >= module ? caller - module : 0;
+}
 
 static std::mutex _hudlessTrackMutex;
 static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*,
@@ -506,6 +514,25 @@ void ResTrack_Dx12::hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource*
     }
 
     o_CreateRenderTargetView(This, pResource, pDesc, DestDescriptor);
+
+    // E5.1 reverse-engineering probe: the live viewport trace established
+    // 1706x960 as KCD2's primary world extent. Record creation callsites and
+    // formats directly because generic HUD tracking deliberately ignores many
+    // game-owned descriptors until capture is active.
+    if (pResource != nullptr && Config::Instance()->ReprojPredictiveProbe.value_or_default())
+    {
+        const auto desc = pResource->GetDesc();
+        if (desc.Width == 1706 && desc.Height == 960)
+        {
+            const auto n = g_worldRtvCreateDiagCount.fetch_add(1, std::memory_order_relaxed);
+            if (n < 32)
+            {
+                LOG_INFO("KCD2 world RTV create: #{} callerRva={:X} resource={:X} handle={:X} fmt={} flags={:X}", n,
+                         Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(pResource), DestDescriptor.ptr,
+                         static_cast<UINT>(desc.Format), static_cast<UINT>(desc.Flags));
+            }
+        }
+    }
 
     if (Config::Instance()->FGHudfixDisableRTV.value_or_default())
         return;
@@ -1175,11 +1202,10 @@ void ResTrack_Dx12::hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumVi
             if (n < 24)
             {
                 const auto& vp = pViewports[0];
-                LOG_INFO("KCD2 viewport: #{} phase={} caller={} cmd={:X} count={} x={:.1f} y={:.1f} w={:.1f} "
+                LOG_INFO("KCD2 viewport: #{} phase={} callerRva={:X} cmd={:X} count={} x={:.1f} y={:.1f} w={:.1f} "
                          "h={:.1f} minD={:.3f} maxD={:.3f}",
-                         n, hud ? "hud" : "world", Util::WhoIsTheCaller(_ReturnAddress()),
-                         reinterpret_cast<size_t>(This), NumViewports, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height,
-                         vp.MinDepth, vp.MaxDepth);
+                         n, hud ? "hud" : "world", Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(This),
+                         NumViewports, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth);
             }
         }
     }
@@ -1206,9 +1232,9 @@ void ResTrack_Dx12::hkRSSetScissorRects(ID3D12GraphicsCommandList* This, UINT Nu
             if (n < 24)
             {
                 const auto& rc = pRects[0];
-                LOG_INFO("KCD2 scissor: #{} phase={} caller={} cmd={:X} count={} l={} t={} r={} b={}", n,
-                         hud ? "hud" : "world", Util::WhoIsTheCaller(_ReturnAddress()),
-                         reinterpret_cast<size_t>(This), NumRects, rc.left, rc.top, rc.right, rc.bottom);
+                LOG_INFO("KCD2 scissor: #{} phase={} callerRva={:X} cmd={:X} count={} l={} t={} r={} b={}", n,
+                         hud ? "hud" : "world", Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(This),
+                         NumRects, rc.left, rc.top, rc.right, rc.bottom);
             }
         }
     }
@@ -1239,12 +1265,11 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
             D3D12_RESOURCE_DESC desc {};
             if (resource != nullptr)
                 desc = resource->GetDesc();
-            LOG_INFO("KCD2 world OM: #{} caller={} cmd={:X} targets={} first={:X} handle={:X} w={} h={} fmt={} "
-                     "dsv={:X}",
-                     n, Util::WhoIsTheCaller(_ReturnAddress()), reinterpret_cast<size_t>(This),
-                     NumRenderTargetDescriptors, reinterpret_cast<size_t>(resource), handle.ptr, desc.Width,
-                     desc.Height, static_cast<UINT>(desc.Format),
-                     pDepthStencilDescriptor != nullptr ? pDepthStencilDescriptor->ptr : 0);
+            LOG_INFO("KCD2 world OM: #{} callerRva={:X} cmd={:X} targets={} first={:X} handle={:X} w={} h={} "
+                     "fmt={} dsv={:X}",
+                     n, Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(This), NumRenderTargetDescriptors,
+                     reinterpret_cast<size_t>(resource), handle.ptr, desc.Width, desc.Height,
+                     static_cast<UINT>(desc.Format), pDepthStencilDescriptor != nullptr ? pDepthStencilDescriptor->ptr : 0);
         }
     }
 
