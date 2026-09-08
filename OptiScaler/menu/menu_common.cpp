@@ -4245,6 +4245,15 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         ShowHelpMarker("Experimental 2x content path. Uses captured depth and motion vectors for one FSR midpoint, "
                        "then applies the normal late camera warp and unwarped HUD. Missing inputs fall back to "
                        "ordinary timewarp.");
+        bool warpTelemetry = config->ReprojWarpTelemetry.value_or_default();
+        if (ImGui::Checkbox("Warp coverage telemetry##reproj-live", &warpTelemetry))
+            config->ReprojWarpTelemetry = warpTelemetry;
+        ShowHelpMarker("Emit one aggregate ReprojWarp line per second with render-to-warp horizon, residual-angle "
+                       "percentiles, and required guard pixels. No GPU readback or per-frame logging.");
+        bool edgeDebug = config->ReprojDebugView.value_or_default();
+        if (ImGui::Checkbox("Invalid coverage debug##reproj-live", &edgeDebug))
+            config->ReprojDebugView = edgeDebug;
+        ShowHelpMarker("Paint source-invalid world samples magenta before compositing the isolated HUD.");
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {

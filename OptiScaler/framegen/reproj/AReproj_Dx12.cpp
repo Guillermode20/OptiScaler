@@ -499,6 +499,56 @@ void DecomposeCameraPairRotation(const float* forward, const float* prevForward,
     *pitchRadians = std::atan2(dot(forward, prevUp), dot(forward, prevForward));
 }
 
+void MeasureWarpCoverage(const RP_Constants& constants, WarpFrameTelemetry& telemetry)
+{
+    if (constants.displayWidth == 0 || constants.displayHeight == 0)
+        return;
+
+    const auto xRow = LoadReprojVec3(constants.prevCameraRight);
+    const auto yRow = LoadReprojVec3(constants.prevCameraUp);
+    const auto zRow = LoadReprojVec3(constants.prevCameraForward);
+    const float validMinX = 0.5f / constants.displayWidth;
+    const float validMinY = 0.5f / constants.displayHeight;
+    const float validMaxX = 1.0f - validMinX;
+    const float validMaxY = 1.0f - validMinY;
+    const auto sample = [&](float x, float y)
+    {
+        const ReprojVec3 outputPixel { 0.5f + x * (constants.displayWidth - 1.0f),
+                                      0.5f + y * (constants.displayHeight - 1.0f), 1.0f };
+        const float denominator = DotReprojVec3(zRow, outputPixel);
+        if (!(denominator > 1.0e-6f) || !std::isfinite(denominator))
+        {
+            telemetry.maxOobUvLeft = telemetry.maxOobUvRight = 1.0f;
+            telemetry.maxOobUvTop = telemetry.maxOobUvBottom = 1.0f;
+            return;
+        }
+        const float u = DotReprojVec3(xRow, outputPixel) / denominator;
+        const float v = DotReprojVec3(yRow, outputPixel) / denominator;
+        telemetry.maxOobUvLeft = std::max(telemetry.maxOobUvLeft, std::max(0.0f, validMinX - u));
+        telemetry.maxOobUvRight = std::max(telemetry.maxOobUvRight, std::max(0.0f, u - validMaxX));
+        telemetry.maxOobUvTop = std::max(telemetry.maxOobUvTop, std::max(0.0f, validMinY - v));
+        telemetry.maxOobUvBottom = std::max(telemetry.maxOobUvBottom, std::max(0.0f, v - validMaxY));
+    };
+
+    constexpr float fractions[] = { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f };
+    for (const float fraction : fractions)
+    {
+        sample(fraction, 0.0f);
+        sample(fraction, 1.0f);
+    }
+    for (const float fraction : fractions)
+        if (fraction > 0.0f && fraction < 1.0f)
+        {
+            sample(0.0f, fraction);
+            sample(1.0f, fraction);
+        }
+
+    telemetry.requiredPixelsLeft = telemetry.maxOobUvLeft * constants.displayWidth;
+    telemetry.requiredPixelsRight = telemetry.maxOobUvRight * constants.displayWidth;
+    telemetry.requiredPixelsTop = telemetry.maxOobUvTop * constants.displayHeight;
+    telemetry.requiredPixelsBottom = telemetry.maxOobUvBottom * constants.displayHeight;
+}
+
 void PrepareRotationConstants(RP_Constants& constants, bool inputLatched = false,
                               float lateYaw = 0.0f, float latePitch = 0.0f,
                               const ReprojVec3* targetBaseRight = nullptr,
@@ -579,6 +629,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
 
     double deltaX = 0.0;
     double deltaY = 0.0;
+    float renderedToLatestYaw = 0.0f;
+    float renderedToLatestPitch = 0.0f;
     ReprojVec3 lateBaseRight {}, lateBaseUp {}, lateBaseForward {};
     const ReprojVec3* pBaseRight = nullptr;
     const ReprojVec3* pBaseUp = nullptr;
@@ -595,6 +647,8 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
         pBaseRight = &lateBaseRight;
         pBaseUp = &lateBaseUp;
         pBaseForward = &lateBaseForward;
+        DecomposeCameraPairRotation(latestCamera.forward, constants.cameraForward, constants.cameraRight,
+                                    constants.cameraUp, &renderedToLatestYaw, &renderedToLatestPitch);
 
         // The KCD2 camera hook snapshots raw-input totals alongside the pose.
         // This is an exact producer-side baseline; do not infer it from a
@@ -648,6 +702,24 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
 
     PrepareRotationConstants(constants, true, static_cast<float>(yaw), static_cast<float>(pitch),
                              pBaseRight, pBaseUp, pBaseForward);
+    if (Config::Instance()->ReprojWarpTelemetry.value_or_default())
+    {
+        WarpFrameTelemetry telemetry {};
+        telemetry.frameId = packet.frameId;
+        telemetry.renderCameraTimestamp = content.sourcePoseTimestamp;
+        telemetry.sourceObservedReadyTimestamp = packet.sourceObservedReadyTimestamp;
+        telemetry.warpTimestamp = Util::MillisecondsNow();
+        telemetry.actualYawDelta = renderedToLatestYaw + static_cast<float>(yaw);
+        telemetry.actualPitchDelta = renderedToLatestPitch + static_cast<float>(pitch);
+        // Stage A has no render-pose predictor yet, so prediction is identity
+        // and the full source-to-late-target delta is the measured residual.
+        telemetry.residualYaw = telemetry.actualYawDelta;
+        telemetry.residualPitch = telemetry.actualPitchDelta;
+        telemetry.predictionHorizonMs = static_cast<float>(std::max(0.0, telemetry.warpTimestamp -
+                                                                            telemetry.renderCameraTimestamp));
+        MeasureWarpCoverage(constants, telemetry);
+        RecordWarpTelemetry(telemetry);
+    }
     ++_metricsLateInputApplied;
     _metricsLateInputMaxDegrees = std::max(
         _metricsLateInputMaxDegrees, static_cast<float>(std::hypot(yaw, pitch) * 180.0 / std::numbers::pi_v<double>));
@@ -729,7 +801,7 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.jitterCancelled = 0;
     cb.reserved = 0;
     cb.mode = 2;
-    cb.debugView = 0;
+    cb.debugView = Config::Instance()->ReprojDebugView.value_or_default() ? 1u : 0u;
     cb.hudlessSource = 0;
     cb.cameraVFov = _cameraVFov[fIndex];
     cb.cameraAspect = _cameraAspectRatio[fIndex];
@@ -947,6 +1019,7 @@ bool AReproj_Dx12::CaptureFramePacket(int sourceIndex, int packetIndex, ID3D12Re
     packet.completionFence = nullptr;
     packet.completionFenceValue = 0;
     packet.captureFenceValue = 0;
+    packet.sourceObservedReadyTimestamp = 0.0;
     auto cmdList = GetUICommandList(packetIndex);
     ok =
         cmdList != nullptr &&
@@ -1572,6 +1645,26 @@ void AReproj_Dx12::RecordWarpFrame(bool warpPresented, bool dropped, float poseA
     LogMetricsIfDue();
 }
 
+void AReproj_Dx12::RecordWarpTelemetry(const WarpFrameTelemetry& telemetry)
+{
+    std::scoped_lock lock(_metricsMutex);
+    const auto index = _metricsWarpTelemetryCount % kWarpTelemetryWindow;
+    _metricsResidualDegrees[index] =
+        std::hypot(telemetry.residualYaw, telemetry.residualPitch) * 180.0f / std::numbers::pi_v<float>;
+    _metricsPredictionHorizonMs[index] = telemetry.predictionHorizonMs;
+    _metricsSourceReadyDelayMs[index] =
+        static_cast<float>(std::max(0.0, telemetry.sourceObservedReadyTimestamp - telemetry.renderCameraTimestamp));
+    _metricsRequiredGuardPixels[index] =
+        std::max({ telemetry.requiredPixelsLeft, telemetry.requiredPixelsRight, telemetry.requiredPixelsTop,
+                   telemetry.requiredPixelsBottom });
+    ++_metricsWarpTelemetryCount;
+    _metricsCoverageClamped += telemetry.coverageClamped;
+    _metricsOobUvLeft = std::max(_metricsOobUvLeft, telemetry.maxOobUvLeft);
+    _metricsOobUvRight = std::max(_metricsOobUvRight, telemetry.maxOobUvRight);
+    _metricsOobUvTop = std::max(_metricsOobUvTop, telemetry.maxOobUvTop);
+    _metricsOobUvBottom = std::max(_metricsOobUvBottom, telemetry.maxOobUvBottom);
+}
+
 void AReproj_Dx12::LogMetricsIfDue()
 {
     double elapsed = 0.0;
@@ -1592,6 +1685,13 @@ void AReproj_Dx12::LogMetricsIfDue()
     float gamePresentBlockMaxMs = 0.0f;
     float meanPresentIntervalMs = 0.0f;
     float p95PresentIntervalMs = 0.0f;
+    bool warpTelemetryEnabled = false;
+    float residualP50 = 0.0f, residualP95 = 0.0f, residualP99 = 0.0f, residualP999 = 0.0f;
+    float horizonP50 = 0.0f, horizonP95 = 0.0f;
+    float readyP50 = 0.0f, readyP95 = 0.0f;
+    float guardP95 = 0.0f, guardP99 = 0.0f, guardP999 = 0.0f;
+    float oobUvLeft = 0.0f, oobUvRight = 0.0f, oobUvTop = 0.0f, oobUvBottom = 0.0f;
+    uint32_t coverageClamped = 0;
     int queueDepth = 0;
     const char* presenter = nullptr;
 
@@ -1623,6 +1723,34 @@ void AReproj_Dx12::LogMetricsIfDue()
         lateInputMaxDegrees = _metricsLateInputMaxDegrees;
         gamePresentBlockMaxMs = _metricsGamePresentBlockMaxMs;
         poseAge = _metricsPoseSamples > 0 ? _metricsPoseAgeTotalMs / _metricsPoseSamples : 0.0;
+        warpTelemetryEnabled = Config::Instance()->ReprojWarpTelemetry.value_or_default();
+        const auto telemetryCount = std::min(_metricsWarpTelemetryCount, kWarpTelemetryWindow);
+        if (warpTelemetryEnabled && telemetryCount > 0)
+        {
+            const auto percentile = [telemetryCount](const auto& source, float quantile)
+            {
+                auto sorted = source;
+                std::sort(sorted.begin(), sorted.begin() + telemetryCount);
+                const auto index = static_cast<std::size_t>(std::ceil((telemetryCount - 1) * quantile));
+                return sorted[std::min(index, telemetryCount - 1)];
+            };
+            residualP50 = percentile(_metricsResidualDegrees, 0.50f);
+            residualP95 = percentile(_metricsResidualDegrees, 0.95f);
+            residualP99 = percentile(_metricsResidualDegrees, 0.99f);
+            residualP999 = percentile(_metricsResidualDegrees, 0.999f);
+            horizonP50 = percentile(_metricsPredictionHorizonMs, 0.50f);
+            horizonP95 = percentile(_metricsPredictionHorizonMs, 0.95f);
+            readyP50 = percentile(_metricsSourceReadyDelayMs, 0.50f);
+            readyP95 = percentile(_metricsSourceReadyDelayMs, 0.95f);
+            guardP95 = percentile(_metricsRequiredGuardPixels, 0.95f);
+            guardP99 = percentile(_metricsRequiredGuardPixels, 0.99f);
+            guardP999 = percentile(_metricsRequiredGuardPixels, 0.999f);
+            coverageClamped = _metricsCoverageClamped;
+            oobUvLeft = _metricsOobUvLeft;
+            oobUvRight = _metricsOobUvRight;
+            oobUvTop = _metricsOobUvTop;
+            oobUvBottom = _metricsOobUvBottom;
+        }
 
         _runtimeMetrics.realFps = static_cast<float>(realFrames * scale);
         _runtimeMetrics.warpFps = static_cast<float>(warpFrames * scale);
@@ -1675,6 +1803,9 @@ void AReproj_Dx12::LogMetricsIfDue()
         _metricsGeneratedDisplays = 0;
         _metricsLateInputMaxDegrees = 0.0f;
         _metricsGamePresentBlockMaxMs = 0.0f;
+        _metricsWarpTelemetryCount = 0;
+        _metricsCoverageClamped = 0;
+        _metricsOobUvLeft = _metricsOobUvRight = _metricsOobUvTop = _metricsOobUvBottom = 0.0f;
     }
 
     LOG_INFO("Reproj: source={:.1f} FPS display={:.1f} FPS (new={} repeat={}) missed={} "
@@ -1685,6 +1816,12 @@ void AReproj_Dx12::LogMetricsIfDue()
              meanPresentIntervalMs, p95PresentIntervalMs, _lastLateSampleLeadMs.load(std::memory_order_relaxed),
              poseAge, queueDepth, lateInputApplied, lateInputSamples, lateInputMaxDegrees, skippedAnchorSamples,
              directCaptures, captureNotReady, presenter, gamePresentBlockMaxMs, generatedDisplays);
+    if (warpTelemetryEnabled)
+        LOG_INFO("ReprojWarp: residualDeg={:.3f}/{:.3f}/{:.3f}/{:.3f} horizonMs={:.2f}/{:.2f} "
+                 "readyMs={:.2f}/{:.2f} guardPx={:.1f}/{:.1f}/{:.1f} "
+                 "oobUv={:.5f}/{:.5f}/{:.5f}/{:.5f} clamped={}",
+                 residualP50, residualP95, residualP99, residualP999, horizonP50, horizonP95, readyP50, readyP95,
+                 guardP95, guardP99, guardP999, oobUvLeft, oobUvRight, oobUvTop, oobUvBottom, coverageClamped);
 }
 
 AReproj_Dx12::RuntimeMetrics AReproj_Dx12::GetRuntimeMetrics() const

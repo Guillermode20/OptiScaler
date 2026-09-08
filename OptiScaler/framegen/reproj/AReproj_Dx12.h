@@ -5,6 +5,7 @@
 #include "ContentFrame.h"
 #include "HybridFsrGenerator.h"
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -82,6 +83,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
         UINT64 retirementFenceValue = 0;
         double frameDelta = 0.0;
         double rawFrameDelta = 0.0; // interval represented by this MV field (pre-EMA, for timestep)
+        double sourceObservedReadyTimestamp = 0.0; // presenter observation; fence completion has no CPU timestamp
         bool inputLatchReady = false;
         bool hasCamera = false;
         bool warpAllowed = false;
@@ -187,6 +189,7 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     bool HasFreshCameraPose(int fIndex, float* ageMs = nullptr) const;
     void RecordRealFrame();
     void RecordWarpFrame(bool warpPresented, bool dropped, float poseAgeMs);
+    void RecordWarpTelemetry(const WarpFrameTelemetry& telemetry);
     void LogMetricsIfDue();
 
     double _metricsTimestamp = 0.0;
@@ -206,6 +209,17 @@ class AReproj_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _metricsGeneratedDisplays = 0;
     float _metricsLateInputMaxDegrees = 0.0f;
     float _metricsGamePresentBlockMaxMs = 0.0f;
+    static constexpr std::size_t kWarpTelemetryWindow = 512;
+    std::array<float, kWarpTelemetryWindow> _metricsResidualDegrees {};
+    std::array<float, kWarpTelemetryWindow> _metricsPredictionHorizonMs {};
+    std::array<float, kWarpTelemetryWindow> _metricsSourceReadyDelayMs {};
+    std::array<float, kWarpTelemetryWindow> _metricsRequiredGuardPixels {};
+    std::size_t _metricsWarpTelemetryCount = 0;
+    uint32_t _metricsCoverageClamped = 0;
+    float _metricsOobUvLeft = 0.0f;
+    float _metricsOobUvRight = 0.0f;
+    float _metricsOobUvTop = 0.0f;
+    float _metricsOobUvBottom = 0.0f;
 
     // Effective fixed latch lead reported by the 1 Hz summary. A configured
     // LateSampleLead > 0.5 overrides the conservative auto/default lead.

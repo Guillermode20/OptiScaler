@@ -44,11 +44,50 @@ These rules take priority over feature work.
 9. Do not restore the parent branch's COPY worker, capture worker, COMPUTE queue, UI borrowing, repeat-warp shedding, hitch hold, heavy per-slot telemetry, target-pose stack, or positional depth/MV warp unless a controlled A/B proves a specific need.
 10. Every reprojection change follows the full build, install, KCD2 live-test chain before it is called validated.
 
-## 4. Priority 0: screen-edge artifacts
+## 4. Priority 0: predictive rendering and true guard-band coverage
 
-This is the current quality blocker.
+This is the current quality blocker and supersedes the earlier edge-hiding ladder. The approved target is: passive input history -> predicted **render-only** KCD2 camera before culling -> genuinely oversized/asymmetric world render at unchanged focal length -> immutable per-packet projection/coverage metadata -> late residual rotation -> zero-invalid-sample coverage clamp -> nominal output + unwarped HUD. It must not widen FOV inside the nominal raster, synthesize gameplay input, or claim guard coverage before captured-color proof.
 
-Live KCD2 testing established that the attempted render-reserve hook did not widen the rasterized world image. The presenter mapping only cropped the existing image and reduced the displayed FOV, so the feature and all associated guard plumbing were removed on 2026-09-07. Edge work must not assume offscreen source coverage that has not been proven in the captured color.
+Live KCD2 testing established that the attempted render-reserve hook did not widen the rasterized world image. The presenter mapping only cropped the existing image and reduced the displayed FOV, so that mechanism remains rejected. Prediction does not remove the need for real excess raster coverage, and guard allocation does not remove the need for an outlier clamp.
+
+### Research checkpoint (2026-09-08)
+
+Primary-source conclusions:
+
+- NVIDIA's *DLSS 4: Transforming Real-Time Graphics with AI*, section 5.2, publicly describes the relevant combination: border guard bands/layers reduce missing information; user-input extrapolation renders at a predicted camera; a late warp corrects that predicted frame to the actual camera. NVIDIA reports that simple ballistic prediction substantially reduces average disocclusion with near-zero predictor cost. This project adopts only that public architecture, not proprietary reconstruction details. Source: <https://research.nvidia.com/labs/adlr/DLSS4/>.
+- NVIDIA's official Reflex 2 explanation distinguishes the pose used by the completed render from the newer camera position calculated from latest input and sampled immediately before display. In `async-simple`, `ContentFrame::constants` is the rendered pose and `ApplyLateInput` at the deferred latch is the late target; prediction must change the former and be stored with that exact packet. Source: <https://www.nvidia.com/en-us/geforce/news/reflex-2-even-lower-latency-gameplay-with-frame-warp/>.
+- Public CRYENGINE documents `CCamera::SetMatrix`, `SetFrustum`, `SetAsymmetry(l,r,b,t)`, and `UpdateFrustum`. `ISystem::SetViewCamera` must occur before `UpdateBeforeFinalizeCamera` to affect occlusion culling/rendering. Async camera injection is a separate late render-thread VR facility; it confirms timing sensitivity but is not itself KCD2 integration. Sources: <https://www.cryengine.com/docs/static/engines/cryengine-5/categories/28704770/pages/29796988> and <https://www.cryengine.com/docs/static/engines/cryengine-5/categories/23756813/pages/26871553>.
+- `tkhquang/KCD2Tools/TPVCamera` (MIT) hooks `CCamera::UpdateFrustumPlanes`, mutates only an RTTI-confirmed `CView`-embedded camera before cull planes are built, and explains that a later matrix-only mutation caused near geometry to be culled incorrectly. Its architecture and reverse-engineered offsets are adaptable; no code has been copied. It rejects non-`CView` shadow/reflection/portal cameras via RTTI, reads the untouched `CView` pose so repeated callbacks are idempotent, and suppresses changes for cursor/menu states. Source: <https://github.com/tkhquang/KCD2Tools/blob/main/TPVCamera/src/hooks/camera_hook.cpp>.
+- `Floris0106/AsyncTimewarp` freezes color/depth and maps current rays into the frozen camera. Its `StretchBorders` merely permits clamped texture sampling outside `[0,1]`; disabling it shows black holes. It demonstrates why depth reprojection cannot create missing outer-frame scene content and is conceptual only. Source: <https://github.com/Floris0106/AsyncTimewarp>.
+- Canonical OptiScaler currently has no equivalent reprojection subsystem; this branch owns the KCD2-specific path. Upscaler depth/MV arrive through `IFGFeature_Dx12` resource slots and are copied only for opt-in `HybridFsrGenerator`. The final `RPD` warp is rotation-only and consumes a display-sized HUDless color anchor.
+
+Current `async-simple` map:
+
+1. Passive mouse totals/history are recorded by `OptiInput::RecordRawMouseMotionLocked` and read with `GetRawMouseMotion[At]`; do not add another Wine raw-input registration.
+2. `Kcd2Camera::Hook -> PublishPose` observes `CCamera::UpdateFrustumPlanes`, RTTI-gates `camera-0xE8` to `.?AVCView@@`, and publishes current/previous basis, FOV, projection block, timestamp, input totals, and cut generation through a seqlock.
+3. `AReproj_Dx12::CaptureFramePacket` copies the HUDless world plus isolated UI inline on the game DIRECT queue and stores pose/input metadata in one of three packets. Depth/MV are copied only when content interpolation is enabled.
+4. `AReproj_Dx12::PresenterMain` chooses the newest fence-complete packet without waiting. `DispatchPacketWarp` submits on one NORMAL DIRECT presenter queue behind the CPU-signalled late gate.
+5. `ApplyLateInput` samples the newest valid KCD2 pose plus residual raw mouse input. `PrepareRotationConstants -> BuildRotationRows` bakes an output-pixel-to-source-UV rotation homography into `prevCameraRight/Up/Forward`.
+6. `RPD.hlsl::CSMain` computes raw `sourceUv`; validity uses a half-texel-inset rectangle before clamp sampling. Invalid pixels currently fall back to the same output-coordinate texel from the stale source, which appears as a repeated/lagging edge strip (and clamp sampling is still used only for memory safety). `DebugView=1` paints those pixels magenta before HUD composition.
+7. Source color, warp output, real output, and isolated UI are currently nominal display extent. KCD2 depth/MV observed in the controlled run were 1706x960 while world/UI output was 2560x1440. Virtual swapchain buffers are selected in `WrappedIDXGISwapChain4::InitializeReprojectionVirtualization`; KCD2 world resource dimensions ultimately pass the retail resource-description materializer at `WHGame.dll+0x7AD47C`, but the dynamic-resolution policy owner is unresolved.
+
+Explicit research-question answers (unknowns are gates, not assumptions):
+
+1. Earliest practical proven orientation/culling hook: retail 1.5.6 `CView::Update` writes `CCamera` at `cview+0xE8`, then calls `CCamera::UpdateFrustumPlanes` with return RVA `WHGame.dll+0x7F1A68`. The existing signature detour plus RTTI `CView` gate is the practical mutation point; first-call return `+0x7F12E6` is before final matrix construction and is not suitable.
+2. TPVCamera technique: yes, architecturally, and its MIT license permits adaptation with attribution. Retain signature resolution, RTTI game-view rejection, render-only mutation, idempotence, and menu/state fail-closed behavior.
+3. Asymmetric frustum: supported by public CRYENGINE, but **not yet proven in KCD2**. KCD2's shifted projection block is only partly mapped; a fixed asymmetry canary must prove projection and culling move together before relying on it.
+4. Render-target dimensions: OptiScaler virtual buffers follow swapchain dimensions; KCD2's native resource materializer reads 16-bit width/height at input `+0x08/+0x0A` at retail RVA `+0x7AD47C`. The safe owner of the complete world/depth/MV/temporal family remains unresolved.
+5. Larger scene extent without visible-resolution change: architecturally yes (oversized world graph, nominal physical swapchain/UI), but **not yet demonstrated in KCD2**. The failed FOV reserve and ignored custom-resolution CVar do not count.
+6. Upscaler acceptance: **unknown**. Current capture accepts nominal upscaled color and lower-resolution depth/MV. Oversized color/depth/MV, jitter, and scale metadata must be tested coherently; OptiScaler alone cannot force extra geometry.
+7. Coordinate mapping: for nominal visible width/height `W,H` and guards `L,R,T,B`, source size is `Ws=W+L+R`, `Hs=H+T+B`. Preserve `fx=W/(2 tan(hFov/2))` and the corresponding `fy`; nominal center pixel `(x,y)` maps to extended source image-plane pixel `(x+L,y+T)`, or UV `((x+L+0.5)/Ws,(y+T+0.5)/Hs)`, before applying the residual source-pose homography. Asymmetric projection bounds are `[-W/2-L, W/2+R]` and `[-H/2-B,H/2+T]` in the engine's signed convention. CPU constants and HLSL must carry explicit source extent/visible rect rather than assume `DisplaySize` for both.
+8. Temporal data: an early render-camera change should naturally affect current view/projection and culling, but previous matrices, jitter, MV scale, depth, TAA/upscaler history, and camera-cut logic are **unverified**. A fixed probe must inspect these before dynamic prediction.
+9. Render-to-warp horizon: instrumentation now records camera timestamp -> late-latch timestamp and source-ready observation; KCD2 measurement pending.
+10. P95/P99/P99.9 residuals: instrumentation now emits them; KCD2 measurement pending.
+11. Required guard pixels/degrees: 16 perimeter samples now report per-edge raw UV overrun and P95/P99/P99.9 maximum pixel demand; KCD2 measurement pending.
+12. Performance cost: pending coherent guard extents and in-game GPU/CPU measurements; test fixed 5%, 10%, and maximum configured pixel-area increases without per-frame resource resizing.
+13. No-stretch guarantee: packet metadata defines a filter-safe valid source rectangle. Before dispatch, solve the largest identity-to-requested residual rotation whose entire output boundary lies inside that rectangle, then apply that reduced rotation. Unlike the rejected zero-margin limiter, real guards permit a useful nonzero safe rotation. HLSL treats any numerical escape as diagnostic/fail-closed, never as edge replication.
+
+Checkpoint order is mandatory: **A instrumentation (code complete, live pending) -> B fixed render-only hook proof -> C fixed predicted yaw -> D ballistic predictor -> E fixed oversized symmetric guard -> F source mapping -> G adaptive asymmetry -> H zero-invalid coverage clamp -> I tuning/cleanup**. Do not begin dynamic prediction until B has direct pre-warp captured-image/culling proof, and do not begin guard sampling until E proves genuine extra geometry at unchanged center pixels-per-degree.
 
 ### E0. Establish a repeatable baseline
 
@@ -433,7 +472,7 @@ Sub-frame controller response likely requires a KCD2-specific input-to-camera un
 These remain outside the current implementation unless a future measured problem justifies them:
 
 - neural inpainting;
-- predictive rendering that changes KCD2's render camera ahead of time;
+- neural/complex prediction beyond the approved bounded ballistic render-pose predictor;
 - final positional depth/MV reprojection;
 - large spatial hole filling;
 - adaptive late-sample controller before fixed-latch measurements demand it;
@@ -486,9 +525,9 @@ Rejected or removed unless new evidence changes the decision:
 - UI borrowing and hitch-hold machinery;
 - old KCD2 input-prediction/target-pose stack;
 - attempted KCD2 render reserve and presenter guard crop; live testing showed only reduced displayed FOV, not wider captured coverage;
-- predictive render-pose steering, yaw probe, and camera callback hooks;
-- overscan tracing (viewport, scissor, and resource descriptor intercept hooks);
-- safe-warp budget / edge limiter and boundary binary search;
+- the old unproven fixed-yaw probe implementation and unsafe resource-descriptor detours (their evidence remains useful, but the implementation was removed);
+- always-on overscan tracing (bounded diagnostics may return for a specific proof);
+- the old no-guard safe-warp budget limiter (a zero-invalid limiter becomes valid only after genuine guard coverage exists);
 - history border fallback and multi-anchor sampling.
 
 When one of these decisions changes, record the measured reason here and update the relevant active section above.

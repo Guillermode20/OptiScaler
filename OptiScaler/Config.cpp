@@ -191,6 +191,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojHudIsolation.set_from_config(readBool("AsyncTimewarp", "HudIsolation"));
             ReprojContentInterpolation.set_from_config(readBool("AsyncTimewarp", "ContentInterpolation"));
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
+            ReprojWarpTelemetry.set_from_config(readBool("AsyncTimewarp", "WarpTelemetry"));
+            ReprojDebugView.set_from_config(readBool("AsyncTimewarp", "DebugView"));
         }
 
         // OptiFG
@@ -1027,6 +1029,10 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojContentInterpolation.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "LateSampleLead",
                      GetFloatValue(Instance()->ReprojLateSampleLead.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "WarpTelemetry",
+                     GetBoolValue(Instance()->ReprojWarpTelemetry.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "DebugView",
+                     GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
     }
 
     // XeFG output

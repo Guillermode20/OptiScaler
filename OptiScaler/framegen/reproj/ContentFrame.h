@@ -6,6 +6,39 @@
 
 #include <shaders/reprojection/RP_Common.h>
 
+// Optional, CPU-only diagnostics for one displayed source frame. Angles are
+// deltas relative to the frame's render camera (radians), rather than ambiguous
+// engine-global Euler angles. The packet owns the immutable render metadata;
+// the presenter fills a temporary copy at late latch and only aggregates it.
+struct WarpFrameTelemetry
+{
+    std::uint64_t frameId = 0;
+    double renderCameraTimestamp = 0.0;
+    double sourceObservedReadyTimestamp = 0.0;
+    double warpTimestamp = 0.0;
+    float predictedYawDelta = 0.0f;
+    float predictedPitchDelta = 0.0f;
+    float actualYawDelta = 0.0f;
+    float actualPitchDelta = 0.0f;
+    float residualYaw = 0.0f;
+    float residualPitch = 0.0f;
+    float requiredPixelsLeft = 0.0f;
+    float requiredPixelsRight = 0.0f;
+    float requiredPixelsTop = 0.0f;
+    float requiredPixelsBottom = 0.0f;
+    float maxOobUvLeft = 0.0f;
+    float maxOobUvRight = 0.0f;
+    float maxOobUvTop = 0.0f;
+    float maxOobUvBottom = 0.0f;
+    float predictionHorizonMs = 0.0f;
+    float predictorConfidence = 0.0f;
+    std::uint32_t guardPixelsLeft = 0;
+    std::uint32_t guardPixelsRight = 0;
+    std::uint32_t guardPixelsTop = 0;
+    std::uint32_t guardPixelsBottom = 0;
+    bool coverageClamped = false;
+};
+
 // Owned presenter input. Resources are private copies and remain immutable
 // until completionFence reaches completionFenceValue. UI is a reference to the
 // latest separately captured overlay and is never fed into content generation.

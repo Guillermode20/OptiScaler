@@ -66,8 +66,9 @@ Steady-state model:
 3. Packet lifecycle is `Free -> Capturing -> Ready -> Presenting -> Retired -> Free`. There are three packet slots. The presenter chooses the newest completed anchor and never blocks on a newer incomplete capture.
 4. The presenter uses one NORMAL-priority DIRECT queue and performs exactly one real present per display slot. Repeated slots are real rotation warps of the active anchor.
 5. A CPU-signalled deferred latch parks submitted warp work until a fixed late-sample deadline. The default lead is 3 ms. Late rotational correction uses fresh raw mouse motion plus the latest valid KCD2 camera state, then falls back to rendered-camera angular-velocity extrapolation.
-6. The final display homography is rotation-only. Depth and motion vectors may be consumed by the optional FSR midpoint generator but must not silently become a positional final warp.
-7. If the presenter is unavailable or permanently fails, downgrade to plain frame presentation. Do not restore a synchronous generated-frame fallback path.
+6. Priority-0 edge work targets a bounded ballistic **render-only** pose prediction plus genuine oversized/asymmetric KCD2 world coverage at unchanged focal length. It is gated checkpoint-by-checkpoint in `PLAN.md`: never treat wider FOV in the nominal raster as guard coverage, and never pair global prediction state with a packet.
+7. The final display homography is rotation-only. Depth and motion vectors may be consumed by the optional FSR midpoint generator but must not silently become a positional final warp.
+8. If the presenter is unavailable or permanently fails, downgrade to plain frame presentation. Do not restore a synchronous generated-frame fallback path.
 
 ## Hard invariants
 
@@ -154,9 +155,9 @@ Do not copy mechanisms back from `async-timewarp` simply because they exist ther
 - old KCD2 input predictor and target-pose resolver stack;
 - full positional depth/MV final warp;
 - heavy per-slot telemetry;
-- predictive render-pose steering, yaw probe, and camera callback hooks;
-- overscan tracing (viewport, scissor, and resource descriptor intercept hooks);
-- safe-warp budget / edge limiter and boundary binary search;
+- the old unproven fixed-yaw probe implementation and unsafe resource-descriptor detours (the new `PLAN.md` checkpoints may add a smaller build-gated proof);
+- always-on overscan tracing (bounded proof-only diagnostics are permitted by `PLAN.md`);
+- the old no-guard safe-warp budget limiter (coverage-aware zero-invalid limiting is permitted only after genuine guard pixels are proven);
 - history border fallback and multi-anchor sampling.
 
 The opt-in source cap and one-midpoint FSR generator described in `PLAN.md` are self-contained exceptions only when they preserve the simplified ownership/queue model.

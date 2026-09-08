@@ -368,6 +368,7 @@ void AReproj_Dx12::PresenterMain()
                 // immutable until retirement, so the warp queue needs no
                 // additional ordering against the game DIRECT queue.
                 auto& newest = _packets[newestPacketIndex];
+                newest.sourceObservedReadyTimestamp = Util::MillisecondsNow();
                 if (activePacketIndex >= 0)
                     _packets[activePacketIndex].state.store(PacketState::Retired);
                 activePacketIndex = newestPacketIndex;

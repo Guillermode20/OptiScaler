@@ -64,6 +64,10 @@ HudIsolation=auto
 ContentInterpolation=false
 # ms before present to release the latch; auto = fixed 3 ms (recommended).
 LateSampleLead=auto
+# Optional once-per-second residual/horizon/guard-coverage aggregates.
+WarpTelemetry=false
+# Paint source-invalid world samples magenta (diagnostic only).
+DebugView=false
 ```
 
 `Async=true` uses a worker-owned presenter on the real main swapchain, keeping warp writes
