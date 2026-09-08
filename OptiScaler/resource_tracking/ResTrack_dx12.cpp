@@ -7,12 +7,14 @@
 #include <framegen/reproj/Kcd2Camera.h>
 #include <framegen/reproj/Kcd2HudIsolation.h>
 #include <framegen/reproj/Kcd2Scaleform.h>
+#include <scanner/scanner.h>
 
 #include <menu/menu_overlay_dx.h>
 
 #include <algorithm>
 #include <atomic>
 #include <future>
+#include <string_view>
 
 #include <magic_enum_utility.hpp>
 #include <include/d3dx/d3dx12.h>
@@ -137,6 +139,16 @@ static std::atomic<uint64_t> g_hudScissorDiagCount { 0 };
 static std::atomic<uint64_t> g_worldOmDiagCount { 0 };
 static std::atomic<uint64_t> g_worldRtvCreateDiagCount { 0 };
 
+// KCD2 retail 1.5.6 resource-description observer. This function is a small
+// leaf that copies the game-owned resource dimensions into the descriptor
+// consumed by the materializer at WHGame.dll+0x7AD47C. Keep this diagnostic
+// strictly observational until the complete world resource family is mapped.
+using PFN_Kcd2ResourceDescribe = uintptr_t(__fastcall*)(uintptr_t resourceObject, uintptr_t descriptor);
+static PFN_Kcd2ResourceDescribe o_Kcd2ResourceDescribe = nullptr;
+static bool g_kcd2ResourceDescribeAttempted = false;
+static std::atomic<uint64_t> g_kcd2ResourceDescribeCount { 0 };
+static std::atomic<bool> g_kcd2ResourceDescribeStackLogged { false };
+
 uintptr_t Kcd2CallerRva(void* returnAddress)
 {
     const auto module = reinterpret_cast<uintptr_t>(GetModuleHandleW(L"WHGame.dll"));
@@ -153,6 +165,95 @@ void LogKcd2CallerStack(const char* label)
         rvas[i] = Kcd2CallerRva(frames[i]);
     LOG_INFO("KCD2 stack {}: count={} rva={:X}/{:X}/{:X}/{:X}/{:X}/{:X}/{:X}/{:X}", label, count, rvas[0],
              rvas[1], rvas[2], rvas[3], rvas[4], rvas[5], rvas[6], rvas[7]);
+}
+
+static uintptr_t __fastcall hkKcd2ResourceDescribe(uintptr_t resourceObject, uintptr_t descriptor)
+{
+    const auto result = o_Kcd2ResourceDescribe(resourceObject, descriptor);
+
+    if (!Config::Instance()->ReprojPredictiveProbe.value_or_default() || resourceObject == 0 || descriptor == 0)
+        return result;
+
+    __try
+    {
+        const auto sourceWidth = *reinterpret_cast<const uint16_t*>(resourceObject + 0x90);
+        const auto sourceHeight = *reinterpret_cast<const uint16_t*>(resourceObject + 0x92);
+        const auto sourceDepthOrArray = *reinterpret_cast<const uint16_t*>(resourceObject + 0x94);
+        const auto compactWidth = *reinterpret_cast<const uint16_t*>(descriptor + 0x08);
+        const auto compactHeight = *reinterpret_cast<const uint16_t*>(descriptor + 0x0A);
+        const auto compactDepthOrArray = *reinterpret_cast<const uint16_t*>(descriptor + 0x0C);
+        const auto compactMips = *reinterpret_cast<const uint16_t*>(descriptor + 0x0E);
+        const auto compactType = *reinterpret_cast<const uint8_t*>(descriptor + 0x12);
+        const auto compactFormat = *reinterpret_cast<const uint8_t*>(descriptor + 0x10);
+        const auto compactFlags = *reinterpret_cast<const uint32_t*>(descriptor + 0x14);
+        const auto compactTiled = *reinterpret_cast<const uint8_t*>(descriptor + 0x18);
+        const auto callerRva = Kcd2CallerRva(_ReturnAddress());
+        const auto n = g_kcd2ResourceDescribeCount.fetch_add(1, std::memory_order_relaxed);
+        const bool primaryWorldExtent = sourceWidth == 1706 && sourceHeight == 960;
+
+        if (primaryWorldExtent && !g_kcd2ResourceDescribeStackLogged.exchange(true, std::memory_order_relaxed))
+            LogKcd2CallerStack("resource-describe-world");
+
+        // The first bounded batch establishes the resource graph. Continue to
+        // retain every primary world-extent record even if startup is unusually
+        // descriptor-heavy, while never logging on the display hot path.
+        if (n < 96 || primaryWorldExtent)
+        {
+            LOG_INFO("KCD2 resource desc: #{} callerRva={:X} source={:X} src={}x{}x{} "
+                     "compact={}x{}x{} mips={} type={} format={} flags={:X} tiled={}",
+                     n, callerRva, resourceObject, sourceWidth, sourceHeight, sourceDepthOrArray, compactWidth,
+                     compactHeight, compactDepthOrArray, compactMips, compactType, compactFormat, compactFlags,
+                     compactTiled);
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+
+    return result;
+}
+
+static void TryHookKcd2ResourceDescribe()
+{
+    if (g_kcd2ResourceDescribeAttempted || o_Kcd2ResourceDescribe != nullptr ||
+        !Config::Instance()->ReprojPredictiveProbe.value_or_default())
+        return;
+
+    const auto module = GetModuleHandleW(L"WHGame.dll");
+    if (module == nullptr)
+        return;
+
+    g_kcd2ResourceDescribeAttempted = true;
+
+    // Exact retail-1.5.6 body signature. The fixed RVA check deliberately
+    // fails closed if a future build moves or changes this helper; update the
+    // signature and its evidence only after a new bounded trace.
+    static constexpr std::string_view pattern =
+        "0F B6 81 96 00 00 00 4C 8D 05 ? ? ? ? 49 8B 04 C0 48 89 02 "
+        "0F B7 81 90 00 00 00 66 89 42 08 0F B7 81 92 00 00 00 66 89 42 0A "
+        "0F B7 81 94 00 00 00 66 89 42 0C";
+    const auto address = scanner::GetAddress(module, pattern);
+    const auto moduleAddress = reinterpret_cast<uintptr_t>(module);
+    if (address == 0 || address - moduleAddress != 0x7B07F0)
+    {
+        LOG_WARN("KCD2 resource descriptor probe unavailable (signature/RVA mismatch: {:X})",
+                 address != 0 && address >= moduleAddress ? address - moduleAddress : 0);
+        return;
+    }
+
+    o_Kcd2ResourceDescribe = reinterpret_cast<PFN_Kcd2ResourceDescribe>(address);
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(reinterpret_cast<PVOID*>(&o_Kcd2ResourceDescribe), hkKcd2ResourceDescribe);
+    const auto result = DetourTransactionCommit();
+    if (result != NO_ERROR)
+    {
+        LOG_WARN("KCD2 resource descriptor probe detour failed: {:X}", result);
+        o_Kcd2ResourceDescribe = nullptr;
+        return;
+    }
+
+    LOG_INFO("KCD2 resource descriptor probe installed at RVA={:X}", address - moduleAddress);
 }
 
 static std::mutex _hudlessTrackMutex;
@@ -2252,6 +2353,7 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
         }
     }
 
+    TryHookKcd2ResourceDescribe();
     HookToQueue(device);
     HookCommandList(device);
     HookResource(device);
@@ -2321,6 +2423,9 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
     if (o_Release != nullptr)
         DetourDetach(&(PVOID&) o_Release, hkRelease);
 
+    if (o_Kcd2ResourceDescribe != nullptr)
+        DetourDetach(reinterpret_cast<PVOID*>(&o_Kcd2ResourceDescribe), hkKcd2ResourceDescribe);
+
     auto detourResult = DetourTransactionCommit();
     if (detourResult != NO_ERROR)
     {
@@ -2353,6 +2458,7 @@ void ResTrack_Dx12::ReleaseDeviceHooks()
 
         // Resource
         o_Release = nullptr;
+        o_Kcd2ResourceDescribe = nullptr;
     }
 }
 
