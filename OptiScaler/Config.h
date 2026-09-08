@@ -630,6 +630,8 @@ class Config
     }; // 0/auto = fixed 3 ms deferred latch; fixed float >0.5 overrides (bounded by the slot)
     CustomOptional<bool> ReprojWarpTelemetry { false }; // optional aggregate prediction/coverage diagnostics
     CustomOptional<bool> ReprojDebugView { false };     // magenta where the requested warp has no real source texel
+    CustomOptional<float> ReprojProbeYaw { 0.0f };       // fixed render-only yaw probe (degrees, 0=off, stage B only)
+
 
     // As per
     // https://github.com/artur-graniszewski/dlss-enabler-main/blob/a92464d468eb0d91ae17befa66c6bf6229f20b9f/Utils/DlssgProxy.cpp#L1033

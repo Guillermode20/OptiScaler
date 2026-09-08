@@ -193,6 +193,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             ReprojLateSampleLead.set_from_config(readFloat("AsyncTimewarp", "LateSampleLead"));
             ReprojWarpTelemetry.set_from_config(readBool("AsyncTimewarp", "WarpTelemetry"));
             ReprojDebugView.set_from_config(readBool("AsyncTimewarp", "DebugView"));
+            ReprojProbeYaw.set_from_config(readFloat("AsyncTimewarp", "ProbeYaw"));
         }
 
         // OptiFG
@@ -1033,6 +1034,8 @@ bool Config::SaveIni()
                      GetBoolValue(Instance()->ReprojWarpTelemetry.value_for_config()).c_str());
         ini.SetValue("AsyncTimewarp", "DebugView",
                      GetBoolValue(Instance()->ReprojDebugView.value_for_config()).c_str());
+        ini.SetValue("AsyncTimewarp", "ProbeYaw",
+                     GetFloatValue(Instance()->ReprojProbeYaw.value_for_config()).c_str());
     }
 
     // XeFG output

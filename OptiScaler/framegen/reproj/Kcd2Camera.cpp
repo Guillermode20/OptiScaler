@@ -213,8 +213,42 @@ void PublishPose(uintptr_t camera)
     }
 }
 
+void ApplyProbeYaw(uintptr_t camera, float yawRadians)
+{
+    if (std::abs(yawRadians) < 1e-6f)
+        return;
+    __try
+    {
+        const float cosA = std::cos(yawRadians);
+        const float sinA = std::sin(yawRadians);
+        auto* matrix = reinterpret_cast<float (*)[4]>(camera);
+        for (int col = 0; col < 3; ++col)
+        {
+            const float x = matrix[0][col];
+            const float y = matrix[1][col];
+            const float nx = x * cosA - y * sinA;
+            const float ny = x * sinA + y * cosA;
+            matrix[0][col] = nx;
+            matrix[1][col] = ny;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
 uintptr_t __fastcall Hook(uintptr_t camera)
 {
+    const float probeDegrees = Config::Instance()->ReprojProbeYaw.value_or_default();
+    const float probeRadians = probeDegrees * 3.14159265358979323846f / 180.0f;
+    if (probeRadians != 0.0f && IsGameplayCamera(camera) && !MenuCommon::IsVisible())
+    {
+        // Mutate render camera before culling is built. CView::Update rebuilds
+        // the matrix each frame, so this does not persist in gameplay state.
+        // Publish after mutation so the packet's render pose is the biased one;
+        // the presenter derives the unbiased target by inverse rotation.
+        ApplyProbeYaw(camera, probeRadians);
+    }
     PublishPose(camera);
     return g_original(camera);
 }

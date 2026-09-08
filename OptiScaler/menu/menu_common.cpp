@@ -4254,6 +4254,10 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("Invalid coverage debug##reproj-live", &edgeDebug))
             config->ReprojDebugView = edgeDebug;
         ShowHelpMarker("Paint source-invalid world samples magenta before compositing the isolated HUD.");
+        float probeYaw = config->ReprojProbeYaw.value_or_default();
+        if (ImGui::SliderFloat("Probe yaw##reproj-live", &probeYaw, -2.0f, 2.0f, "%.2f deg"))
+            config->ReprojProbeYaw = std::clamp(probeYaw, -2.0f, 2.0f);
+        ShowHelpMarker("Stage B only: fixed render-only yaw (0=off). Moves culling+render, then inverse warps to keep center.");
         ImGui::PopItemWidth();
         if (auto reproj = dynamic_cast<AReproj_Dx12*>(state.currentFG); reproj != nullptr)
         {

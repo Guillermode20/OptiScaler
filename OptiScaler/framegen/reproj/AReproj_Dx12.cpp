@@ -644,11 +644,31 @@ bool AReproj_Dx12::ApplyLateInput(RP_Constants& constants, const ContentFrame& c
         lateBaseRight = { latestCamera.right[0], latestCamera.right[1], latestCamera.right[2] };
         lateBaseUp = { latestCamera.up[0], latestCamera.up[1], latestCamera.up[2] };
         lateBaseForward = { latestCamera.forward[0], latestCamera.forward[1], latestCamera.forward[2] };
+        // Stage B probe: the published latest pose is the biased render pose.
+        // Derive the unbiased gameplay target by inverse yaw so the warp
+        // restores the center (biased render -> unbiased target = -probe).
+        const float probeDegrees = Config::Instance()->ReprojProbeYaw.value_or_default();
+        if (probeDegrees != 0.0f)
+        {
+            const float probeRad = probeDegrees * 3.14159265358979323846f / 180.0f;
+            const float cosA = std::cos(-probeRad);
+            const float sinA = std::sin(-probeRad);
+            const auto rotZ = [&](ReprojVec3 v) -> ReprojVec3
+            { return { v.x * cosA - v.y * sinA, v.x * sinA + v.y * cosA, v.z }; };
+            lateBaseRight = rotZ(lateBaseRight);
+            lateBaseUp = rotZ(lateBaseUp);
+            lateBaseForward = rotZ(lateBaseForward);
+        }
         pBaseRight = &lateBaseRight;
         pBaseUp = &lateBaseUp;
         pBaseForward = &lateBaseForward;
-        DecomposeCameraPairRotation(latestCamera.forward, constants.cameraForward, constants.cameraRight,
-                                    constants.cameraUp, &renderedToLatestYaw, &renderedToLatestPitch);
+        // Decompose against the late base (unbiased when probe is active) so
+        // telemetry includes the -probe offset.
+        {
+            const float lbForward[3] = { lateBaseForward.x, lateBaseForward.y, lateBaseForward.z };
+            DecomposeCameraPairRotation(lbForward, constants.cameraForward, constants.cameraRight, constants.cameraUp,
+                                        &renderedToLatestYaw, &renderedToLatestPitch);
+        }
 
         // The KCD2 camera hook snapshots raw-input totals alongside the pose.
         // This is an exact producer-side baseline; do not infer it from a

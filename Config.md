@@ -68,6 +68,8 @@ LateSampleLead=auto
 WarpTelemetry=false
 # Paint source-invalid world samples magenta (diagnostic only).
 DebugView=false
+# Stage B only: fixed render-only yaw probe (degrees, 0=off).
+ProbeYaw=0
 ```
 
 `Async=true` uses a worker-owned presenter on the real main swapchain, keeping warp writes
