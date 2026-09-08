@@ -144,6 +144,17 @@ uintptr_t Kcd2CallerRva(void* returnAddress)
     return module != 0 && caller >= module ? caller - module : 0;
 }
 
+void LogKcd2CallerStack(const char* label)
+{
+    void* frames[8] {};
+    const auto count = RtlCaptureStackBackTrace(0, static_cast<ULONG>(std::size(frames)), frames, nullptr);
+    uintptr_t rvas[8] {};
+    for (USHORT i = 0; i < count; ++i)
+        rvas[i] = Kcd2CallerRva(frames[i]);
+    LOG_INFO("KCD2 stack {}: count={} rva={:X}/{:X}/{:X}/{:X}/{:X}/{:X}/{:X}/{:X}", label, count, rvas[0],
+             rvas[1], rvas[2], rvas[3], rvas[4], rvas[5], rvas[6], rvas[7]);
+}
+
 static std::mutex _hudlessTrackMutex;
 static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*,
                                     ankerl::unordered_dense::map<ID3D12Resource*, ResourceInfo>>
@@ -527,6 +538,8 @@ void ResTrack_Dx12::hkCreateRenderTargetView(ID3D12Device* This, ID3D12Resource*
             const auto n = g_worldRtvCreateDiagCount.fetch_add(1, std::memory_order_relaxed);
             if (n < 32)
             {
+                if (n == 0)
+                    LogKcd2CallerStack("RTV-create");
                 LOG_INFO("KCD2 world RTV create: #{} callerRva={:X} resource={:X} handle={:X} fmt={} flags={:X}", n,
                          Kcd2CallerRva(_ReturnAddress()), reinterpret_cast<size_t>(pResource), DestDescriptor.ptr,
                          static_cast<UINT>(desc.Format), static_cast<UINT>(desc.Flags));
@@ -1201,6 +1214,8 @@ void ResTrack_Dx12::hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumVi
             const auto n = counter.fetch_add(1, std::memory_order_relaxed);
             if (n < 24)
             {
+                if (n == 0)
+                    LogKcd2CallerStack(hud ? "HUD-viewport" : "world-viewport");
                 const auto& vp = pViewports[0];
                 LOG_INFO("KCD2 viewport: #{} phase={} callerRva={:X} cmd={:X} count={} x={:.1f} y={:.1f} w={:.1f} "
                          "h={:.1f} minD={:.3f} maxD={:.3f}",
@@ -1256,6 +1271,8 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
         const auto n = g_worldOmDiagCount.fetch_add(1, std::memory_order_relaxed);
         if (n < 64)
         {
+            if (n == 0)
+                LogKcd2CallerStack("world-OM");
             const auto handle = pRenderTargetDescriptors[0];
             auto heap = GetHeapByCpuHandleRTV(handle.ptr);
             ResourceInfo info {};
