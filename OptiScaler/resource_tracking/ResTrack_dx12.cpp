@@ -2355,7 +2355,11 @@ void ResTrack_Dx12::HookDevice(ID3D12Device* device)
         }
     }
 
-    TryHookKcd2ResourceDescribe();
+    // Do not detour the retail resource-copy helper. Its caller relies on the
+    // helper preserving volatile R10 as well as RCX; a normal C++ Detours
+    // callback cannot guarantee that register contract. Keep the bounded
+    // D3D12 probes below enabled, and use an ABI-preserving assembly thunk
+    // before revisiting this private hook.
     HookToQueue(device);
     HookCommandList(device);
     HookResource(device);
