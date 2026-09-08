@@ -237,6 +237,7 @@ struct ReprojVec3
 };
 
 ReprojVec3 LoadReprojVec3(const float* value);
+void StoreReprojVec3(float* target, ReprojVec3 value);
 } // namespace
 
 bool AReproj_Dx12::IsCameraAllZero(int fIndex) const
@@ -304,6 +305,13 @@ float ReprojHalfToFloat(uint16_t value)
 }
 
 ReprojVec3 LoadReprojVec3(const float* value) { return { value[0], value[1], value[2] }; }
+
+void StoreReprojVec3(float* target, ReprojVec3 value)
+{
+    target[0] = value.x;
+    target[1] = value.y;
+    target[2] = value.z;
+}
 
 ReprojVec3 NormalizeReprojVec3(ReprojVec3 value)
 {
@@ -478,13 +486,6 @@ bool ExtrapolateCameraRotation(const RP_Constants& constants, ReprojVec3 right, 
     *predictedUp = NormalizeReprojVec3(RotateReprojVec3(up, axis, extrapolationAngle));
     *predictedForward = NormalizeReprojVec3(RotateReprojVec3(forward, axis, extrapolationAngle));
     return true;
-}
-
-void StoreReprojVec3(float* target, ReprojVec3 value)
-{
-    target[0] = value.x;
-    target[1] = value.y;
-    target[2] = value.z;
 }
 
 // Decompose the rotation from a previous camera basis to the current one into
