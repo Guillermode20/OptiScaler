@@ -17,7 +17,7 @@ struct alignas(256) RP_Constants
     float jitterY;
     uint32_t invertMV;
     uint32_t jitterCancelled;
-    uint32_t reserved;
+    float safeWarpBudget;
     uint32_t mode;
     uint32_t debugView;
     uint32_t hudlessSource;
@@ -59,7 +59,7 @@ cbuffer RP_Constants : register(b0)
     float JitterX, JitterY;
     uint InvertMV;
     uint JitterCancelled;
-    uint Reserved;
+    float SafeWarpBudget;
     uint Mode;
     uint DebugView;
     uint HudlessSource;
@@ -109,9 +109,17 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
     // but a clamped tap is never treated as valid coverage.
     float2 validMin = 0.5f / float2(DisplaySize);
     float2 validMax = 1.0f - validMin;
-    bool covered = inFront && all(sourceUv >= validMin) && all(sourceUv <= validMax);
+    // E4 budget-aware coverage: the CPU binary search in EvaluateWarpCoverage
+    // clamps the rotation so every screen-boundary overrun stays within
+    // SafeWarpBudget pixels. Pixels in this overrun zone are guaranteed to
+    // have clamped-but-present source data; treat them as covered with zero
+    // coverage so the feathering path shows the original (unwarped) content
+    // instead of painting magenta or falling through to history.
     float2 edgePixels = min(sourceUv - validMin, validMax - sourceUv) * float2(DisplaySize);
-    float coverage = covered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
+    bool strictCovered = inFront && all(sourceUv >= validMin) && all(sourceUv <= validMax);
+    bool budgetCovered = inFront && SafeWarpBudget > 0.0f && all(edgePixels >= -SafeWarpBudget);
+    bool covered = strictCovered || budgetCovered;
+    float coverage = strictCovered ? saturate(min(edgePixels.x, edgePixels.y) * 0.5f) : 0.0f;
 
     float3 world;
     bool historyCovered = false;
@@ -159,7 +167,8 @@ void CSMain(uint3 dtid : SV_DispatchThreadID)
 
     // E2 diagnostic: DebugView == 1 paints invalid coverage magenta ahead of
     // the UI composite. CPU keeps debugView == 0 for normal builds (uniform
-    // branch, no hot-path cost).
+    // branch, no hot-path cost). Only truly uncovered pixels (behind camera
+    // or beyond the budget overrun zone) are flagged.
     if (DebugView == 1 && !covered && !historyCovered)
         world = float3(1.0f, 0.0f, 1.0f);
 

@@ -1131,6 +1131,7 @@ void AReproj_Dx12::FillConstants(int fIndex, RP_Constants& cb)
     cb.jitterY = _jitterY[fIndex];
     cb.invertMV = 0;
     cb.jitterCancelled = 0;
+    cb.safeWarpBudget = Config::Instance()->ReprojSafeWarpBudget.value_or_default();
     cb.mode = 2;
     cb.debugView = Config::Instance()->ReprojDebugView.value_or_default() ? 1u : 0u;
     cb.hudlessSource = 0;
