@@ -18,6 +18,8 @@
 #include <include/d3dx/d3dx12.h>
 #include <detours/detours.h>
 
+#pragma intrinsic(_ReturnAddress)
+
 #ifndef STDMETHODCALLTYPE
 #include <Unknwn.h> // or <objbase.h> to get STDMETHODCALLTYPE
 #endif
@@ -132,6 +134,7 @@ static std::atomic<uint64_t> g_worldViewportDiagCount { 0 };
 static std::atomic<uint64_t> g_hudViewportDiagCount { 0 };
 static std::atomic<uint64_t> g_worldScissorDiagCount { 0 };
 static std::atomic<uint64_t> g_hudScissorDiagCount { 0 };
+static std::atomic<uint64_t> g_worldOmDiagCount { 0 };
 
 static std::mutex _hudlessTrackMutex;
 static ankerl::unordered_dense::map<ID3D12GraphicsCommandList*,
@@ -1172,10 +1175,11 @@ void ResTrack_Dx12::hkRSSetViewports(ID3D12GraphicsCommandList* This, UINT NumVi
             if (n < 24)
             {
                 const auto& vp = pViewports[0];
-                LOG_INFO("KCD2 viewport: #{} phase={} cmd={:X} count={} x={:.1f} y={:.1f} w={:.1f} h={:.1f} "
-                         "minD={:.3f} maxD={:.3f}",
-                         n, hud ? "hud" : "world", reinterpret_cast<size_t>(This), NumViewports, vp.TopLeftX,
-                         vp.TopLeftY, vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth);
+                LOG_INFO("KCD2 viewport: #{} phase={} caller={} cmd={:X} count={} x={:.1f} y={:.1f} w={:.1f} "
+                         "h={:.1f} minD={:.3f} maxD={:.3f}",
+                         n, hud ? "hud" : "world", Util::WhoIsTheCaller(_ReturnAddress()),
+                         reinterpret_cast<size_t>(This), NumViewports, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height,
+                         vp.MinDepth, vp.MaxDepth);
             }
         }
     }
@@ -1202,9 +1206,9 @@ void ResTrack_Dx12::hkRSSetScissorRects(ID3D12GraphicsCommandList* This, UINT Nu
             if (n < 24)
             {
                 const auto& rc = pRects[0];
-                LOG_INFO("KCD2 scissor: #{} phase={} cmd={:X} count={} l={} t={} r={} b={}", n,
-                         hud ? "hud" : "world", reinterpret_cast<size_t>(This), NumRects, rc.left, rc.top,
-                         rc.right, rc.bottom);
+                LOG_INFO("KCD2 scissor: #{} phase={} caller={} cmd={:X} count={} l={} t={} r={} b={}", n,
+                         hud ? "hud" : "world", Util::WhoIsTheCaller(_ReturnAddress()),
+                         reinterpret_cast<size_t>(This), NumRects, rc.left, rc.top, rc.right, rc.bottom);
             }
         }
     }
@@ -1216,6 +1220,34 @@ void ResTrack_Dx12::hkOMSetRenderTargets(ID3D12GraphicsCommandList* This, UINT N
                                          BOOL RTsSingleHandleToDescriptorRange,
                                          D3D12_CPU_DESCRIPTOR_HANDLE* pDepthStencilDescriptor)
 {
+    // Reverse-engineering probe: correlate the viewport caller/command list with
+    // the actual world RTV dimensions. This is passive and bounded; unresolved
+    // descriptors are still useful because their caller and handle are recorded.
+    if (!Kcd2Scaleform::IsActiveOnThisThread() && NumRenderTargetDescriptors > 0 &&
+        pRenderTargetDescriptors != nullptr && Config::Instance()->ReprojPredictiveProbe.value_or_default() &&
+        Kcd2Camera::IsAvailable())
+    {
+        const auto n = g_worldOmDiagCount.fetch_add(1, std::memory_order_relaxed);
+        if (n < 64)
+        {
+            const auto handle = pRenderTargetDescriptors[0];
+            auto heap = GetHeapByCpuHandleRTV(handle.ptr);
+            ResourceInfo info {};
+            ID3D12Resource* resource = nullptr;
+            if (heap != nullptr && heap->GetByCpuHandle(handle.ptr, info))
+                resource = info.buffer;
+            D3D12_RESOURCE_DESC desc {};
+            if (resource != nullptr)
+                desc = resource->GetDesc();
+            LOG_INFO("KCD2 world OM: #{} caller={} cmd={:X} targets={} first={:X} handle={:X} w={} h={} fmt={} "
+                     "dsv={:X}",
+                     n, Util::WhoIsTheCaller(_ReturnAddress()), reinterpret_cast<size_t>(This),
+                     NumRenderTargetDescriptors, reinterpret_cast<size_t>(resource), handle.ptr, desc.Width,
+                     desc.Height, static_cast<UINT>(desc.Format),
+                     pDepthStencilDescriptor != nullptr ? pDepthStencilDescriptor->ptr : 0);
+        }
+    }
+
     // KCD2's Scaleform pass is bracketed by CScaleformPlayback, but it can occur while the
     // generic HUD detector is intentionally inactive. Trace it before that detector's gate and
     // never alter the command list or descriptor handles. This establishes whether the UI uses
